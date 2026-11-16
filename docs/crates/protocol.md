@@ -1,0 +1,39 @@
+# harness-protocol
+
+The only interface between front-ends and the core: `Op` goes in, `Event` comes out.
+
+## Public API
+
+| Item | Purpose |
+|---|---|
+| `Op` | Requests into the core: create/resume session, submit input, interrupt, pause, resume, cancel, approve, compact, switch persona, fork, shutdown. Tagged `{"op": "…"}` |
+| `Decision`, `RuleScope` | Answers to approval requests (once, for session, always, deny) |
+| `InputItem` | Text, a file path, or an existing blob |
+| `Event` | Everything the core reports. Tagged `{"type": "…"}` |
+| `Event::kind` | Stable snake_case name, equal to the serialised tag; stored in `events.kind` |
+| `Event::is_persisted` | `false` only for streaming deltas (`text_delta`, `thinking_delta`, `tool_output`) |
+| `Envelope` | `{seq, ts, session, event}`: an event with its position in the log |
+| `TaskState` | The task state machine's states; `is_terminal()` for completed, failed and cancelled |
+| `HookOutcome`, `BlobOrText` | Supporting types for hook and tool events |
+
+## Example
+
+```rust
+use harness_protocol::{Event, Op};
+use harness_types::TaskId;
+
+let op = Op::Pause { task: TaskId::new() };
+assert!(serde_json::to_string(&op)?.contains("\"op\":\"pause\""));
+assert!(!Event::TextDelta { task: TaskId::new(), text: "Hi".into() }.is_persisted());
+# Ok::<(), serde_json::Error>(())
+```
+
+## Design notes
+
+- The same `Event` values are broadcast and stored, so the log replays exactly
+  what the UI saw. Final content is in `AssistantMessage` and `ToolFinished`;
+  deltas are display-only.
+- Events that the spec's flows rely on but Tech spec 3.3 did not list were added:
+  `UserInput`, `SystemNote`, `AssistantAborted`, `ApprovalResolved`,
+  `CompactionStarted`, `SegmentOpened`, `UndoApplied`. Without them a transcript
+  could not be rebuilt from the log.

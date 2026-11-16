@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+*.profraw
+lcov.info
+# harness runtime state (never commit)
+.harness/state.db*
+.harness/blobs/
+.harness/exports/
+.env
+.env.*

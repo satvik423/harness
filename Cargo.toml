@@ -1,0 +1,61 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/types",
+    "crates/protocol",
+    "crates/ports",
+    "crates/config",
+    "crates/testkit",
+    "crates/cli",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.100"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+# ---- internal crates (path dependencies) ----
+harness-types = { path = "crates/types" }
+harness-protocol = { path = "crates/protocol" }
+harness-ports = { path = "crates/ports" }
+harness-config = { path = "crates/config" }
+
+# ---- external crates: one version each, minimal features ----
+anyhow = "1.0.104"
+async-trait = "0.1.92"
+clap = { version = "4.6.7", features = ["derive"] }
+directories = "6.0.0"
+futures = { version = "0.3.34", default-features = false, features = ["std", "alloc"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", default-features = false }
+tokio-util = { version = "0.7.20", default-features = false }
+toml = "1.2.1"
+tracing = "0.1.44"
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["env-filter", "fmt", "std"] }
+ulid = { version = "3.0.0", features = ["serde"] }
+
+# ---- dev / test ----
+proptest = "1.12.0"
+tempfile = "3.27.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[profile.dev]
+debug = "line-tables-only"

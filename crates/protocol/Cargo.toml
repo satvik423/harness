@@ -1,0 +1,16 @@
+[package]
+name = "harness-protocol"
+description = "The harness wire protocol: Ops into the core, Events out of it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+harness-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

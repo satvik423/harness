@@ -1,0 +1,1101 @@
+<title>Understanding Harness</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap">
+<style>
+/* Layout: sticky left map of the 19 steps + one reading column; every concept card shows Claude Code (orange) beside Codex (blue), shared ideas in violet */
+:root{
+  --bg:#F3F5F9; --surface:#FFFFFF; --surface-2:#E9EEF5; --ink:#131A25; --muted:#586376; --line:#D3DAE5;
+  --cc:#B8501A; --cc-soft:#FBEADF; --cx:#1D5FCC; --cx-soft:#E0EAFB; --accent:#5844D4; --accent-soft:#EAE7FC;
+  --good:#17804F; --good-soft:#DFF3E8; --warn:#9A6210; --warn-soft:#FBF0DC; --bad:#B8322A; --bad-soft:#FBE3E1;
+  --code-bg:#121A28; --code-ink:#DCE4F0; --code-dim:#8494AD; --code-hi:#F2B47E;
+  --f-display:"Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --f-body:"Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono:"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0D1218; --surface:#141B25; --surface-2:#1B2431; --ink:#E4E9F0; --muted:#97A2B3; --line:#2A3443;
+    --cc:#F2894A; --cc-soft:#38220F; --cx:#6FA3FF; --cx-soft:#14264A; --accent:#A196FF; --accent-soft:#251F4C;
+    --good:#4FCB8E; --good-soft:#123324; --warn:#E8B04F; --warn-soft:#382A0E; --bad:#FF7B70; --bad-soft:#3D1715;
+    --code-bg:#080C12; --code-ink:#DCE4F0; --code-dim:#7686A0; --code-hi:#F5B987;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0D1218; --surface:#141B25; --surface-2:#1B2431; --ink:#E4E9F0; --muted:#97A2B3; --line:#2A3443;
+  --cc:#F2894A; --cc-soft:#38220F; --cx:#6FA3FF; --cx-soft:#14264A; --accent:#A196FF; --accent-soft:#251F4C;
+  --good:#4FCB8E; --good-soft:#123324; --warn:#E8B04F; --warn-soft:#382A0E; --bad:#FF7B70; --bad-soft:#3D1715;
+  --code-bg:#080C12; --code-ink:#DCE4F0; --code-dim:#7686A0; --code-hi:#F5B987;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:16px;line-height:1.62;
+  padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px));padding-block:0 64px}
+h1,h2,h3,h4{font-family:var(--f-display);line-height:1.2;text-wrap:balance;margin:0}
+p{margin:0}
+a{color:var(--accent)}
+a:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+code{font-family:var(--f-mono);font-size:.86em;background:var(--surface-2);padding:.08em .38em;border-radius:5px;overflow-wrap:anywhere}
+strong{font-weight:600}
+
+.shell{max-width:1240px;margin:0 auto;display:grid;grid-template-columns:230px minmax(0,1fr);gap:48px}
+@media (max-width:1060px){.shell{grid-template-columns:minmax(0,1fr)} .toc{display:none}}
+
+/* ---------- TOC ---------- */
+.toc{position:sticky;top:env(safe-area-inset-top,0px);align-self:start;max-height:100vh;overflow:auto;padding-block:28px;font-size:13px}
+.toc h4{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin:18px 0 6px;font-family:var(--f-body);font-weight:600}
+.toc a{display:flex;gap:8px;padding:4px 8px;border-radius:6px;color:var(--ink);text-decoration:none;line-height:1.35}
+.toc a span{font-family:var(--f-mono);color:var(--muted);font-size:11px;min-width:18px;padding-top:1px}
+.toc a:hover{background:var(--surface-2)}
+.toc a.on{background:var(--accent-soft);color:var(--accent)}
+.toc a.on span{color:var(--accent)}
+
+main{min-width:0;max-width:900px}
+
+/* ---------- HERO ---------- */
+.hero{padding-block:44px 28px;display:grid;gap:22px}
+.eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.hero h1{font-size:clamp(2.3rem,6vw,3.6rem);letter-spacing:-.02em}
+.hero h1 em{font-style:normal;color:var(--accent)}
+.hero .sub{font-size:1.14rem;color:var(--muted);max-width:62ch}
+.legend{display:flex;flex-wrap:wrap;gap:10px}
+.lg{display:inline-flex;align-items:center;gap:8px;font-size:13px;font-weight:500;padding:6px 12px;border-radius:999px;background:var(--surface);border:1px solid var(--line)}
+.dot{width:10px;height:10px;border-radius:50%;flex:none}
+.dot.cc{background:var(--cc)} .dot.cx{background:var(--cx)} .dot.ac{background:var(--accent)}
+
+.journey{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;background:var(--surface);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+.journey a{padding:16px 16px 18px;text-decoration:none;color:var(--ink);border-right:1px solid var(--line);display:grid;gap:4px;position:relative}
+.journey a:last-child{border-right:0}
+.journey a:hover{background:var(--surface-2)}
+.journey b{font-family:var(--f-display);font-size:15px}
+.journey small{color:var(--muted);font-size:12.5px;line-height:1.4}
+.journey .pl{font-family:var(--f-mono);font-size:11px;color:var(--accent);letter-spacing:.05em}
+.journey a:not(:last-child)::after{content:"";position:absolute;right:-7px;top:50%;width:12px;height:12px;background:var(--surface);border-top:1px solid var(--line);border-right:1px solid var(--line);transform:translateY(-50%) rotate(45deg);z-index:1}
+@media (max-width:640px){.journey{grid-template-columns:1fr 1fr}.journey a:nth-child(2){border-right:0}.journey a:nth-child(-n+2){border-bottom:1px solid var(--line)}.journey a::after{display:none}}
+
+.note{font-size:13px;color:var(--muted);border-left:3px solid var(--line);padding:2px 0 2px 12px}
+
+/* ---------- PART BANNER ---------- */
+.part{margin-top:64px;padding:22px 24px;border-radius:14px;background:var(--accent-soft);display:grid;gap:6px}
+.part .pl{font-family:var(--f-mono);font-size:12px;letter-spacing:.08em;color:var(--accent);text-transform:uppercase;font-weight:600}
+.part h2{font-size:1.7rem}
+.part p{color:var(--ink);opacity:.85;max-width:66ch}
+
+/* ---------- SECTION ---------- */
+.sec{padding-top:52px;display:grid;gap:20px;scroll-margin-top:12px}
+.sec-head{display:grid;grid-template-columns:auto minmax(0,1fr);gap:16px;align-items:start}
+.num{font-family:var(--f-mono);font-weight:600;font-size:14px;width:44px;height:44px;border-radius:12px;display:grid;place-items:center;background:var(--ink);color:var(--bg)}
+.sec-head h2{font-size:1.6rem;letter-spacing:-.01em}
+.builds{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.chip{font-size:11.5px;font-weight:500;padding:2px 9px;border-radius:999px;background:var(--surface-2);color:var(--muted);text-decoration:none;white-space:nowrap}
+a.chip:hover{color:var(--accent)}
+.lead{font-size:1.06rem;max-width:68ch}
+.sec > p, .sec .prose p{max-width:68ch}
+.prose{display:grid;gap:12px}
+h3{font-size:1.15rem}
+.sub-h{font-size:12px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);font-weight:600;font-family:var(--f-body)}
+
+/* ---------- PANELS ---------- */
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:20px}
+.diagram{overflow-x:auto}
+.diagram svg{display:block;min-width:620px;width:100%;height:auto}
+.cap{font-size:12.5px;color:var(--muted);margin-top:10px}
+
+.duo{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+@media (max-width:720px){.duo{grid-template-columns:minmax(0,1fr)}}
+.side{background:var(--surface);border:1px solid var(--line);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.side > header{padding:10px 16px;font-family:var(--f-display);font-weight:600;font-size:14px;display:flex;align-items:center;gap:8px}
+.side.cc > header{background:var(--cc-soft);color:var(--cc)}
+.side.cx > header{background:var(--cx-soft);color:var(--cx)}
+.side .body{padding:14px 16px 16px;display:grid;gap:10px;font-size:14.5px;min-width:0}
+.side ul{margin:0;padding-left:18px;display:grid;gap:5px}
+.side li::marker{color:var(--muted)}
+.side .tag{font-size:11.5px;font-weight:600;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+
+.usecase{border-radius:14px;padding:16px 18px;background:var(--good-soft);display:grid;gap:8px}
+.usecase .lbl{font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;font-weight:700;color:var(--good)}
+.usecase p{font-size:14.5px;max-width:none}
+.tip{border-radius:14px;padding:14px 18px;border:1.5px dashed var(--accent);display:grid;gap:6px;font-size:14.5px}
+.tip .lbl{font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;font-weight:700;color:var(--accent)}
+.warn{border-radius:14px;padding:14px 18px;background:var(--warn-soft);font-size:14.5px;display:grid;gap:6px}
+.warn .lbl{font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;font-weight:700;color:var(--warn)}
+
+pre.code{margin:0;background:var(--code-bg);color:var(--code-ink);font-family:var(--f-mono);font-size:12.5px;line-height:1.6;padding:14px 16px;border-radius:10px;overflow-x:auto;tab-size:2}
+pre.code .c{color:var(--code-dim)}
+pre.code .h{color:var(--code-hi)}
+pre.code .add{color:#7EE2A8} pre.code .del{color:#FF9C94}
+.fname{font-family:var(--f-mono);font-size:11.5px;color:var(--muted);margin-bottom:6px}
+
+/* grids */
+.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+@media (max-width:760px){.grid3{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:480px){.grid3,.grid2{grid-template-columns:minmax(0,1fr)}}
+.part-card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px;display:grid;gap:6px;align-content:start}
+.part-card .ic{width:34px;height:34px;border-radius:9px;background:var(--accent-soft);color:var(--accent);display:grid;place-items:center;font-family:var(--f-mono);font-weight:600;font-size:13px}
+.part-card h4{font-size:15px}
+.part-card p{font-size:13.5px;color:var(--muted)}
+.part-card .go{font-size:12px;color:var(--accent);font-weight:500}
+
+/* facts table */
+.facts{display:grid;grid-template-columns:minmax(110px,.6fr) minmax(0,1fr) minmax(0,1fr);border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--surface);font-size:14px}
+.facts > div{padding:10px 14px;border-bottom:1px solid var(--line);min-width:0}
+.facts > div:nth-last-child(-n+3){border-bottom:0}
+.facts .k{color:var(--muted);font-weight:500;background:var(--surface-2)}
+.facts .hd{font-family:var(--f-display);font-weight:600}
+.facts .hd.cc{color:var(--cc);background:var(--cc-soft)} .facts .hd.cx{color:var(--cx);background:var(--cx-soft)}
+.facts .hd.k{background:var(--surface-2)}
+
+/* comparison table */
+.tbl-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:var(--surface)}
+table.cmp{width:100%;border-collapse:collapse;font-size:14px;min-width:640px}
+table.cmp th,table.cmp td{padding:11px 14px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+table.cmp tr:last-child td{border-bottom:0}
+table.cmp thead th{font-family:var(--f-display);font-size:14px;position:sticky;top:0}
+table.cmp th.cc{background:var(--cc-soft);color:var(--cc)} table.cmp th.cx{background:var(--cx-soft);color:var(--cx)}
+table.cmp thead th:first-child{background:var(--surface-2);color:var(--muted)}
+table.cmp td:first-child{font-weight:600;width:20%;color:var(--ink)}
+
+/* context bar */
+.ctxbar{display:flex;height:46px;border-radius:10px;overflow:hidden;border:1px solid var(--line)}
+.ctxbar div{display:grid;place-items:center;font-size:11.5px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;padding:0 4px}
+.seg1{background:#5844D4}.seg2{background:#7A5BD9}.seg3{background:#2E8B77}.seg4{background:#58708F}.seg5{background:#2F6FD6}.seg6{background:#C0662D}
+.ctxlegend{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 18px;margin-top:16px}
+@media (max-width:600px){.ctxlegend{grid-template-columns:minmax(0,1fr)}}
+.ctxlegend div{display:grid;grid-template-columns:14px minmax(0,1fr);gap:10px;font-size:14px}
+.ctxlegend i{width:14px;height:14px;border-radius:4px;margin-top:4px}
+.ctxlegend b{display:block}
+.ctxlegend span{color:var(--muted);font-size:13px}
+
+/* window fill */
+.win{display:grid;gap:10px}
+.winrow{display:grid;grid-template-columns:110px minmax(0,1fr);gap:12px;align-items:center;font-size:13px}
+.winrow > span{color:var(--muted)}
+.winbar{display:flex;height:28px;border-radius:7px;overflow:hidden;background:var(--surface-2);border:1px solid var(--line)}
+.winbar div{display:grid;place-items:center;font-size:11px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden}
+
+/* gates */
+.gates{display:grid;grid-template-columns:1fr auto 1fr auto 1fr auto 1fr;align-items:stretch;gap:8px}
+.gate{border-radius:12px;padding:12px;font-size:13.5px;display:grid;gap:4px;align-content:start;border:1px solid var(--line);background:var(--surface)}
+.gate b{font-family:var(--f-display);font-size:14px}
+.gate.g1{border-color:var(--cc);background:var(--cc-soft)}
+.gate.g2{border-color:var(--cx);background:var(--cx-soft)}
+.arrow{display:grid;place-items:center;color:var(--muted);font-size:20px}
+@media (max-width:720px){.gates{grid-template-columns:minmax(0,1fr)}.arrow{transform:rotate(90deg);height:18px}}
+
+/* matrix */
+.matrix{display:grid;grid-template-columns:120px repeat(3,minmax(0,1fr));gap:6px;font-size:12.5px;min-width:600px}
+.matrix .h{font-family:var(--f-mono);font-size:12px;font-weight:600;padding:8px;color:var(--muted);display:flex;align-items:flex-end}
+.matrix .rh{font-family:var(--f-mono);font-size:12px;font-weight:600;padding:8px;color:var(--muted);display:flex;align-items:center}
+.matrix .cell{background:var(--surface-2);border-radius:8px;padding:9px 10px;line-height:1.4}
+.matrix .cell.pre{background:var(--cx-soft);outline:1.5px solid var(--cx)}
+.matrix .cell.pre b{color:var(--cx);display:block;font-family:var(--f-display);font-size:13px}
+.matrix .cell.danger{background:var(--bad-soft);outline:1.5px solid var(--bad)}
+.matrix .cell.danger b{color:var(--bad);display:block;font-family:var(--f-display);font-size:13px}
+
+.pills{display:flex;flex-wrap:wrap;gap:8px}
+.pill{font-size:13px;padding:6px 12px;border-radius:999px;border:1px solid var(--line);background:var(--surface);display:grid;line-height:1.3}
+.pill b{font-family:var(--f-mono);font-size:12px;color:var(--cc)}
+.pill span{color:var(--muted);font-size:12px}
+
+/* tree */
+.tree{font-family:var(--f-mono);font-size:12.5px;line-height:1.75;white-space:pre;overflow-x:auto}
+.tree .m{color:var(--muted)}
+.tree .o{color:var(--cc);font-weight:600}
+.tree .b{color:var(--cx);font-weight:600}
+
+/* steps */
+.steps{display:grid;gap:10px;counter-reset:s}
+.step{display:grid;grid-template-columns:34px minmax(0,1fr);gap:12px;align-items:start}
+.step::before{counter-increment:s;content:counter(s);width:30px;height:30px;border-radius:50%;background:var(--accent-soft);color:var(--accent);font-family:var(--f-mono);font-weight:600;font-size:13px;display:grid;place-items:center}
+.step p{font-size:14.5px}
+
+/* walkthrough */
+.walk{display:grid;gap:0;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--surface)}
+.wrow{display:grid;grid-template-columns:190px minmax(0,1fr) minmax(0,1fr);border-bottom:1px solid var(--line)}
+.wrow:last-child{border-bottom:0}
+.wrow > div{padding:12px 14px;font-size:13.5px;min-width:0}
+.wrow .what{background:var(--surface-2);display:grid;gap:2px;align-content:start}
+.wrow .what b{font-family:var(--f-display);font-size:14px}
+.wrow .what small{color:var(--muted);font-size:12px;line-height:1.4}
+.wrow .ccc{border-left:3px solid var(--cc)}
+.wrow .cxc{border-left:3px solid var(--cx)}
+.wrow.head > div{font-family:var(--f-display);font-weight:600;font-size:14px}
+.wrow.head .ccc{background:var(--cc-soft);color:var(--cc)} .wrow.head .cxc{background:var(--cx-soft);color:var(--cx)}
+.call{font-family:var(--f-mono);font-size:12px;background:var(--code-bg);color:var(--code-ink);padding:6px 9px;border-radius:7px;display:block;overflow-x:auto;white-space:pre;margin:4px 0}
+.badge{display:inline-block;font-size:11px;font-weight:600;padding:1px 8px;border-radius:999px;margin-top:4px}
+.badge.ask{background:var(--warn-soft);color:var(--warn)}
+.badge.auto{background:var(--good-soft);color:var(--good)}
+.badge.block{background:var(--bad-soft);color:var(--bad)}
+@media (max-width:760px){
+  .wrow{grid-template-columns:minmax(0,1fr)}
+  .wrow.head{display:none}
+  .wrow .ccc::before{content:"Claude Code";display:block;font-size:11px;font-weight:700;color:var(--cc);text-transform:uppercase;letter-spacing:.07em;margin-bottom:2px}
+  .wrow .cxc::before{content:"Codex";display:block;font-size:11px;font-weight:700;color:var(--cx);text-transform:uppercase;letter-spacing:.07em;margin-bottom:2px}
+}
+
+/* same list */
+.same{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+@media (max-width:560px){.same{grid-template-columns:minmax(0,1fr)}}
+.same div{display:grid;grid-template-columns:22px minmax(0,1fr);gap:8px;font-size:14px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.same div::before{content:"✓";color:var(--good);font-weight:700}
+
+/* steal */
+.steal{display:grid;gap:8px}
+.steal div{font-size:14px;display:grid;gap:2px;padding:10px 0;border-bottom:1px solid var(--line)}
+.steal div:last-child{border-bottom:0}
+.steal b{font-family:var(--f-display);font-size:14.5px}
+.steal span{color:var(--muted);font-size:13.5px}
+
+/* roadmap */
+.road{display:grid;gap:0;position:relative}
+.stage{display:grid;grid-template-columns:56px minmax(0,1fr);gap:16px;position:relative;padding-bottom:18px}
+.stage:not(:last-child)::after{content:"";position:absolute;left:27px;top:44px;bottom:0;width:2px;background:var(--line)}
+.stage .sn{width:56px;height:44px;border-radius:10px;background:var(--surface);border:1.5px solid var(--accent);color:var(--accent);display:grid;place-items:center;font-family:var(--f-mono);font-size:12px;font-weight:600;line-height:1.1;text-align:center}
+.stage .sb{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 16px;display:grid;gap:6px;min-width:0}
+.stage .sb h4{font-size:15.5px}
+.stage .sb p{font-size:14px}
+.stage .sb .from{display:flex;flex-wrap:wrap;gap:6px}
+.from .f{font-size:11.5px;padding:2px 9px;border-radius:999px;font-weight:500}
+.from .f.cc{background:var(--cc-soft);color:var(--cc)} .from .f.cx{background:var(--cx-soft);color:var(--cx)} .from .f.ac{background:var(--accent-soft);color:var(--accent)}
+
+/* svg tokens */
+svg .n-box{fill:var(--surface);stroke:var(--line);stroke-width:1.5}
+svg .n-model{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.5}
+svg .n-safe{fill:var(--warn-soft);stroke:var(--warn);stroke-width:1.5}
+svg .n-done{fill:var(--good-soft);stroke:var(--good);stroke-width:1.5}
+svg .n-you{fill:var(--ink)}
+svg .t1{fill:var(--ink);font-family:var(--f-display);font-weight:600;font-size:15px}
+svg .t2{fill:var(--muted);font-family:var(--f-body);font-size:12px}
+svg .t-you{fill:var(--bg);font-family:var(--f-display);font-weight:600;font-size:13px}
+svg .ln{stroke:var(--muted);stroke-width:1.6;fill:none}
+svg .ln-acc{stroke:var(--accent);stroke-width:2;fill:none}
+svg .lbl{fill:var(--muted);font-family:var(--f-mono);font-size:11.5px}
+svg .lbl-acc{fill:var(--accent);font-family:var(--f-mono);font-size:11.5px;font-weight:600}
+svg .ah{fill:var(--muted)} svg .ah-acc{fill:var(--accent)}
+svg .n-cc{fill:var(--cc-soft);stroke:var(--cc);stroke-width:1.5}
+svg .n-cx{fill:var(--cx-soft);stroke:var(--cx);stroke-width:1.5}
+svg .t-cc{fill:var(--cc);font-family:var(--f-display);font-weight:600;font-size:14px}
+svg .t-cx{fill:var(--cx);font-family:var(--f-display);font-weight:600;font-size:14px}
+
+.sources{font-size:13.5px;display:grid;gap:4px}
+.sources a{overflow-wrap:anywhere}
+footer{margin-top:56px;padding-top:20px;border-top:1px solid var(--line);font-size:13px;color:var(--muted);display:grid;gap:10px}
+
+@media (prefers-reduced-motion:no-preference){ html{scroll-behavior:smooth} }
+</style>
+
+<div class="shell">
+
+<nav class="toc" aria-label="Contents">
+  <h4>A · Foundations</h4>
+  <a href="#s1"><span>01</span>What a harness is</a>
+  <a href="#s2"><span>02</span>The agent loop</a>
+  <a href="#s3"><span>03</span>Anatomy: 9 parts</a>
+  <a href="#s4"><span>04</span>What the model sees</a>
+  <h4>B · Building blocks</h4>
+  <a href="#s5"><span>05</span>Tools</a>
+  <a href="#s6"><span>06</span>Editing files</a>
+  <a href="#s7"><span>07</span>Safety</a>
+  <a href="#s8"><span>08</span>Instructions &amp; memory</a>
+  <a href="#s9"><span>09</span>Context management</a>
+  <a href="#s10"><span>10</span>Planning</a>
+  <a href="#s11"><span>11</span>Extensibility</a>
+  <a href="#s12"><span>12</span>Sessions &amp; undo</a>
+  <a href="#s13"><span>13</span>Front-ends &amp; automation</a>
+  <h4>C · Side by side</h4>
+  <a href="#s14"><span>14</span>One task, two harnesses</a>
+  <a href="#s15"><span>15</span>What is the same</a>
+  <a href="#s16"><span>16</span>What is different</a>
+  <a href="#s17"><span>17</span>What to steal</a>
+  <h4>D · Build your own</h4>
+  <a href="#s18"><span>18</span>Roadmap</a>
+  <a href="#s19"><span>19</span>Your first loop</a>
+</nav>
+
+<main>
+
+<!-- ===================== HERO ===================== -->
+<header class="hero">
+  <div class="eyebrow">Claude Code vs Codex CLI · how the wrapper works</div>
+  <h1>Understanding <em>Harness</em></h1>
+  <p class="sub">The model is the brain. The harness is everything around it: the hands, the eyes, the rules and the memory. This guide builds up how a coding-agent harness works one layer at a time, with Claude Code and OpenAI's Codex CLI side by side at every step.</p>
+  <div class="legend">
+    <span class="lg"><i class="dot cc"></i>Claude Code (Anthropic)</span>
+    <span class="lg"><i class="dot cx"></i>Codex CLI (OpenAI)</span>
+    <span class="lg"><i class="dot ac"></i>General concept, true for any harness</span>
+  </div>
+  <nav class="journey" aria-label="Parts">
+    <a href="#partA"><span class="pl">PART A · 01–04</span><b>Foundations</b><small>What a harness is and the loop at its heart</small></a>
+    <a href="#partB"><span class="pl">PART B · 05–13</span><b>Building blocks</b><small>Each part, how each tool builds it, with a use case</small></a>
+    <a href="#partC"><span class="pl">PART C · 14–17</span><b>Side by side</b><small>One task traced through both, then the differences</small></a>
+    <a href="#partD"><span class="pl">PART D · 18–19</span><b>Build your own</b><small>A staged roadmap and a working first loop</small></a>
+  </nav>
+  <p class="note">Snapshot as of November 2026. Both tools ship new versions every week or two, and many features have converged during 2025–26. Flag and file names can change, so check the docs listed at the bottom before you rely on an exact name.</p>
+</header>
+
+<!-- ===================== PART A ===================== -->
+<div class="part" id="partA">
+  <span class="pl">Part A · Foundations</span>
+  <h2>What a harness is, and the loop that drives it</h2>
+  <p>Everything in Parts B–D builds on these four ideas. Read these first.</p>
+</div>
+
+<!-- 1 -->
+<section class="sec" id="s1">
+  <div class="sec-head"><div class="num">01</div><div><h2>What is a harness?</h2><div class="builds"><span class="chip">Starting point</span></div></div></div>
+  <p class="lead">A language model by itself can only do one thing: <strong>take text in and give text out.</strong> It cannot open a file, run a test, or remember yesterday. A <strong>harness</strong> is the program wrapped around the model that gives it those abilities.</p>
+
+  <div class="panel diagram">
+    <svg viewBox="0 0 760 230" role="img" aria-label="You talk to the harness. The harness talks to the model and to your computer.">
+      <defs>
+        <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah"/></marker>
+      </defs>
+      <rect x="20" y="80" width="110" height="64" rx="32" class="n-you"/>
+      <text x="75" y="117" text-anchor="middle" class="t-you">You</text>
+
+      <rect x="200" y="20" width="330" height="190" rx="16" class="n-box" style="stroke:var(--accent);stroke-dasharray:6 5"/>
+      <text x="216" y="44" class="lbl-acc">THE HARNESS</text>
+      <rect x="220" y="60" width="140" height="56" rx="10" class="n-box"/><text x="290" y="84" text-anchor="middle" class="t1">Context</text><text x="290" y="102" text-anchor="middle" class="t2">what to tell the model</text>
+      <rect x="370" y="60" width="140" height="56" rx="10" class="n-box"/><text x="440" y="84" text-anchor="middle" class="t1">Tools</text><text x="440" y="102" text-anchor="middle" class="t2">read, edit, run</text>
+      <rect x="220" y="130" width="140" height="56" rx="10" class="n-safe"/><text x="290" y="154" text-anchor="middle" class="t1">Rules</text><text x="290" y="172" text-anchor="middle" class="t2">what is allowed</text>
+      <rect x="370" y="130" width="140" height="56" rx="10" class="n-box"/><text x="440" y="154" text-anchor="middle" class="t1">Memory + UI</text><text x="440" y="172" text-anchor="middle" class="t2">sessions, screen</text>
+
+      <rect x="610" y="24" width="130" height="70" rx="12" class="n-model"/><text x="675" y="54" text-anchor="middle" class="t1">Model</text><text x="675" y="74" text-anchor="middle" class="t2">text in → text out</text>
+      <rect x="610" y="136" width="130" height="70" rx="12" class="n-box"/><text x="675" y="166" text-anchor="middle" class="t1">Your computer</text><text x="675" y="186" text-anchor="middle" class="t2">files, shell, web</text>
+
+      <path d="M132 112 L196 112" class="ln" marker-end="url(#a1)" marker-start="url(#a1)"/>
+      <path d="M532 70 L606 60" class="ln" marker-end="url(#a1)" marker-start="url(#a1)"/>
+      <path d="M532 160 L606 170" class="ln" marker-end="url(#a1)" marker-start="url(#a1)"/>
+      <text x="548" y="52" class="lbl">API calls</text>
+      <text x="548" y="194" class="lbl">tool runs</text>
+    </svg>
+    <p class="cap">The model never touches your computer directly. It only <em>asks</em>; the harness decides and does.</p>
+  </div>
+
+  <div class="grid2">
+    <div class="panel prose"><h3>An analogy</h3><p>The model is a brilliant chef locked in a room with no kitchen. The harness is the kitchen (tools), the recipe card on the wall (instructions), the health inspector (safety rules), the notebook of past orders (memory), and the waiter who carries messages to the customer (the UI).</p></div>
+    <div class="panel prose"><h3>Why it matters</h3><p>Put the <strong>same model</strong> in two different harnesses and you get two different agents. One might be careful and ask a lot. The other might work fast inside a locked box. That difference comes from harness design, and the rest of this guide is about that design.</p></div>
+  </div>
+
+  <h3>Meet the two harnesses</h3>
+  <div class="facts" role="table">
+    <div class="k hd" role="columnheader"></div><div class="hd cc" role="columnheader">Claude Code</div><div class="hd cx" role="columnheader">Codex CLI</div>
+    <div class="k">Made by</div><div>Anthropic</div><div>OpenAI</div>
+    <div class="k">Usual models</div><div>Claude models (Opus, Sonnet, Haiku)</div><div>OpenAI GPT / Codex-tuned models</div>
+    <div class="k">Written in</div><div>TypeScript on Node.js</div><div>Rust (<code>codex-rs</code>). The first 2025 version was TypeScript, and was rewritten.</div>
+    <div class="k">Source code</div><div>Not published. You learn it from docs, behaviour and the Agent SDK.</div><div>Open source (Apache-2.0) at <code>github.com/openai/codex</code>. You can read every line.</div>
+    <div class="k">Model API</div><div>Anthropic Messages API</div><div>OpenAI Responses API</div>
+    <div class="k">Where it runs</div><div>Terminal, VS Code / JetBrains, desktop app, web, Slack, CI</div><div>Terminal, VS Code-family IDEs, desktop app, Codex Cloud, GitHub</div>
+  </div>
+</section>
+
+<!-- 2 -->
+<section class="sec" id="s2">
+  <div class="sec-head"><div class="num">02</div><div><h2>The agent loop: the heart of every harness</h2><div class="builds"><a class="chip" href="#s1">Builds on 01 · harness</a></div></div></div>
+  <p class="lead">Under all the features, both Claude Code and Codex run the same simple loop. If you understand this diagram, you understand 80% of any harness.</p>
+
+  <div class="panel diagram">
+    <svg viewBox="0 0 760 300" role="img" aria-label="Agent loop: build request, call model, check for tool calls; if yes, safety check, run tool, add result, and loop back; if no, show the final answer.">
+      <defs>
+        <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="ah"/></marker>
+        <marker id="a2b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="ah-acc"/></marker>
+      </defs>
+      <rect x="30" y="6" width="120" height="28" rx="14" class="n-you"/><text x="90" y="25" text-anchor="middle" class="t-you">your prompt</text>
+      <path d="M90 36 L90 58" class="ln" marker-end="url(#a2)"/>
+
+      <rect x="20" y="62" width="150" height="72" rx="12" class="n-box"/><text x="95" y="90" text-anchor="middle" class="t1">1 · Build request</text><text x="95" y="110" text-anchor="middle" class="t2">system prompt, files,</text><text x="95" y="124" text-anchor="middle" class="t2">history, tool list</text>
+      <rect x="210" y="62" width="150" height="72" rx="12" class="n-model"/><text x="285" y="90" text-anchor="middle" class="t1">2 · Call model</text><text x="285" y="110" text-anchor="middle" class="t2">send everything</text><text x="285" y="124" text-anchor="middle" class="t2">to the API</text>
+      <rect x="400" y="62" width="150" height="72" rx="12" class="n-box"/><text x="475" y="90" text-anchor="middle" class="t1">3 · Tool calls?</text><text x="475" y="110" text-anchor="middle" class="t2">read the reply:</text><text x="475" y="124" text-anchor="middle" class="t2">text, or requests?</text>
+      <rect x="600" y="62" width="140" height="72" rx="12" class="n-done"/><text x="670" y="94" text-anchor="middle" class="t1">Done</text><text x="670" y="114" text-anchor="middle" class="t2">show final answer</text>
+
+      <rect x="400" y="206" width="150" height="72" rx="12" class="n-safe"/><text x="475" y="234" text-anchor="middle" class="t1">4 · Safety check</text><text x="475" y="254" text-anchor="middle" class="t2">allowed? ask you?</text><text x="475" y="268" text-anchor="middle" class="t2">sandboxed?</text>
+      <rect x="210" y="206" width="150" height="72" rx="12" class="n-box"/><text x="285" y="234" text-anchor="middle" class="t1">5 · Run the tool</text><text x="285" y="254" text-anchor="middle" class="t2">shell, edit, search,</text><text x="285" y="268" text-anchor="middle" class="t2">fetch a web page…</text>
+      <rect x="20" y="206" width="150" height="72" rx="12" class="n-box"/><text x="95" y="234" text-anchor="middle" class="t1">6 · Add result</text><text x="95" y="254" text-anchor="middle" class="t2">append output to</text><text x="95" y="268" text-anchor="middle" class="t2">the history</text>
+
+      <path d="M172 98 L206 98" class="ln" marker-end="url(#a2)"/>
+      <path d="M362 98 L396 98" class="ln" marker-end="url(#a2)"/>
+      <path d="M552 98 L596 98" class="ln" marker-end="url(#a2)"/><text x="558" y="90" class="lbl">no</text>
+      <path d="M475 136 L475 202" class="ln" marker-end="url(#a2)"/><text x="483" y="174" class="lbl">yes</text>
+      <path d="M398 242 L364 242" class="ln" marker-end="url(#a2)"/>
+      <path d="M208 242 L174 242" class="ln" marker-end="url(#a2)"/>
+      <path d="M95 204 L95 138" class="ln-acc" marker-end="url(#a2b)"/><text x="103" y="176" class="lbl-acc">loop again</text>
+    </svg>
+    <p class="cap">One message from you can trigger 5, 20 or 100 trips around this loop. Each trip is one model call, often called a "turn" or "step".</p>
+  </div>
+
+  <div class="duo">
+    <div class="panel prose">
+      <h3>The loop in plain code</h3>
+      <pre class="code">history = [your_prompt]
+<span class="h">while True</span>:
+    reply = model(system_prompt, tools, history)
+    history.append(reply)
+    <span class="h">if</span> reply has no tool calls:
+        show(reply.text); <span class="h">break</span>     <span class="c"># Done</span>
+    <span class="h">for</span> call <span class="h">in</span> reply.tool_calls:
+        <span class="h">if</span> not allowed(call):        <span class="c"># Safety</span>
+            result = <span class="h">"denied"</span>
+        <span class="h">else</span>:
+            result = run(call)       <span class="c"># Run tool</span>
+        history.append(result)       <span class="c"># Add result</span></pre>
+    </div>
+    <div class="panel prose">
+      <h3>Four facts that shape everything</h3>
+      <div class="steps">
+        <div class="step"><p><strong>The model never runs anything.</strong> It writes a structured request ("call <code>read_file</code> with path X"). The harness carries it out.</p></div>
+        <div class="step"><p><strong>The model is stateless.</strong> Every call re-sends the whole history. That is why context size and cost matter (see 09).</p></div>
+        <div class="step"><p><strong>The model decides when to stop</strong>, by replying with plain text and no tool calls.</p></div>
+        <div class="step"><p><strong>One reply can hold several tool calls.</strong> A good harness runs safe ones, such as reads, in parallel.</p></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="tip"><span class="lbl">If you build one</span><p>Your first harness can be this loop plus one tool, "run a shell command". That really is an agent. Every feature in Part B is an improvement to one box in this diagram.</p></div>
+</section>
+
+<!-- 3 -->
+<section class="sec" id="s3">
+  <div class="sec-head"><div class="num">03</div><div><h2>Anatomy: the 9 parts of a harness</h2><div class="builds"><a class="chip" href="#s2">Builds on 02 · the loop</a></div></div></div>
+  <p class="lead">Each box of the loop grows into a subsystem. This is the map for Part B: every card below gets its own section.</p>
+  <div class="grid3">
+    <div class="part-card"><div class="ic">A</div><h4>Context builder</h4><p>Puts the request together: system prompt, project instructions, environment facts, history.</p><a class="go" href="#s8">→ 04, 08</a></div>
+    <div class="part-card"><div class="ic">B</div><h4>Tool registry</h4><p>The list of tools the model may call, each with a name, a description and an input schema.</p><a class="go" href="#s5">→ 05</a></div>
+    <div class="part-card"><div class="ic">C</div><h4>Executor</h4><p>Actually runs the tool: spawns the shell, applies the edit, fetches the URL, captures output.</p><a class="go" href="#s6">→ 05, 06</a></div>
+    <div class="part-card"><div class="ic">D</div><h4>Safety layer</h4><p>Decides allow, ask or deny, and may wrap execution in an OS sandbox.</p><a class="go" href="#s7">→ 07</a></div>
+    <div class="part-card"><div class="ic">E</div><h4>Context manager</h4><p>Keeps the history inside the model's window: caching, truncating, summarising.</p><a class="go" href="#s9">→ 09</a></div>
+    <div class="part-card"><div class="ic">F</div><h4>Planner</h4><p>Helps the model break big work into steps and shows you its progress.</p><a class="go" href="#s10">→ 10</a></div>
+    <div class="part-card"><div class="ic">G</div><h4>Extension points</h4><p>Ways for you to add behaviour: hooks, skills, subagents, MCP servers, plugins.</p><a class="go" href="#s11">→ 11</a></div>
+    <div class="part-card"><div class="ic">H</div><h4>Session store</h4><p>Saves transcripts so you can resume, fork or rewind work later.</p><a class="go" href="#s12">→ 12</a></div>
+    <div class="part-card"><div class="ic">I</div><h4>Front-ends</h4><p>The terminal UI, headless mode, IDE plugins and SDKs, all driving the same core.</p><a class="go" href="#s13">→ 13</a></div>
+  </div>
+</section>
+
+<!-- 4 -->
+<section class="sec" id="s4">
+  <div class="sec-head"><div class="num">04</div><div><h2>What the model actually sees on each call</h2><div class="builds"><a class="chip" href="#s2">Builds on 02 · stateless model</a><a class="chip" href="#s3">03 · context builder</a></div></div></div>
+  <p class="lead">Because the model is stateless (fact 2), the harness sends one big package on <em>every</em> call. Here is what is inside, partway through a typical session.</p>
+  <div class="panel">
+    <div class="ctxbar" aria-label="Illustrative split of a request">
+      <div class="seg1" style="width:9%">sys</div>
+      <div class="seg2" style="width:13%">tools</div>
+      <div class="seg3" style="width:5%">md</div>
+      <div class="seg4" style="width:3%"></div>
+      <div class="seg5" style="width:42%">conversation so far</div>
+      <div class="seg6" style="width:28%">tool results</div>
+    </div>
+    <p class="cap">Illustrative proportions. Early in a session the fixed parts dominate. Later the history and tool output take over.</p>
+    <div class="ctxlegend">
+      <div><i class="seg1"></i><p><b>System prompt</b><span>The harness's built-in "personality" and rules: how to use tools, coding style, safety behaviour, when to stop. Written by Anthropic or OpenAI. It is the biggest single reason the same model acts differently in each harness.</span></p></div>
+      <div><i class="seg2"></i><p><b>Tool definitions</b><span>A JSON schema for every tool: name, description, parameters. More tools means more tokens on every call.</span></p></div>
+      <div><i class="seg3"></i><p><b>Instruction files</b><span><code>CLAUDE.md</code> or <code>AGENTS.md</code>: your project's rules ("use pnpm", "run make test"). See 08.</span></p></div>
+      <div><i class="seg4"></i><p><b>Environment facts</b><span>Working folder, OS, date, git branch and status. Codex also states the sandbox and approval mode, so the model knows its limits.</span></p></div>
+      <div><i class="seg5"></i><p><b>Conversation</b><span>Your messages and the model's earlier replies and tool calls.</span></p></div>
+      <div><i class="seg6"></i><p><b>Tool results</b><span>File contents, command output, search hits. This part grows fastest and is what fills the window.</span></p></div>
+    </div>
+  </div>
+  <div class="duo">
+    <div class="panel prose">
+      <h3>What a tool definition looks like</h3>
+      <pre class="code">{
+  <span class="h">"name"</span>: "read_file",
+  <span class="h">"description"</span>: "Read a text file. Returns lines
+                  with line numbers.",
+  <span class="h">"input_schema"</span>: {
+    "type": "object",
+    "properties": {
+      "path":   { "type": "string" },
+      "offset": { "type": "integer" }
+    },
+    "required": ["path"]
+  }
+}</pre>
+    </div>
+    <div class="panel prose">
+      <h3>What the model sends back</h3>
+      <pre class="code">{
+  <span class="h">"type"</span>: "tool_use",
+  <span class="h">"id"</span>: "call_01",
+  <span class="h">"name"</span>: "read_file",
+  <span class="h">"input"</span>: { "path": "src/auth.ts" }
+}</pre>
+      <p style="font-size:14px">The harness runs it and answers with a <code>tool_result</code> that carries the same <code>id</code>. Anthropic's API calls these <code>tool_use</code> / <code>tool_result</code>. OpenAI's Responses API calls them <code>function_call</code> / <code>function_call_output</code>. The idea is identical.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== PART B ===================== -->
+<div class="part" id="partB">
+  <span class="pl">Part B · Building blocks</span>
+  <h2>Each part of the harness, built two ways</h2>
+  <p>Every section follows the same shape: the problem, how Claude Code solves it, how Codex solves it, a real use case, and a tip for your own build.</p>
+</div>
+
+<!-- 5 -->
+<section class="sec" id="s5">
+  <div class="sec-head"><div class="num">05</div><div><h2>Tools: the model's hands</h2><div class="builds"><a class="chip" href="#s3">Builds on 03 · tool registry, executor</a><a class="chip" href="#s4">04 · tool definitions</a></div></div></div>
+  <p class="lead">The first big design choice is whether to give the model <strong>many specialised tools</strong> or <strong>one powerful shell</strong> and let it use Unix commands. The two harnesses lean opposite ways.</p>
+  <div class="duo">
+    <div class="side cc"><header><i class="dot cc"></i>Claude Code: many dedicated tools</header><div class="body">
+      <ul>
+        <li><code>Read</code>: files with line numbers, plus images, PDFs and notebooks</li>
+        <li><code>Write</code> and <code>Edit</code>: create or change files (see 06)</li>
+        <li><code>Glob</code> finds files by pattern. <code>Grep</code> searches content, built on ripgrep.</li>
+        <li><code>Bash</code>: run commands, with a background mode for servers and long jobs</li>
+        <li><code>WebFetch</code> and <code>WebSearch</code></li>
+        <li><code>Agent</code>: start a subagent (see 09, 11)</li>
+        <li><code>TodoWrite</code>, plan mode, <code>AskUserQuestion</code> (see 10)</li>
+        <li><code>Skill</code>, <code>NotebookEdit</code>, MCP tools, and <strong>tool search</strong>, which loads rarely used tools only when needed</li>
+      </ul>
+    </div></div>
+    <div class="side cx"><header><i class="dot cx"></i>Codex: a small set, shell first</header><div class="body">
+      <ul>
+        <li><code>shell</code> / <code>exec_command</code>: run commands. "Unified exec" gives each process a real terminal (PTY), so the model can keep a process alive and type into it later (<code>write_stdin</code>).</li>
+        <li><code>apply_patch</code>: edit files with a diff (see 06)</li>
+        <li><code>update_plan</code>: a checklist (see 10)</li>
+        <li><code>view_image</code>, optional <code>web_search</code>, MCP tools, and in newer versions subagent tools</li>
+        <li>No separate read or search tools. The model runs <code>rg</code>, <code>cat</code>, <code>sed -n</code> and <code>ls</code> in the shell.</li>
+      </ul>
+    </div></div>
+  </div>
+  <div class="tbl-wrap"><table class="cmp">
+    <thead><tr><th>Trade-off</th><th class="cc">Many tools (Claude Code)</th><th class="cx">Shell first (Codex)</th></tr></thead>
+    <tbody>
+      <tr><td>Safety checks</td><td>Easy. "Allow every <code>Read</code>, ask for <code>Bash</code>" is a simple rule.</td><td>Hard to judge a raw command string, so Codex relies on the OS sandbox (07).</td></tr>
+      <tr><td>Output quality</td><td>Structured, truncated sensibly, with line numbers built in.</td><td>Whatever the command prints. The harness truncates long output.</td></tr>
+      <tr><td>Prompt size</td><td>More tool schemas sent on every call. Tool search reduces this.</td><td>Very small tool list.</td></tr>
+      <tr><td>Flexibility</td><td>Bash is still there for anything else.</td><td>Anything the shell can do, including interactive programs through the PTY.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="usecase"><span class="lbl">Use case · "Where is the login token checked?"</span>
+    <p><b style="color:var(--cc)">Claude Code:</b> <code>Grep(pattern="validateToken")</code> returns 3 files, then <code>Read("src/auth.ts", offset=40, limit=50)</code>. Both are read-only, so they can run without asking.</p>
+    <p><b style="color:var(--cx)">Codex:</b> <code>shell: rg -n validateToken</code>, then <code>shell: sed -n '40,90p' src/auth.ts</code>. They run inside the sandbox, which allows reading, so no prompt appears.</p>
+  </div>
+  <div class="tip"><span class="lbl">If you build one</span><p>Start with <code>run_shell</code> only. Then add <code>read_file</code> and <code>edit_file</code>. You will notice that dedicated tools make the model more reliable and make permission rules much easier to write.</p></div>
+</section>
+
+<!-- 6 -->
+<section class="sec" id="s6">
+  <div class="sec-head"><div class="num">06</div><div><h2>Editing files: find-and-replace vs patches</h2><div class="builds"><a class="chip" href="#s5">Builds on 05 · tools</a></div></div></div>
+  <p class="lead">Changing code is the most important thing a coding agent does. A bad edit format means broken files. The two harnesses use very different formats.</p>
+  <div class="duo">
+    <div class="side cc"><header><i class="dot cc"></i>Claude Code: exact string replace</header><div class="body">
+      <pre class="code">Edit(
+  file_path  = "src/auth.ts",
+  old_string = "if (token.exp &lt; now)",
+  new_string = "if (token.exp &lt;= now)"
+)</pre>
+      <ul>
+        <li><code>old_string</code> must appear <strong>exactly once</strong>, or the edit fails. A <code>replace_all</code> flag is available.</li>
+        <li><strong>Read-before-edit guard:</strong> the harness refuses an Edit on a file the model has not Read in this session, and also when the file changed on disk since it was read. This stops edits based on a guess.</li>
+        <li><code>Write</code> creates a new file or replaces a whole file.</li>
+        <li>One file per call. Several Edit calls can be sent at once.</li>
+      </ul>
+    </div></div>
+    <div class="side cx"><header><i class="dot cx"></i>Codex: <code>apply_patch</code> diffs</header><div class="body">
+      <pre class="code">*** Begin Patch
+*** Update File: src/auth.ts
+@@ function validateToken
+<span class="del">-  if (token.exp &lt; now) return false;</span>
+<span class="add">+  if (token.exp &lt;= now) return false;</span>
+*** Add File: src/auth.test.ts
+<span class="add">+import { validateToken } from "./auth";</span>
+*** End Patch</pre>
+      <ul>
+        <li>A custom diff format the OpenAI models are trained on.</li>
+        <li>One call can <strong>update, add, delete and move</strong> several files.</li>
+        <li>The <code>@@</code> line and the context lines locate the change, so line numbers are not needed. The harness matches the context loosely to allow for whitespace drift.</li>
+        <li>The patch is checked against the sandbox's writable paths before it is applied.</li>
+      </ul>
+    </div></div>
+  </div>
+  <div class="usecase"><span class="lbl">Use case · rename <code>getUser</code> to <code>fetchUser</code> in 3 files</span>
+    <p><b style="color:var(--cx)">Codex:</b> one <code>apply_patch</code> call with three <code>*** Update File</code> sections. It is one atomic step that you review once.</p>
+    <p><b style="color:var(--cc)">Claude Code:</b> Read each file, then three <code>Edit</code> calls, which can go in parallel. Each edit is small and checked, and you can approve them one at a time.</p>
+  </div>
+  <div class="tip"><span class="lbl">If you build one</span><p>Implement string replace first. It takes about 20 lines and fails loudly, which is good. Add the "must have read the file, and it hasn't changed since" check: store a hash or mtime when the file is read. A patch parser is a great second project. Codex's <code>apply-patch</code> crate is open source and readable.</p></div>
+</section>
+
+<!-- 7 -->
+<section class="sec" id="s7">
+  <div class="sec-head"><div class="num">07</div><div><h2>Safety: ask first, or build walls?</h2><div class="builds"><a class="chip" href="#s2">Builds on 02 · safety box</a><a class="chip" href="#s5">05 · shell vs tools</a></div></div></div>
+  <p class="lead">The model might run <code>rm -rf</code>, read your <code>.env</code>, or send data to the internet, whether by mistake or because a web page tricked it (prompt injection). A harness has two kinds of defence. Claude Code leads with the first, Codex with the second, and both now offer both.</p>
+  <div class="panel">
+    <div class="gates">
+      <div class="gate"><b>Model asks</b><span>"run <code>curl x.sh | sh</code>"</span></div>
+      <div class="arrow" aria-hidden="true">→</div>
+      <div class="gate g1"><b>Gate 1 · Rules &amp; approvals</b><span><em>Before</em> running: does a rule allow it? Should a human be asked?</span><span style="color:var(--cc);font-weight:600;font-size:12px">Claude Code leans here</span></div>
+      <div class="arrow" aria-hidden="true">→</div>
+      <div class="gate g2"><b>Gate 2 · OS sandbox</b><span><em>While</em> running: the kernel blocks writes outside the project and blocks the network.</span><span style="color:var(--cx);font-weight:600;font-size:12px">Codex leans here</span></div>
+      <div class="arrow" aria-hidden="true">→</div>
+      <div class="gate"><b>Your machine</b><span>files, network, secrets</span></div>
+    </div>
+  </div>
+
+  <div class="duo">
+    <div class="side cc"><header><i class="dot cc"></i>Claude Code: permission rules first</header><div class="body">
+      <span class="tag">Rules in settings.json</span>
+      <pre class="code">{ "permissions": {
+  "allow": ["Bash(npm run test:*)", "Edit(src/**)"],
+  "ask":   ["Bash(git push:*)"],
+  "deny":  ["Read(./.env)", "Bash(curl:*)"]
+} }</pre>
+      <span class="tag">Permission modes (Shift+Tab cycles)</span>
+      <div class="pills">
+        <span class="pill"><b>default</b><span>asks for edits and commands</span></span>
+        <span class="pill"><b>acceptEdits</b><span>edits auto, commands ask</span></span>
+        <span class="pill"><b>plan</b><span>read-only, plans first</span></span>
+        <span class="pill"><b>auto</b><span>a classifier approves safe actions</span></span>
+        <span class="pill"><b>bypassPermissions</b><span>never asks</span></span>
+      </div>
+      <ul>
+        <li>Choosing "Yes, don't ask again" in a prompt <strong>saves a new allow rule</strong>.</li>
+        <li><code>PreToolUse</code> hooks can block anything with your own script (11).</li>
+        <li>Optional <strong>Bash sandbox</strong>: bubblewrap on Linux, Seatbelt on macOS, with filesystem limits and a network domain allowlist.</li>
+      </ul>
+    </div></div>
+    <div class="side cx"><header><i class="dot cx"></i>Codex: OS sandbox first</header><div class="body">
+      <span class="tag">Two independent dials in config.toml</span>
+      <pre class="code">sandbox_mode    = "workspace-write"
+approval_policy = "on-request"
+
+[sandbox_workspace_write]
+network_access = false   <span class="c"># default: off</span></pre>
+      <ul>
+        <li>The <strong>sandbox</strong> is enforced by the OS kernel: Seatbelt on macOS, bubblewrap with Landlock and seccomp on Linux, and a dedicated Windows sandbox. Even <code>bash -c</code> tricks cannot escape it.</li>
+        <li><strong>Exec-policy rules</strong>: Starlark <code>.rules</code> files in <code>~/.codex/rules/</code> mark command prefixes as allow, prompt or forbidden. When rules overlap, the strictest one wins.</li>
+        <li>Newer versions add <strong>smart approvals</strong>, where a guardian subagent reviews risky requests, and permission profiles that split filesystem and network policy.</li>
+      </ul>
+      <pre class="code">prefix_rule(pattern=["git","push"], decision="prompt")
+prefix_rule(pattern=["rm","-rf"],   decision="forbidden")</pre>
+    </div></div>
+  </div>
+
+  <h3>Codex's two dials, as a grid</h3>
+  <div class="panel diagram">
+    <div class="matrix">
+      <div class="h">approval ↓ / sandbox →</div><div class="h">read-only</div><div class="h">workspace-write</div><div class="h">danger-full-access</div>
+      <div class="rh">untrusted</div><div class="cell">Reads only. Asks before almost any command.</div><div class="cell">Can edit the project. Asks before any command not on the trusted list.</div><div class="cell">No walls, but asks often.</div>
+      <div class="rh">on-request</div><div class="cell pre"><b>Read Only preset</b>Explores freely. Asks before editing or going further.</div><div class="cell pre"><b>Auto preset (usual default)</b>Edits and runs inside the project. Asks to leave it or to use the network.</div><div class="cell">No walls. The model asks when it judges something risky.</div>
+      <div class="rh">never</div><div class="cell">Never asks, can't change anything. Good for CI analysis.</div><div class="cell">Never asks, works inside the walls. Good for <code>codex exec</code> in CI.</div><div class="cell danger"><b>Full Access / --yolo</b>No walls, no questions. Use only in a throwaway VM or container.</div>
+    </div>
+    <p class="cap">Sandbox = what is <em>possible</em>. Approval = when a human is <em>asked</em>. Keeping them separate is one of Codex's cleanest ideas.</p>
+  </div>
+
+  <div class="usecase"><span class="lbl">Use case · the test suite tries to download a package</span>
+    <p><b style="color:var(--cx)">Codex (Auto):</b> <code>npm test</code> starts without a prompt, because running inside the project is allowed. The download fails: the kernel has blocked the network. The model sees the error and asks to re-run with escalated permissions. You approve once.</p>
+    <p><b style="color:var(--cc)">Claude Code (default):</b> before running, it asks "Allow <code>Bash(npm test)</code>?". You pick "Yes, don't ask again" and it becomes a rule. The download works unless you turned on the Bash sandbox.</p>
+  </div>
+  <div class="warn"><span class="lbl">The core lesson</span><p>Rules are easy to understand, but they are only as good as their pattern matching: <code>Bash(curl:*)</code> does not catch <code>python -c "urllib..."</code>. A sandbox is very strong, but it is per-OS and harder to build. Serious harnesses use both: rules for convenience, a sandbox as the last wall.</p></div>
+  <div class="tip"><span class="lbl">If you build one</span><p>You are on Linux, so you can build Gate 2 with one command. <code>bwrap --ro-bind / / --bind "$PWD" "$PWD" --tmpfs /tmp --dev /dev --proc /proc --unshare-net --die-with-parent sh -c "$CMD"</code> gives you a read-only system, a writable project and no network. That is roughly Codex's <code>workspace-write</code> mode.</p></div>
+</section>
+
+<!-- 8 -->
+<section class="sec" id="s8">
+  <div class="sec-head"><div class="num">08</div><div><h2>Instructions &amp; memory: CLAUDE.md vs AGENTS.md</h2><div class="builds"><a class="chip" href="#s4">Builds on 04 · instruction files</a></div></div></div>
+  <p class="lead">Every project has rules the model can't guess: "use pnpm", "tests live in <code>/spec</code>", "never touch <code>legacy/</code>". Both harnesses read a Markdown file and inject it into every request. They differ in where they look and in what else they remember.</p>
+  <div class="duo">
+    <div class="side cc"><header><i class="dot cc"></i>Claude Code: CLAUDE.md + memory</header><div class="body">
+<div class="tree"><span class="m">/etc or managed policy</span>   <span class="o">CLAUDE.md</span>  <span class="m">org-wide</span>
+<span class="m">~/.claude/</span><span class="o">CLAUDE.md</span>          <span class="m">you, all projects</span>
+<span class="m">repo/</span><span class="o">CLAUDE.md</span>               <span class="m">team, committed</span>
+<span class="m">repo/.claude/</span><span class="o">CLAUDE.md</span>       <span class="m">also team</span>
+<span class="m">repo/src/api/</span><span class="o">CLAUDE.md</span>       <span class="m">loaded when Claude</span>
+                              <span class="m">works in that folder</span></div>
+      <ul>
+        <li><code>@path/to/file</code> imports another file into it.</li>
+        <li><code>/init</code> writes a first CLAUDE.md by scanning the repo. <code>/memory</code> opens it for editing.</li>
+        <li><strong>Auto memory:</strong> Claude can save its own notes, such as your preferences or project facts, to a memory folder. An index of them loads each session.</li>
+      </ul>
+    </div></div>
+    <div class="side cx"><header><i class="dot cx"></i>Codex: AGENTS.md (open standard)</header><div class="body">
+<div class="tree"><span class="m">~/.codex/</span><span class="b">AGENTS.md</span>           <span class="m">you, all projects</span>
+<span class="m">repo/</span><span class="b">AGENTS.md</span>                <span class="m">team, committed</span>
+<span class="m">repo/pkg/</span><span class="b">AGENTS.md</span>            <span class="m">each folder from root</span>
+<span class="m">repo/pkg/web/</span><span class="b">AGENTS.md</span>        <span class="m">down to where you are</span>
+<span class="m">any level:</span> <span class="b">AGENTS.override.md</span> <span class="m">replaces, not adds</span></div>
+      <ul>
+        <li><strong>AGENTS.md</strong> is a cross-tool convention that many coding agents read, so one file works across tools.</li>
+        <li>Files are concatenated from the root down, so deeper files can refine earlier ones. A byte cap (<code>project_doc_max_bytes</code>) keeps it from growing out of control.</li>
+        <li><code>/init</code> writes a first AGENTS.md.</li>
+      </ul>
+    </div></div>
+  </div>
+  <div class="usecase"><span class="lbl">Use case · a monorepo with a Python backend and a React frontend</span>
+    <p>The root file says "Run <code>make check</code> before finishing." <code>backend/</code> has its own file ("use <code>uv</code>, type-hint everything") and <code>frontend/</code> another ("use pnpm, no default exports"). When the agent works in <code>frontend/</code>, both harnesses combine the root rules with the frontend rules. Claude Code loads the subfolder file when it touches files there. Codex walks the path from the root to the working folder when the session starts.</p>
+  </div>
+  <div class="tip"><span class="lbl">If you build one</span><p>Read <code>AGENTS.md</code>, since it is the shared convention. Walk from the git root to the working folder, concatenate the files, and put the result early in the prompt, after the system prompt. A stable position keeps prompt caching working (09).</p></div>
+</section>
+
+<!-- 9 -->
+<section class="sec" id="s9">
+  <div class="sec-head"><div class="num">09</div><div><h2>Context management: fitting a long job in a fixed window</h2><div class="builds"><a class="chip" href="#s2">Builds on 02 · stateless</a><a class="chip" href="#s4">04 · request package</a></div></div></div>
+  <p class="lead">Every call re-sends everything (fact 2), and tool results pile up fast. Without care, a long session gets slow, expensive, and eventually overflows the model's context window. These are the five standard techniques.</p>
+  <div class="panel win">
+    <div class="winrow"><span>Turn 5</span><div class="winbar"><div class="seg1" style="width:18%">fixed</div><div class="seg5" style="width:12%">history</div></div></div>
+    <div class="winrow"><span>Turn 40</span><div class="winbar"><div class="seg1" style="width:18%">fixed</div><div class="seg5" style="width:40%">history</div><div class="seg6" style="width:34%">tool results</div></div></div>
+    <div class="winrow"><span>Near limit</span><div class="winbar"><div class="seg1" style="width:18%">fixed</div><div class="seg5" style="width:44%">history</div><div class="seg6" style="width:36%">tool results</div></div></div>
+    <div class="winrow"><span>After compact</span><div class="winbar"><div class="seg1" style="width:18%">fixed</div><div class="seg3" style="width:9%">summary</div><div class="seg6" style="width:8%">recent</div></div></div>
+    <p class="cap">Compaction asks the model to summarise the old history ("goal, decisions, files changed, next steps"), then replaces the history with that summary and the most recent messages.</p>
+  </div>
+  <div class="grid3">
+    <div class="part-card"><div class="ic">1</div><h4>Prompt caching</h4><p>If the start of the request is identical to the last call, the provider reuses its work, which is cheaper and faster. That is why the system prompt and tools stay fixed and new content goes at the end.</p></div>
+    <div class="part-card"><div class="ic">2</div><h4>Compaction</h4><p>Summarise old history when the window gets full. It can run automatically, or by hand with <code>/compact</code> in both tools.</p></div>
+    <div class="part-card"><div class="ic">3</div><h4>Truncation</h4><p>Cut huge tool outputs, such as a 50,000-line log, keeping the head and tail. Both harnesses cap output size.</p></div>
+    <div class="part-card"><div class="ic">4</div><h4>Subagents</h4><p>Hand a messy search to a child agent with its own empty window. Only its short report comes back to the parent.</p></div>
+    <div class="part-card"><div class="ic">5</div><h4>Lazy loading</h4><p>Show only a one-line description of each skill or rarely used tool, and load the full content when it is actually needed.</p></div>
+    <div class="part-card"><div class="ic">+</div><h4>Show usage</h4><p>Claude Code's <code>/context</code> draws a breakdown of the window. Codex's <code>/status</code> shows token usage.</p></div>
+  </div>
+  <div class="duo">
+    <div class="side cc"><header><i class="dot cc"></i>Claude Code</header><div class="body"><ul>
+      <li>Auto-compact near the limit. <code>/compact focus on the auth work</code> lets you steer the summary.</li>
+      <li>Explicit prompt-cache breakpoints in the Messages API.</li>
+      <li>Subagents (<code>Agent</code> tool) are central: the built-in Explore and Plan agents keep file dumps out of the main window.</li>
+      <li>Skills and deferred tools load lazily through tool search.</li>
+    </ul></div></div>
+    <div class="side cx"><header><i class="dot cx"></i>Codex</header><div class="body"><ul>
+      <li>Auto-compaction through the Responses API, which can return an encrypted, compressed summary item.</li>
+      <li>Reasoning items (the model's hidden thinking) are carried between turns in encrypted form, so the model doesn't "forget why" mid-task.</li>
+      <li>Automatic prefix caching on OpenAI's side.</li>
+      <li>Shell output is truncated before it enters history. Subagents were added in 2026.</li>
+    </ul></div></div>
+  </div>
+  <div class="usecase"><span class="lbl">Use case · "Find every place we call the old payments API"</span><p>Done in the main window, this means 40 grep and read results, about 60k tokens of noise. Done with a subagent, the child does all of that in its own window and returns: "11 call sites, listed with file:line, 3 use the deprecated retry flag." The parent's window grows by about 300 tokens.</p></div>
+  <div class="tip"><span class="lbl">If you build one</span><p>Count tokens after every call. At about 80% of the window, run a "summarise this session" call and rebuild the history as [system, summary, last 4 messages]. Then add output truncation. These two together solve most context problems.</p></div>
+</section>
+
+<!-- 10 -->
+<section class="sec" id="s10">
+  <div class="sec-head"><div class="num">10</div><div><h2>Planning: thinking before doing</h2><div class="builds"><a class="chip" href="#s5">Builds on 05 · tools</a><a class="chip" href="#s9">09 · long sessions</a></div></div></div>
+  <p class="lead">On big tasks, models drift: they forget step 6 of 9, or start editing before they understand the code. Harnesses fight this by giving the model a <strong>checklist tool</strong>, and sometimes a separate <strong>planning phase</strong>.</p>
+  <div class="duo">
+    <div class="side cc"><header><i class="dot cc"></i>Claude Code</header><div class="body"><ul>
+      <li><strong>TodoWrite</strong>: the model keeps a live checklist (pending, in progress, done), drawn in the terminal.</li>
+      <li><strong>Plan mode</strong>: a read-only phase. The model may only explore, then writes a plan, and you approve it before any file changes. It is a mode of the harness, so the tools are actually locked rather than the model just being asked to hold back.</li>
+      <li><strong>AskUserQuestion</strong>: the model can pause and give you multiple-choice options when a decision is really yours.</li>
+    </ul></div></div>
+    <div class="side cx"><header><i class="dot cx"></i>Codex</header><div class="body"><ul>
+      <li><strong>update_plan</strong>: the model posts a checklist of steps with statuses, drawn in the TUI.</li>
+      <li>The <strong>read-only sandbox</strong> doubles as an "explore only" mode: the model physically can't edit.</li>
+      <li>Newer versions add a plan-style collaboration mode and a persistent <strong>goal mode</strong> for long-running objectives. Check your version.</li>
+    </ul></div></div>
+  </div>
+  <div class="usecase"><span class="lbl">Use case · "Migrate the test suite from Jest to Vitest"</span><p>Plan first: the agent reads the config, counts 140 test files, and finds 6 that use Jest-only mocks. It proposes 7 steps. You notice it wants to migrate snapshot files too and say "skip snapshots". Then it executes, ticking the checklist as it goes, and you can see it is on step 5 of 7 at a glance.</p></div>
+  <div class="tip"><span class="lbl">If you build one</span><p>A todo tool is about 15 lines: the model sends the full list each time and you re-render it. It is surprisingly effective. A real plan mode means hiding the write tools from the tool list until the user approves.</p></div>
+</section>
+
+<!-- 11 -->
+<section class="sec" id="s11">
+  <div class="sec-head"><div class="num">11</div><div><h2>Extensibility: letting users add behaviour</h2><div class="builds"><a class="chip" href="#s2">Builds on 02 · loop events</a><a class="chip" href="#s7">07 · safety</a><a class="chip" href="#s9">09 · subagents, lazy loading</a></div></div></div>
+  <p class="lead">A harness becomes a platform when users can plug in. There are six kinds of extension point. Claude Code built most of these first and has the deeper ecosystem. Codex added many of them during 2026.</p>
+  <div class="tbl-wrap"><table class="cmp">
+    <thead><tr><th>Extension</th><th class="cc">Claude Code</th><th class="cx">Codex</th></tr></thead>
+    <tbody>
+      <tr><td>Hooks<br><small style="font-weight:400;color:var(--muted)">your script runs at a loop event</small></td><td>Many events: <code>PreToolUse</code>, <code>PostToolUse</code>, <code>UserPromptSubmit</code>, <code>Stop</code>, <code>SubagentStop</code>, <code>SessionStart/End</code>, <code>PreCompact</code>, <code>Notification</code>, permission requests. The script gets JSON on stdin and can <strong>block</strong> an action and tell the model why.</td><td>Newer: <code>SessionStart</code>, <code>Stop</code>, with <code>PreToolUse</code>/<code>PostToolUse</code> rolling out, and a <code>/hooks</code> browser. The older <code>notify</code> setting runs a program when a turn ends.</td></tr>
+      <tr><td>Skills<br><small style="font-weight:400;color:var(--muted)">packaged know-how</small></td><td>Folders with a <code>SKILL.md</code> (name, description, steps, plus scripts). Only the description is in context until the skill is used.</td><td>Same <code>SKILL.md</code> idea, in <code>~/.agents/skills</code> or <code>.agents/skills</code>.</td></tr>
+      <tr><td>Subagents</td><td><code>.claude/agents/*.md</code>: each has its own system prompt, allowed tools and model. Can run in the background or in a separate git worktree.</td><td>Added in 2026 for parallel, specialised work. Also used internally for approval review.</td></tr>
+      <tr><td>Custom commands</td><td>Slash commands from Markdown files. Skills can also be invoked as <code>/name</code>.</td><td>Custom prompts in <code>~/.codex/prompts/*.md</code> become slash commands.</td></tr>
+      <tr><td>MCP<br><small style="font-weight:400;color:var(--muted)">external tool servers</small></td><td>Client over stdio or HTTP, configured with <code>claude mcp add</code> or <code>.mcp.json</code>. Tool search keeps large MCP tool lists out of context.</td><td>Client via <code>[mcp_servers.x]</code> in config.toml. Codex can also <strong>be</strong> an MCP server (<code>codex mcp-server</code>), so other agents can drive it.</td></tr>
+      <tr><td>Plugins</td><td>Bundles of commands, agents, skills, hooks and MCP servers, installed from marketplaces.</td><td>Plugin system and marketplace, newer.</td></tr>
+      <tr><td>Other</td><td>Output styles, custom status line, keybindings.</td><td>Profiles (named config sets), exec-policy rules (07), feature flags.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="duo">
+    <div class="panel prose">
+      <h3>Hook example: format every edited file</h3>
+      <div class="fname">.claude/settings.json</div>
+      <pre class="code">{ "hooks": { "PostToolUse": [{
+  "matcher": "Edit|Write",
+  "hooks": [{ "type": "command",
+    "command": "jq -r '.tool_input.file_path'
+                | xargs npx prettier --write" }]
+}]}}</pre>
+      <p style="font-size:14px">The model never needs to remember to format. The harness guarantees it. A <code>PreToolUse</code> hook that exits with code 2 <strong>blocks</strong> the call. Use it for "never edit files in <code>migrations/</code>".</p>
+    </div>
+    <div class="panel prose">
+      <h3>Skill example: release notes</h3>
+      <div class="fname">skills/release-notes/SKILL.md</div>
+      <pre class="code">---
+name: release-notes
+description: Write release notes from
+  git history. Use when asked for a
+  changelog or release notes.
+---
+1. Run `git log --oneline v1.4..HEAD`
+2. Group by feat / fix / chore
+3. Follow ./template.md</pre>
+      <p style="font-size:14px">Only the two-line description sits in the prompt. When you ask for a changelog, the model loads the full file. The same format works in both harnesses.</p>
+    </div>
+  </div>
+  <div class="tip"><span class="lbl">If you build one</span><p>Hooks are the cheapest powerful feature. At each point in your loop (before tool, after tool, on stop), run any configured command with a JSON payload on stdin, and treat a non-zero exit as "block, and send stderr back to the model".</p></div>
+</section>
+
+<!-- 12 -->
+<section class="sec" id="s12">
+  <div class="sec-head"><div class="num">12</div><div><h2>Sessions, resume and undo</h2><div class="builds"><a class="chip" href="#s4">Builds on 04 · history</a><a class="chip" href="#s6">06 · edits</a></div></div></div>
+  <p class="lead">The history list from 02 is just data. Save it to disk and you get resume. Snapshot files before each edit and you get undo.</p>
+  <div class="duo">
+    <div class="side cc"><header><i class="dot cc"></i>Claude Code</header><div class="body"><ul>
+      <li>Transcripts saved as JSONL, one event per line, under <code>~/.claude/projects/&lt;project&gt;/</code>.</li>
+      <li><code>claude --continue</code> resumes the last session. <code>--resume</code> lets you pick one.</li>
+      <li><strong>Checkpoints:</strong> file state is captured before each edit. Press <code>Esc Esc</code> or run <code>/rewind</code> to roll back the code, the conversation, or both. Changes made through Bash commands, such as <code>rm</code>, are not tracked.</li>
+    </ul></div></div>
+    <div class="side cx"><header><i class="dot cx"></i>Codex</header><div class="body"><ul>
+      <li>"Rollout" files saved as JSONL under <code>~/.codex/sessions/YYYY/MM/DD/</code>.</li>
+      <li><code>codex resume</code> opens a picker, <code>codex resume --last</code> continues the most recent, and sessions can be forked.</li>
+      <li>Leans on git: <code>/diff</code> shows everything changed. Versions have offered <code>/undo</code> backed by hidden git snapshots ("ghost commits").</li>
+    </ul></div></div>
+  </div>
+  <div class="usecase"><span class="lbl">Use case · "That refactor broke everything, go back"</span><p>Ten steps ago the agent started a refactor you don't like. In Claude Code you rewind to the checkpoint before it and give a different instruction, and the files and conversation both return. In Codex you inspect <code>/diff</code>, then undo or use <code>git restore</code>. Because the sandbox kept all writes inside the repo, git can see every change.</p></div>
+  <div class="tip"><span class="lbl">If you build one</span><p>Append every message to a <code>.jsonl</code> file as it happens, not at the end, so a crash loses nothing. For undo, copy each file's old contents before every edit into a per-session folder.</p></div>
+</section>
+
+<!-- 13 -->
+<section class="sec" id="s13">
+  <div class="sec-head"><div class="num">13</div><div><h2>Front-ends &amp; automation: one core, many faces</h2><div class="builds"><a class="chip" href="#s3">Builds on 03 · front-ends</a><a class="chip" href="#s12">12 · sessions</a></div></div></div>
+  <p class="lead">The best harness design separates the <strong>engine</strong> (loop, tools, safety) from the <strong>face</strong> (terminal UI, IDE panel, script). Then the same engine powers everything.</p>
+  <div class="panel diagram">
+    <svg viewBox="0 0 760 220" role="img" aria-label="One core engine connected by a protocol to many front-ends.">
+      <defs><marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah"/></marker></defs>
+      <rect x="280" y="72" width="200" height="76" rx="14" class="n-model"/>
+      <text x="380" y="104" text-anchor="middle" class="t1">Core engine</text>
+      <text x="380" y="124" text-anchor="middle" class="t2">loop · tools · safety · sessions</text>
+      <text x="380" y="176" text-anchor="middle" class="lbl">protocol: ops in → events out</text>
+      <rect x="20" y="14" width="190" height="48" rx="10" class="n-box"/><text x="115" y="43" text-anchor="middle" class="t1">Terminal UI</text>
+      <rect x="20" y="86" width="190" height="48" rx="10" class="n-box"/><text x="115" y="115" text-anchor="middle" class="t1">Headless / scripts</text>
+      <rect x="20" y="158" width="190" height="48" rx="10" class="n-box"/><text x="115" y="187" text-anchor="middle" class="t1">SDK in your app</text>
+      <rect x="550" y="14" width="190" height="48" rx="10" class="n-box"/><text x="645" y="43" text-anchor="middle" class="t1">IDE extension</text>
+      <rect x="550" y="86" width="190" height="48" rx="10" class="n-box"/><text x="645" y="115" text-anchor="middle" class="t1">Desktop / web app</text>
+      <rect x="550" y="158" width="190" height="48" rx="10" class="n-box"/><text x="645" y="187" text-anchor="middle" class="t1">Cloud / GitHub</text>
+      <path d="M212 38 L278 90" class="ln" marker-end="url(#a3)" marker-start="url(#a3)"/>
+      <path d="M212 110 L278 110" class="ln" marker-end="url(#a3)" marker-start="url(#a3)"/>
+      <path d="M212 182 L278 130" class="ln" marker-end="url(#a3)" marker-start="url(#a3)"/>
+      <path d="M548 38 L482 90" class="ln" marker-end="url(#a3)" marker-start="url(#a3)"/>
+      <path d="M548 110 L482 110" class="ln" marker-end="url(#a3)" marker-start="url(#a3)"/>
+      <path d="M548 182 L482 130" class="ln" marker-end="url(#a3)" marker-start="url(#a3)"/>
+    </svg>
+  </div>
+  <div class="duo">
+    <div class="side cc"><header><i class="dot cc"></i>Claude Code</header><div class="body"><ul>
+      <li><code>claude -p "…"</code>: headless, one-shot. <code>--output-format stream-json</code> streams every event for scripts.</li>
+      <li><strong>Agent SDK</strong> (TypeScript and Python): the same harness as a library, with its tools, permissions, hooks and subagents. Build your own agent on top of it.</li>
+      <li>IDE extensions, a desktop app, web sessions, GitHub Actions, and background and remote sessions.</li>
+    </ul></div></div>
+    <div class="side cx"><header><i class="dot cx"></i>Codex</header><div class="body"><ul>
+      <li><code>codex exec "…"</code>: non-interactive. <code>--json</code> emits events, and <code>--output-schema</code> forces the final answer to match a JSON schema.</li>
+      <li><strong>Internal protocol:</strong> the core takes a queue of <em>submissions</em> (user input, approval decisions, interrupts) and emits a queue of <em>events</em> (message deltas, "command started", "approval needed", "turn complete").</li>
+      <li><strong>app-server</strong>: that protocol as JSON-RPC over stdio. It powers the IDE extension and desktop app. There is also <code>codex mcp-server</code>, a TypeScript SDK, Codex Cloud tasks, and <code>@codex</code> reviews on GitHub.</li>
+    </ul></div></div>
+  </div>
+  <div class="usecase"><span class="lbl">Use case · a nightly CI job that fixes lint errors</span><p><b style="color:var(--cx)">Codex:</b> <code>codex exec --sandbox workspace-write "fix all eslint errors"</code> with <code>--output-schema</code> returning <code>{"fixed": n, "remaining": [...]}</code>, which the CI script reads to decide whether to open a PR.<br><b style="color:var(--cc)">Claude Code:</b> <code>claude -p "fix all eslint errors" --allowedTools "Edit,Bash(npx eslint:*)" --output-format json</code>, or the GitHub Action, which opens the PR for you.</p></div>
+  <div class="tip"><span class="lbl">If you build one</span><p>From day one, make your loop emit <strong>events</strong> (<code>message</code>, <code>tool_start</code>, <code>tool_end</code>, <code>approval_needed</code>) instead of printing directly. Your terminal UI just listens to events. Adding a web UI or headless mode later then becomes easy. Codex's <code>codex-rs/protocol</code> crate is a great reference.</p></div>
+</section>
+
+<!-- ===================== PART C ===================== -->
+<div class="part" id="partC">
+  <span class="pl">Part C · Side by side</span>
+  <h2>Putting it all together</h2>
+  <p>You now know every part. First we trace one real task through both harnesses, then summarise what matches, what differs, and what is worth copying.</p>
+</div>
+
+<!-- 14 -->
+<section class="sec" id="s14">
+  <div class="sec-head"><div class="num">14</div><div><h2>One task, two harnesses</h2><div class="builds"><a class="chip" href="#s2">Uses 02</a><a class="chip" href="#s5">05</a><a class="chip" href="#s6">06</a><a class="chip" href="#s7">07</a><a class="chip" href="#s8">08</a><a class="chip" href="#s10">10</a></div></div></div>
+  <p class="lead">You type: <strong>"The login test is failing. Fix it."</strong> Both use default settings: Claude Code in default mode, Codex in Auto (workspace-write, on-request).</p>
+  <div class="walk">
+    <div class="wrow head"><div class="what">Loop step</div><div class="ccc">Claude Code</div><div class="cxc">Codex</div></div>
+    <div class="wrow"><div class="what"><b>Build request</b><small>01–04, 08</small></div><div class="ccc">System prompt, tool schemas, CLAUDE.md, git status, your message.</div><div class="cxc">System prompt, tools, AGENTS.md, environment context that says "sandbox: workspace-write, network: off, approvals: on-request", your message.</div></div>
+    <div class="wrow"><div class="what"><b>Plan</b><small>10</small></div><div class="ccc"><span class="call">TodoWrite: [reproduce, find cause, fix, verify]</span></div><div class="cxc"><span class="call">update_plan: [reproduce, find cause, fix, verify]</span></div></div>
+    <div class="wrow"><div class="what"><b>Reproduce</b><small>05, 07</small></div><div class="ccc"><span class="call">Bash("npm test -- login")</span><span class="badge ask">asks you first</span> unless an allow rule matches</div><div class="cxc"><span class="call">shell: npm test -- login</span><span class="badge auto">runs without asking</span> inside the sandbox</div></div>
+    <div class="wrow"><div class="what"><b>Result added</b><small>02 step 6</small></div><div class="ccc" style="grid-column:span 2">Both get: <code>expected 200, received 401 — token expired</code></div></div>
+    <div class="wrow"><div class="what"><b>Search</b><small>05</small></div><div class="ccc"><span class="call">Grep("validateToken")</span><span class="badge auto">read-only, no prompt</span></div><div class="cxc"><span class="call">shell: rg -n validateToken src</span><span class="badge auto">no prompt</span></div></div>
+    <div class="wrow"><div class="what"><b>Read</b><small>05, 06</small></div><div class="ccc"><span class="call">Read("src/auth.ts")</span>The harness records that this file was read, which unlocks Edit.</div><div class="cxc"><span class="call">shell: sed -n '30,80p' src/auth.ts</span></div></div>
+    <div class="wrow"><div class="what"><b>Fix</b><small>06, 07</small></div><div class="ccc"><span class="call">Edit(old="exp &lt; now", new="exp &lt;= now")</span><span class="badge ask">shows the diff, asks</span></div><div class="cxc"><span class="call">apply_patch: *** Update File: src/auth.ts …</span><span class="badge auto">applied, path is inside the workspace</span></div></div>
+    <div class="wrow"><div class="what"><b>Verify</b><small>02</small></div><div class="ccc"><span class="call">Bash("npm test -- login")</span>passes, todo ticked</div><div class="cxc"><span class="call">shell: npm test -- login</span>passes, plan updated</div></div>
+    <div class="wrow"><div class="what"><b>Stop</b><small>02 fact 3</small></div><div class="ccc">Reply with no tool calls, then a summary. A <code>Stop</code> hook could run the full suite first.</div><div class="cxc">Reply with no tool calls, then a summary. <code>notify</code> or a Stop hook can ping you.</div></div>
+  </div>
+  <div class="note">The loop is identical. The differences are in <em>which tools</em> it uses (dedicated tools or shell), <em>how it edits</em> (replace or patch), and <em>when you are asked</em> (rules or sandbox walls).</div>
+</section>
+
+<!-- 15 -->
+<section class="sec" id="s15">
+  <div class="sec-head"><div class="num">15</div><div><h2>What is the same</h2><div class="builds"><a class="chip" href="#s14">Builds on 14</a></div></div></div>
+  <div class="same">
+    <div>The same agent loop: build, call, run tools, append, repeat</div>
+    <div>A full-screen terminal UI with slash commands</div>
+    <div>Read, search, edit and run as core abilities</div>
+    <div>A project instruction file, plus a global one for you</div>
+    <div>Human approvals with "allow for this session" shortcuts</div>
+    <div>An optional OS sandbox on macOS and Linux</div>
+    <div>MCP client support for external tools</div>
+    <div>Auto-compaction and <code>/compact</code></div>
+    <div>A checklist or plan tool</div>
+    <div>Skills in <code>SKILL.md</code> format, subagents, hooks, plugins</div>
+    <div>Headless mode for scripts and CI</div>
+    <div>Saved sessions with resume</div>
+    <div>IDE extensions, a desktop app and cloud execution</div>
+    <div><code>/init</code> to write the instruction file, <code>/review</code>-style code review</div>
+  </div>
+</section>
+
+<!-- 16 -->
+<section class="sec" id="s16">
+  <div class="sec-head"><div class="num">16</div><div><h2>What is different</h2><div class="builds"><a class="chip" href="#s15">Builds on 15</a></div></div></div>
+  <div class="tbl-wrap"><table class="cmp">
+    <thead><tr><th>Area</th><th class="cc">Claude Code</th><th class="cx">Codex CLI</th></tr></thead>
+    <tbody>
+      <tr><td>Openness</td><td>Closed source. Extend it through settings, hooks, plugins and the Agent SDK.</td><td>Open source Rust. You can fork it, read it and change anything.</td></tr>
+      <tr><td>Safety philosophy</td><td><strong>Ask first.</strong> Fine-grained allow/ask/deny rules per tool and pattern, with an optional sandbox.</td><td><strong>Walls first.</strong> A kernel sandbox with network off by default, plus a separate approval dial.</td></tr>
+      <tr><td>Tool philosophy</td><td>Many dedicated, structured tools.</td><td>Few tools. The shell does most of the work, including interactive PTY sessions.</td></tr>
+      <tr><td>Edit format</td><td>Exact string replace with a read-before-edit guard.</td><td><code>apply_patch</code> multi-file diffs.</td></tr>
+      <tr><td>Command rules</td><td>Glob-like patterns in JSON, e.g. <code>Bash(npm run test:*)</code>.</td><td>Starlark <code>prefix_rule</code>s. They are programmable and testable with <code>codex execpolicy check</code>.</td></tr>
+      <tr><td>Config</td><td>Layered <code>settings.json</code>: managed, user, project, local.</td><td><code>config.toml</code> with named <strong>profiles</strong>. Project config loads only for trusted projects.</td></tr>
+      <tr><td>Instruction file</td><td><code>CLAUDE.md</code> with imports, plus auto memory written by the agent.</td><td><code>AGENTS.md</code>, a shared convention with override files.</td></tr>
+      <tr><td>Planning</td><td>A real plan mode with tools locked, plus TodoWrite and AskUserQuestion.</td><td><code>update_plan</code>, a read-only sandbox as explore mode, and newer goal/plan modes.</td></tr>
+      <tr><td>Hooks maturity</td><td>Deep: about ten events, blocking, prompt-based hooks.</td><td>Newer, catching up through 2026.</td></tr>
+      <tr><td>Undo</td><td>Built-in checkpoints and <code>/rewind</code> for code and conversation.</td><td>Git-centred: <code>/diff</code>, snapshot-based undo.</td></tr>
+      <tr><td>Embedding</td><td>Agent SDK, the harness as a library.</td><td>app-server JSON-RPC protocol, <code>codex mcp-server</code>, TS SDK, <code>--output-schema</code>.</td></tr>
+      <tr><td>Model API features</td><td>Messages API: explicit cache breakpoints, extended thinking.</td><td>Responses API: encrypted reasoning carried across turns, server-side compaction.</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- 17 -->
+<section class="sec" id="s17">
+  <div class="sec-head"><div class="num">17</div><div><h2>What to steal from each</h2><div class="builds"><a class="chip" href="#s16">Builds on 16</a></div></div></div>
+  <p class="lead">You said each one has things the other lacks. For your own harness, here is the best of both.</p>
+  <div class="duo">
+    <div class="side cc"><header><i class="dot cc"></i>Take from Claude Code</header><div class="body steal">
+      <div><b>Rich, blocking hooks</b><span>A lifecycle event for everything, with exit code 2 meaning "block and explain". Users can enforce policy without touching your code.</span></div>
+      <div><b>Rules learned from prompts</b><span>"Yes, don't ask again" writes an allow rule. Approvals fade as trust grows.</span></div>
+      <div><b>Read-before-edit guard</b><span>A tiny check that prevents a whole class of bad edits.</span></div>
+      <div><b>Plan mode with locked tools</b><span>The harness enforces the planning phase instead of the prompt merely asking for it.</span></div>
+      <div><b>Subagents for context isolation</b><span>Keep noisy searches out of the main window.</span></div>
+      <div><b>Lazy loading</b><span>Skills and tool search load content only when needed.</span></div>
+      <div><b>Checkpoints and rewind</b><span>Cheap file snapshots make experimenting safe.</span></div>
+    </div></div>
+    <div class="side cx"><header><i class="dot cx"></i>Take from Codex</header><div class="body steal">
+      <div><b>A sandbox by default, network off</b><span>Safety that doesn't depend on catching every dangerous command string.</span></div>
+      <div><b>Sandbox and approval as separate dials</b><span>A clean mental model: what is possible versus when to ask.</span></div>
+      <div><b>apply_patch</b><span>Multi-file, atomic, context-anchored edits.</span></div>
+      <div><b>PTY-based unified exec</b><span>Drive REPLs, dev servers and interactive CLIs across turns.</span></div>
+      <div><b>Programmable exec policy</b><span>Rules as code, with a test command.</span></div>
+      <div><b>A core/protocol split</b><span>Submissions in, events out. Every UI is just a client.</span></div>
+      <div><b>Structured headless output</b><span><code>--output-schema</code> makes the agent usable as a function in pipelines.</span></div>
+      <div><b>Readable source</b><span>When unsure how to build something, read <code>codex-rs/core</code>.</span></div>
+    </div></div>
+  </div>
+</section>
+
+<!-- ===================== PART D ===================== -->
+<div class="part" id="partD">
+  <span class="pl">Part D · Build your own</span>
+  <h2>From a 40-line loop to a real harness</h2>
+  <p>Each stage adds one box from the anatomy in 03. Ship each stage before starting the next: every stage gives you a working agent.</p>
+</div>
+
+<!-- 18 -->
+<section class="sec" id="s18">
+  <div class="sec-head"><div class="num">18</div><div><h2>A staged roadmap</h2><div class="builds"><a class="chip" href="#s3">Builds on 03 · anatomy</a><a class="chip" href="#s17">17 · what to steal</a></div></div></div>
+  <div class="road">
+    <div class="stage"><div class="sn">STAGE<br>1</div><div class="sb"><h4>The loop + one shell tool</h4><p>Call the model, run its <code>run_shell</code> requests, feed results back, stop when it replies with plain text. Ask y/n before every command. About 40–80 lines (see 19).</p><div class="from"><span class="f ac">02 the loop</span></div></div></div>
+    <div class="stage"><div class="sn">STAGE<br>2</div><div class="sb"><h4>Real tools</h4><p>Add <code>read_file</code> (with line numbers), <code>edit_file</code> (string replace with the read-before-edit guard), and <code>search</code> (wrap ripgrep). Truncate every output to about 10k characters.</p><div class="from"><span class="f cc">dedicated tools</span><span class="f cc">read guard</span></div></div></div>
+    <div class="stage"><div class="sn">STAGE<br>3</div><div class="sb"><h4>Safety: rules, then walls</h4><p>Allow/ask/deny rules per tool and pattern, auto-allow reads, and "don't ask again" that saves a rule. Then wrap shell commands in <code>bwrap</code> with the project writable and the network off. Add the two dials: sandbox mode and approval policy.</p><div class="from"><span class="f cc">permission rules</span><span class="f cx">bwrap sandbox</span><span class="f cx">two dials</span></div></div></div>
+    <div class="stage"><div class="sn">STAGE<br>4</div><div class="sb"><h4>Context</h4><p>A real system prompt, AGENTS.md loading from root to working folder, environment facts (cwd, OS, git status, sandbox mode), token counting, and compaction at 80%.</p><div class="from"><span class="f cx">AGENTS.md</span><span class="f cx">env context</span><span class="f ac">compaction</span></div></div></div>
+    <div class="stage"><div class="sn">STAGE<br>5</div><div class="sb"><h4>Events and sessions</h4><p>Restructure the loop to emit events and render them in a simple TUI (e.g. Textual or Ink). Append every event to JSONL. Add <code>--resume</code>. Snapshot files before edits for <code>/undo</code>.</p><div class="from"><span class="f cx">submission/event protocol</span><span class="f cc">checkpoints</span></div></div></div>
+    <div class="stage"><div class="sn">STAGE<br>6</div><div class="sb"><h4>Planning</h4><p>A todo tool rendered as a live checklist. Then a plan mode that hides write tools until you approve.</p><div class="from"><span class="f cc">plan mode</span><span class="f ac">todo tool</span></div></div></div>
+    <div class="stage"><div class="sn">STAGE<br>7</div><div class="sb"><h4>Extensibility</h4><p>Hooks (pre-tool, post-tool, stop) with JSON on stdin and exit code 2 to block. An MCP client using the official SDK. Skills: scan <code>SKILL.md</code> files and list their descriptions in the prompt.</p><div class="from"><span class="f cc">blocking hooks</span><span class="f ac">MCP</span><span class="f ac">skills</span></div></div></div>
+    <div class="stage"><div class="sn">STAGE<br>8</div><div class="sb"><h4>Advanced</h4><p>Subagents (run your loop recursively with a fresh history and a limited tool list), an <code>apply_patch</code> parser, a PTY-based shell for interactive processes, headless mode with schema-checked output, and parallel read-only tool calls.</p><div class="from"><span class="f cc">subagents</span><span class="f cx">apply_patch</span><span class="f cx">PTY exec</span><span class="f cx">--output-schema</span></div></div></div>
+  </div>
+</section>
+
+<!-- 19 -->
+<section class="sec" id="s19">
+  <div class="sec-head"><div class="num">19</div><div><h2>Your first loop (Stage 1)</h2><div class="builds"><a class="chip" href="#s2">Builds on 02</a><a class="chip" href="#s7">07</a><a class="chip" href="#s18">18 · stage 1</a></div></div></div>
+  <p class="lead">This is the whole agent loop from 02, with Gate 1 (asking you) and a place to add Gate 2 (sandbox). <code>call_model</code> wraps whichever model API you use. The message shapes below follow Anthropic's Messages API. With OpenAI's Responses API the same ideas are named <code>function_call</code> / <code>function_call_output</code>.</p>
+  <div class="panel">
+    <div class="fname">mini_harness.py</div>
+<pre class="code"><span class="h">import</span> subprocess
+
+SYSTEM = <span class="h">"You are a coding agent in the user's project. Use run_shell to inspect and change files. Be concise. When done, reply with a short summary and no tool calls."</span>
+
+TOOLS = [{
+    <span class="h">"name"</span>: <span class="h">"run_shell"</span>,
+    <span class="h">"description"</span>: <span class="h">"Run a shell command in the project folder. Returns stdout and stderr."</span>,
+    <span class="h">"input_schema"</span>: {<span class="h">"type"</span>: <span class="h">"object"</span>,
+                     <span class="h">"properties"</span>: {<span class="h">"command"</span>: {<span class="h">"type"</span>: <span class="h">"string"</span>}},
+                     <span class="h">"required"</span>: [<span class="h">"command"</span>]},
+}]
+
+<span class="h">def</span> run_shell(command):
+    <span class="c"># Gate 1: ask the human (Claude Code style)</span>
+    <span class="h">if</span> input(f<span class="h">"\nRun `{command}`? [y/N] "</span>).strip().lower() != <span class="h">"y"</span>:
+        <span class="h">return</span> <span class="h">"The user denied this command."</span>
+    <span class="c"># Gate 2 (stage 3): wrap in bwrap for a Codex-style sandbox</span>
+    p = subprocess.run(command, shell=<span class="h">True</span>, capture_output=<span class="h">True</span>, text=<span class="h">True</span>, timeout=<span class="h">120</span>)
+    out = p.stdout + p.stderr + f<span class="h">"\n[exit code {p.returncode}]"</span>
+    <span class="h">return</span> out[-<span class="h">10_000</span>:]          <span class="c"># truncate: protect the context window (09)</span>
+
+<span class="h">def</span> agent(user_prompt):
+    messages = [{<span class="h">"role"</span>: <span class="h">"user"</span>, <span class="h">"content"</span>: user_prompt}]
+    <span class="h">while True</span>:                                            <span class="c"># the agent loop (02)</span>
+        reply = call_model(system=SYSTEM, tools=TOOLS, messages=messages)
+        messages.append({<span class="h">"role"</span>: <span class="h">"assistant"</span>, <span class="h">"content"</span>: reply.content})
+
+        calls = [b <span class="h">for</span> b <span class="h">in</span> reply.content <span class="h">if</span> b.type == <span class="h">"tool_use"</span>]
+        <span class="h">if not</span> calls:                                         <span class="c"># no tool calls = done</span>
+            <span class="h">return</span> <span class="h">""</span>.join(b.text <span class="h">for</span> b <span class="h">in</span> reply.content <span class="h">if</span> b.type == <span class="h">"text"</span>)
+
+        results = []
+        <span class="h">for</span> c <span class="h">in</span> calls:
+            print(f<span class="h">"→ {c.name}: {c.input}"</span>)
+            results.append({<span class="h">"type"</span>: <span class="h">"tool_result"</span>, <span class="h">"tool_use_id"</span>: c.id,
+                            <span class="h">"content"</span>: run_shell(**c.input)})
+        messages.append({<span class="h">"role"</span>: <span class="h">"user"</span>, <span class="h">"content"</span>: results})   <span class="c"># feed results back</span>
+
+<span class="h">if</span> __name__ == <span class="h">"__main__"</span>:
+    print(agent(input(<span class="h">"What should I do? "</span>)))</pre>
+  </div>
+  <div class="grid2">
+    <div class="tip"><span class="lbl">Try this first</span><p>Ask it: "How many Python files are in this folder, and which is the largest?" Watch it call <code>find</code>, then <code>wc</code>, then answer. You have built the core of Claude Code and Codex.</p></div>
+    <div class="tip"><span class="lbl">Then read</span><p>Open <code>github.com/openai/codex</code> and look in <code>codex-rs/core</code> for the turn loop, <code>codex-rs/apply-patch</code> and <code>codex-rs/linux-sandbox</code>. Read the Claude Code docs pages on hooks, permissions and subagents for the other side.</p></div>
+  </div>
+</section>
+
+<footer>
+  <div><strong style="color:var(--ink)">Sources and further reading</strong></div>
+  <div class="sources">
+    <a href="https://docs.claude.com/en/docs/claude-code/overview">Claude Code docs: overview, settings, permissions, hooks, subagents, skills</a>
+    <a href="https://github.com/openai/codex">openai/codex on GitHub (source, docs folder, releases)</a>
+    <a href="https://developers.openai.com/codex/config-reference">Codex configuration reference</a>
+    <a href="https://learn.chatgpt.com/codex/changelog">Codex changelog</a>
+    <a href="https://agents.md">AGENTS.md convention</a>
+    <a href="https://codex.danielvaughan.com/2026/05/23/codex-cli-state-of-play/">Codex CLI state of play, May 2026 (third-party)</a>
+    <a href="https://codex.danielvaughan.com/2026/05/21/codex-cli-execution-policy-rules-starlark-command-governance-enterprise-allowlists/">Codex exec-policy rules explained (third-party)</a>
+  </div>
+  <p>Facts about Codex features added in 2026 (subagents, hooks, plugins, smart approvals) come partly from third-party guides. Check the official changelog for your installed version.</p>
+</footer>
+
+</main>
+</div>
+
+<script>
+(function(){
+  var links = Array.prototype.slice.call(document.querySelectorAll('.toc a'));
+  if (!('IntersectionObserver' in window) || !links.length) return;
+  var map = {};
+  links.forEach(function(a){ map[a.getAttribute('href').slice(1)] = a; });
+  var obs = new IntersectionObserver(function(entries){
+    entries.forEach(function(e){
+      if (e.isIntersecting && map[e.target.id]){
+        links.forEach(function(l){ l.classList.remove('on'); });
+        map[e.target.id].classList.add('on');
+      }
+    });
+  }, {rootMargin:'-20% 0px -70% 0px'});
+  document.querySelectorAll('.sec').forEach(function(s){ obs.observe(s); });
+})();
+</script>

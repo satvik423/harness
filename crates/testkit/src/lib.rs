@@ -1,0 +1,29 @@
+//! Test support for the harness.
+//!
+//! - [`FakeProvider`]: a scripted [`harness_ports::Provider`] that records every request
+//! - [`TempProject`]: a throwaway project directory
+//! - [`FixedClock`]: a controllable [`harness_ports::Clock`]
+//! - [`arch`]: layering checks that keep the architecture honest (P0-T9)
+//!
+//! This crate is a dev-dependency only; production crates must never depend
+//! on it (enforced by [`arch::harness_rules`]).
+//!
+//! # Example
+//! ```
+//! use harness_testkit::{FakeProvider, TempProject};
+//! let project = TempProject::new().unwrap().with_file("README.md", "# demo").unwrap();
+//! let provider = FakeProvider::new().with_text_turn("Done.");
+//! assert!(project.path().join("README.md").exists());
+//! assert_eq!(provider.remaining_turns(), 1);
+//! ```
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+
+pub mod arch;
+mod clock;
+mod fake_provider;
+mod project;
+
+pub use clock::FixedClock;
+pub use fake_provider::FakeProvider;
+pub use project::{TempProject, TempProjectError};

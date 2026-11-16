@@ -1,0 +1,25 @@
+[package]
+name = "harness-testkit"
+description = "Test support for the harness: scripted FakeProvider, temp projects, fixed clock, layering checks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+futures.workspace = true
+harness-ports.workspace = true
+harness-protocol.workspace = true
+harness-types.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true
