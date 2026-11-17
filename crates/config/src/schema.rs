@@ -42,8 +42,6 @@ pub struct Providers {
     pub anthropic: AnthropicConfig,
     /// OpenAI Responses API.
     pub openai: OpenAiConfig,
-    /// External agent CLIs (Phase 12, off by default).
-    pub delegate: DelegateConfig,
 }
 
 /// What to do when Claude reports a preserved-thinking prefix mismatch.
@@ -113,28 +111,6 @@ impl Default for OpenAiConfig {
                 name: "openai".into(),
             }),
             store: false,
-        }
-    }
-}
-
-/// Delegate (external agent CLI) settings.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct DelegateConfig {
-    /// Off by default; gated on vendor terms (FR-PRV-08).
-    pub enabled: bool,
-    /// Command for Claude Code.
-    pub claude_cmd: String,
-    /// Command for Codex.
-    pub codex_cmd: String,
-}
-
-impl Default for DelegateConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            claude_cmd: "claude".into(),
-            codex_cmd: "codex".into(),
         }
     }
 }
@@ -429,10 +405,6 @@ mod tests {
             c.providers.anthropic.preserved_thinking_mismatch,
             MismatchBehavior::DropBlock
         );
-        assert!(
-            !c.providers.delegate.enabled,
-            "delegates must be off by default"
-        );
         assert!(!c.providers.openai.store);
         assert_eq!(c.context.compact_at_tokens, 250_000);
         assert_eq!(c.context.output_cap_tokens, 2_000);
@@ -451,6 +423,12 @@ mod tests {
         let c: Config = toml::from_str("default_model = \"openai/gpt-5.5\"").unwrap();
         assert_eq!(c.default_model.provider(), "openai");
         assert!(toml::from_str::<Config>("default_model = \"gpt-5.5\"").is_err());
+    }
+
+    #[test]
+    fn delegate_settings_no_longer_exist() {
+        // ADR-026: harness never hands tasks to external agent CLIs.
+        assert!(toml::from_str::<Config>("[providers.delegate]\nenabled = true").is_err());
     }
 
     #[test]

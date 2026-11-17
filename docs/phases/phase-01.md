@@ -95,9 +95,13 @@ CDLA-Permissive-2.0 (webpki root certificate data).
 ## Decisions / ADRs
 
 - ADR-019: OpenAI provider moved into Phase 1; `default_model` config key; `ApiKey`
-  and `backoff_delay` shared in ports. Approved by you on 17 Nov 2026.
+  and `backoff_delay` shared in ports.
+- ADR-020 to ADR-025: deviations 1–6 below (BlockComplete, `call_id`, registry in ports,
+  `keyring-core`, consecutive user messages, `pause_turn`).
+- ADR-026: no delegate backends (your decision after the phase); `[providers.delegate]`
+  removed from the config code.
 
-## Deviations from the plan (awaiting your approval)
+## Deviations from the plan (approved by you on 17 Nov 2026; ADR-020 to ADR-025)
 
 1. **`ProviderEvent` changed.** `ToolCallEnd` and `Opaque` were replaced by
    `BlockComplete { block }`, which carries each finished block exactly as the model
@@ -142,7 +146,9 @@ CDLA-Permissive-2.0 (webpki root certificate data).
 - **Phase 3:** the event log assigns sequence numbers to persisted events. Decide how
   deltas are numbered.
 - **Phase 4:** cost per turn from the `[pricing]` table, shown in the TUI.
-- **Phase 12 (or when an Anthropic key exists):** record the Anthropic fixtures and add
+- **Phase 12:** no delegate backends (ADR-026); the phase keeps fallback chains and the
+  Anthropic OAuth profile.
+- **When an Anthropic key exists:** record the Anthropic fixtures and add
   `provider-anthropic/tests/replay.rs`; check OpenAI's exact token-count endpoint and
   whether `xhigh` effort is accepted (currently mapped to `high`).
 - **Server-side tools (later):** continue `pause_turn` turns properly.

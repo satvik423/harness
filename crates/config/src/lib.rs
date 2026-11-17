@@ -42,9 +42,9 @@ pub use loader::{ConfigLoader, Layer, LoadedConfig};
 pub use merge::deep_merge;
 pub use paths::Paths;
 pub use schema::{
-    AnthropicConfig, Config, ContextConfig, DelegateConfig, MismatchBehavior, OpenAiConfig,
-    PolicyConfig, PolicyProfile, Price, Providers, RuntimeConfig, SandboxBackend, SandboxConfig,
-    ServerFallbacks, Theme, UiConfig,
+    AnthropicConfig, Config, ContextConfig, MismatchBehavior, OpenAiConfig, PolicyConfig,
+    PolicyProfile, Price, Providers, RuntimeConfig, SandboxBackend, SandboxConfig, ServerFallbacks,
+    Theme, UiConfig,
 };
 pub use secret::{InvalidSecretRef, SecretRef};
 pub use trust::TrustStore;

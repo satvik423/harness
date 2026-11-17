@@ -209,8 +209,8 @@ Do not skip it silently.
 
 ## Project guardrails (summary of plan Part 5; read the full list before each phase)
 
-- Never reuse or spoof subscription OAuth tokens. Auth is API keys, the official OAuth profiles,
-  and (Phase 12, gated) delegate CLIs.
+- Never reuse or spoof subscription OAuth tokens, and never hand tasks to external agent CLIs
+  (ADR-026). Auth is API keys and the official OAuth profiles for provider APIs.
 - Claude Messages API: send `anthropic-version: 2026-10-21`.
   - Never send `temperature` / `top_p` / `top_k`, assistant prefill, or forced `tool_choice`.
   - Replay thinking blocks verbatim within their segment.

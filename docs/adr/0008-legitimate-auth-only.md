@@ -1,5 +1,7 @@
 # ADR-008: Legitimate authentication only
 
+> **Superseded in part by [ADR-026](0026-no-delegate-backends.md):** harness has no delegate backends.
+
 - **Status:** Accepted
 - **Date:** 2026-11-16
 - **Source:** Building Harness, Part 5.2

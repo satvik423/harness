@@ -23,3 +23,10 @@ Each record states the context, the decision and its consequences. Records 0001â
 | [ADR-017](0017-phase-0-conventions.md) | Phase 0 conventions | Accepted |
 | [ADR-018](0018-licence.md) | Licence: MIT OR Apache-2.0 | Accepted |
 | [ADR-019](0019-openai-provider-in-phase-1.md) | OpenAI provider moved into Phase 1 | Accepted |
+| [ADR-020](0020-provider-event-block-complete.md) | `ProviderEvent::BlockComplete` | Accepted |
+| [ADR-021](0021-tool-ctx-call-id.md) | `ToolCtx` carries `call_id` | Accepted |
+| [ADR-022](0022-tool-registry-in-ports.md) | `ToolRegistry` lives in ports | Accepted |
+| [ADR-023](0023-keyring-core.md) | Keyring access through `keyring-core` | Accepted |
+| [ADR-024](0024-consecutive-user-messages.md) | A user message may follow an unanswered user message | Accepted |
+| [ADR-025](0025-pause-turn.md) | `pause_turn` ends the task until server-side tools exist | Accepted |
+| [ADR-026](0026-no-delegate-backends.md) | No delegate backends | Accepted |

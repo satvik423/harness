@@ -31,7 +31,7 @@ pub enum Risk {
         /// Host name, for example `docs.rs`.
         host: String,
     },
-    /// Starts something outside the harness's control (a subagent, a delegate CLI).
+    /// Starts something outside the current task (for example a subagent).
     External {
         /// Short description of what is started.
         what: String,

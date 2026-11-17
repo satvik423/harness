@@ -1,5 +1,7 @@
 # ADR-019: OpenAI provider moved into Phase 1
 
+> **Superseded in part by [ADR-026](0026-no-delegate-backends.md):** harness has no delegate backends.
+
 - **Status:** Accepted
 - **Date:** 2026-11-17
 - **Source:** Phase 1, approved by the user

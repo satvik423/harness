@@ -239,6 +239,7 @@ svg .ah{fill:var(--muted)}
 .adr .h code{background:var(--guard-soft);color:var(--guard);font-weight:600}
 .adr .h b{font-family:var(--f-display);font-size:14.5px}
 .adr .st{font-size:11px;font-weight:700;color:var(--good);text-transform:uppercase;letter-spacing:.08em}
+.adr .st.prop{color:var(--warn)}
 .gl dl{margin:0;display:grid;grid-template-columns:170px minmax(0,1fr);gap:8px 16px;font-size:13.8px}
 .gl dt{font-weight:600;font-family:var(--f-display)}
 .gl dd{margin:0;color:var(--ink)}
@@ -257,6 +258,7 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
   <div class="grp" style="color:var(--muted)"><i style="background:var(--muted)"></i>0 · Read first</div>
   <a href="#s0-1">How to use this document</a>
   <a href="#s0-2">Decisions at a glance</a>
+  <a href="#s0-3">Change log</a>
   <div class="grp" style="color:var(--prd)"><i style="background:var(--prd)"></i>1 · PRD</div>
   <a href="#s1-1">Vision &amp; problem</a>
   <a href="#s1-2">Goals &amp; non-goals</a>
@@ -320,8 +322,8 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
   <h1>Building Harness</h1>
   <p class="sub">The complete plan for a general-purpose, persona-driven agent harness written in Rust. It combines the best ideas from Claude Code, Codex CLI and Hermes, and adds a context engine that never loses details. This one document is enough to build the whole project.</p>
   <div class="docctl">
-    <div><span>Version</span>1.0 · build baseline</div>
-    <div><span>Date</span>16 Nov 2026</div>
+    <div><span>Version</span>1.1 · updated after Phases 0–1</div>
+    <div><span>Date</span>17 Nov 2026</div>
     <div><span>Status</span>Approved for build</div>
     <div><span>Working name</span><code>harness</code> (rename freely)</div>
   </div>
@@ -363,13 +365,34 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
     <div class="card"><span class="k">ADR-005</span><h4>SQLite FTS5 first for memory</h4><p>Full-text search, plus vectors later via sqlite-vec, behind a <code>MemoryStore</code> trait. RushDB and graphify stay optional plug-ins.</p></div>
     <div class="card"><span class="k">ADR-006</span><h4>Persona = bundle, subagent = persona</h4><p>A persona bundles prompt, model, tools, skills, MCP servers, hooks, policy and memory scope. A subagent is just a persona started with a fresh context.</p></div>
     <div class="card"><span class="k">ADR-007</span><h4>Standards over invention</h4><p>Use <code>AGENTS.md</code>, <code>SKILL.md</code> and MCP exactly as other tools do, so their ecosystems work with yours.</p></div>
-    <div class="card"><span class="k">ADR-008</span><h4>Legitimate auth only</h4><p>API keys and official sign-in programs. No reuse of Claude subscription logins. A subscription is used only by running the vendor's own CLI as a delegate, where its terms allow.</p></div>
-    <div class="card"><span class="k">ADR-009</span><h4>Extensions run out of process</h4><p>Hooks are commands, tools can come from MCP servers, and external agents are delegates. A broken extension can't crash the harness.</p></div>
+    <div class="card"><span class="k">ADR-008</span><h4>Legitimate auth only</h4><p>API keys and official sign-in programs. No reuse of Claude subscription logins. No delegate backends (ADR-026): models are reached only through provider APIs.</p></div>
+    <div class="card"><span class="k">ADR-009</span><h4>Extensions run out of process</h4><p>Hooks are commands and tools can come from MCP servers. A broken extension can't crash the harness.</p></div>
     <div class="card"><span class="k">ADR-010</span><h4>Linux-first sandbox</h4><p>bubblewrap with no network by default. Rules decide <em>when to ask</em>, the sandbox decides <em>what is possible</em>. macOS comes later.</p></div>
   </div>
 </section>
 
 <!-- ================= PART 1 PRD ================= -->
+<section class="sec intro-s" id="s0-3">
+  <div class="sh"><span class="sid">0.3</span><h2>Change log</h2></div>
+  <p>Changes made while building, each with its decision record (Part 5.2). Where this document and the code differ, the ADR explains why.</p>
+  <div class="tw"><table><thead><tr><th>Version</th><th>Change</th><th>Sections</th><th>Record</th></tr></thead><tbody>
+    <tr><td class="id">1.1</td><td>Crate package names use the <code>harness-</code> prefix (folders unchanged)</td><td>2.4, 3.2</td><td>ADR-013</td></tr>
+    <tr><td class="id">1.1</td><td>The trusted-project list is a TOML file, not a table in <code>user.db</code></td><td>2.9</td><td>ADR-014</td></tr>
+    <tr><td class="id">1.1</td><td>Seven events added to the protocol; "ApprovalGranted" is <code>ApprovalResolved</code></td><td>2.7, 3.3</td><td>ADR-015</td></tr>
+    <tr><td class="id">1.1</td><td><code>runtime</code> may depend on <code>context</code> (never on adapters)</td><td>2.4</td><td>ADR-016</td></tr>
+    <tr><td class="id">1.1</td><td><code>ApprovalId</code> in types, <code>Seq</code> newtype, <code>HARNESS_SECTION__KEY</code> variables, explicit workspace members, ports added when first used</td><td>2.10, 3.2, 3.3</td><td>ADR-017</td></tr>
+    <tr><td class="id">1.1</td><td>Licence: MIT OR Apache-2.0</td><td>3.2</td><td>ADR-018</td></tr>
+    <tr><td class="id">1.1</td><td>OpenAI provider moved from Phase 12 to Phase 1; <code>default_model</code> config key; <code>ApiKey</code> and <code>backoff_delay</code> shared in ports</td><td>1.6, 1.9, 3.4, 3.17, Ph 1, Ph 12</td><td>ADR-019</td></tr>
+    <tr><td class="id">1.1</td><td><code>ProviderEvent::BlockComplete</code> replaces <code>ToolCallEnd</code> and <code>Opaque</code></td><td>3.4</td><td>ADR-020</td></tr>
+    <tr><td class="id">1.1</td><td><code>ToolCtx</code> carries the tool call's <code>call_id</code></td><td>3.5</td><td>ADR-021</td></tr>
+    <tr><td class="id">1.1</td><td><code>ToolRegistry</code> lives in <code>ports</code></td><td>2.4, 3.5</td><td>ADR-022</td></tr>
+    <tr><td class="id">1.1</td><td>Keyring access through <code>keyring-core</code> + the Secret Service store</td><td>3.1</td><td>ADR-023</td></tr>
+    <tr><td class="id">1.1</td><td>A user message may follow a user message whose turn produced no reply</td><td>3.13</td><td>ADR-024</td></tr>
+    <tr><td class="id">1.1</td><td><code>pause_turn</code> ends the task with a warning until server-side tools exist</td><td>3.4</td><td>ADR-025</td></tr>
+    <tr><td class="id">1.1</td><td>No delegate backends: FR-PRV-08 and <code>provider-delegate</code> removed, delegate config dropped</td><td>0.2, 1.6, 1.10, 2.1, 2.4, 3.4, 3.11, 3.17, 5, Ph 12</td><td>ADR-026</td></tr>
+  </tbody></table></div>
+</section>
+
 <div class="part prd" id="partPRD"><span class="pl">Part 1 · Product Requirements Document</span><h2>What we are building, for whom, and why</h2><p>This part defines the product from the user's side. It does not prescribe implementation; that is Parts 2 and 3.</p></div>
 
 <section class="sec prd-s" id="s1-1">
@@ -496,13 +519,13 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
   <h3>Providers (PRV)</h3>
   <div class="tw"><table><thead><tr><th>ID</th><th>Requirement</th><th>Pri</th><th>Phase</th></tr></thead><tbody>
     <tr><td class="id">FR-PRV-01</td><td>Anthropic Messages API with an API key, with streaming, tools, images, PDFs, adaptive thinking, effort and prompt caching.</td><td><span class="pr p0">P0</span></td><td><span class="ph">Ph 1</span></td></tr>
-    <tr><td class="id">FR-PRV-02</td><td>OpenAI Responses API with an API key: streaming, function tools, images, files, reasoning effort, encrypted reasoning carried across turns.</td><td><span class="pr p1">P1</span></td><td><span class="ph">Ph 12</span></td></tr>
+    <tr><td class="id">FR-PRV-02</td><td>OpenAI Responses API with an API key: streaming, function tools, images, files, reasoning effort, encrypted reasoning carried across turns. <em>Moved to Phase 1 (ADR-019).</em></td><td><span class="pr p0">P0</span></td><td><span class="ph">Ph 1</span></td></tr>
     <tr><td class="id">FR-PRV-03</td><td>Capability flags per model (context window, vision, PDF, caching style, mid-conversation system messages, preserved reasoning). They MUST be read from the provider's models endpoint where available.</td><td><span class="pr p0">P0</span></td><td><span class="ph">Ph 1</span></td></tr>
     <tr><td class="id">FR-PRV-04</td><td>Retries with exponential backoff and jitter on 429, 5xx, overloaded and network errors, honouring <code>retry-after</code>.</td><td><span class="pr p0">P0</span></td><td><span class="ph">Ph 1</span></td></tr>
     <tr><td class="id">FR-PRV-05</td><td>A per-persona fallback chain of models, plus provider-side refusal fallbacks where offered.</td><td><span class="pr p1">P1</span></td><td><span class="ph">Ph 12</span></td></tr>
     <tr><td class="id">FR-PRV-06</td><td>Token and cost accounting per turn, task, session and persona.</td><td><span class="pr p1">P1</span></td><td><span class="ph">Ph 4</span></td></tr>
     <tr><td class="id">FR-PRV-07</td><td>An Anthropic OAuth profile (from <code>ant auth login</code>, billed to the API organisation) as an auth source.</td><td><span class="pr p2">P2</span></td><td><span class="ph">Ph 12</span></td></tr>
-    <tr><td class="id">FR-PRV-08</td><td>Delegate backends that run the official <code>claude</code> or <code>codex</code> CLI as an external agent, so a subscription can be used where the vendor's terms allow it. MUST be off by default.</td><td><span class="pr p2">P2</span></td><td><span class="ph">Ph 12</span></td></tr>
+    <tr><td class="id">FR-PRV-08</td><td><s>Delegate backends that run the official <code>claude</code> or <code>codex</code> CLI as an external agent.</s> <em>Removed: harness never hands tasks to external agent CLIs (ADR-026).</em></td><td><span class="pr p2">—</span></td><td><span class="ph">removed</span></td></tr>
     <tr><td class="id">FR-PRV-09</td><td>ChatGPT sign-in only through OpenAI's official third-party program, if the app can register.</td><td><span class="pr p2">P2</span></td><td><span class="ph">Ph 12</span></td></tr>
   </tbody></table></div>
 
@@ -613,7 +636,7 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
 <section class="sec prd-s" id="s1-9">
   <div class="sh"><span class="sid">1.9</span><h2>Release scope</h2></div>
   <div class="tw"><table><thead><tr><th>Release</th><th>Theme</th><th>Contents</th><th>Phases</th><th>≈ Week</th></tr></thead><tbody>
-    <tr><td class="id">v0.1</td><td>It works</td><td>Headless CLI, Anthropic provider, core tools, rules and approvals, event log, resume, pause, crash recovery, undo.</td><td>0–3</td><td>7</td></tr>
+    <tr><td class="id">v0.1</td><td>It works</td><td>Headless CLI, Anthropic and OpenAI providers, core tools, rules and approvals, event log, resume, pause, crash recovery, undo.</td><td>0–3</td><td>7</td></tr>
     <tr><td class="id">v0.3</td><td>It remembers</td><td>TUI, cost display, anchored compaction, recall, needle eval.</td><td>4–5</td><td>12</td></tr>
     <tr><td class="id">v0.5</td><td>It is a platform</td><td>Personas, hooks, skills, MCP, subagents.</td><td>6–10</td><td>19</td></tr>
     <tr><td class="id">v1.0</td><td>It is complete</td><td>Multimodal ingest, OpenAI provider and fallbacks, sandbox, long-term memory and auto-recall, JSON-RPC server, output schema, packaging.</td><td>11–15</td><td>28</td></tr>
@@ -637,7 +660,7 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
     </ul></div>
     <div class="card"><h4>Open questions</h4><ul>
       <li>Q1: Can your app register for ChatGPT sign-in? Decide in Phase 12.</li>
-      <li>Q2: Do the vendors' terms allow using their CLIs as delegates for your use? Re-check in Phase 12.</li>
+      <li><s>Q2: Do the vendors' terms allow using their CLIs as delegates?</s> Closed: no delegate backends (ADR-026).</li>
       <li>Q3: Should auto-recall be on by default? Decide from the Phase 14 eval.</li>
       <li>Q4: Is WASM worth it for in-process extensions? Decide after v1.0.</li>
     </ul></div>
@@ -650,7 +673,7 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
 <section class="sec sdd-s" id="s2-1">
   <div class="sh"><span class="sid">2.1</span><h2>System context</h2></div>
   <div class="panel dg">
-    <svg viewBox="0 0 860 300" role="img" aria-label="System context: user and scripts talk to the harness; the harness talks to model providers, MCP servers, hook scripts, delegate CLIs, the file system and the sandbox.">
+    <svg viewBox="0 0 860 300" role="img" aria-label="System context: user and scripts talk to the harness; the harness talks to model providers, MCP servers, hook scripts, the file system and the sandbox.">
       <defs><marker id="m2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah"/></marker></defs>
       <rect x="20" y="60" width="150" height="50" rx="10" class="bx"/><text x="95" y="90" text-anchor="middle" class="t1">You (TUI)</text>
       <rect x="20" y="130" width="150" height="50" rx="10" class="bx"/><text x="95" y="160" text-anchor="middle" class="t1">Scripts / CI</text>
@@ -664,7 +687,6 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
       <rect x="670" y="110" width="170" height="40" rx="9" class="bx"/><text x="755" y="135" text-anchor="middle" class="t1">MCP servers</text>
       <rect x="670" y="158" width="170" height="40" rx="9" class="bx"/><text x="755" y="183" text-anchor="middle" class="t1">Hook scripts</text>
       <rect x="670" y="206" width="170" height="40" rx="9" class="bx-guard"/><text x="755" y="231" text-anchor="middle" class="t1">Sandbox (bwrap)</text>
-      <rect x="670" y="254" width="170" height="40" rx="9" class="bx"/><text x="755" y="279" text-anchor="middle" class="t1">Delegate CLIs</text>
       <path d="M172 85 L286 120" class="ln" marker-end="url(#m2)" marker-start="url(#m2)"/>
       <path d="M172 155 L286 155" class="ln" marker-end="url(#m2)" marker-start="url(#m2)"/>
       <path d="M172 225 L286 190" class="ln" marker-end="url(#m2)" marker-start="url(#m2)"/>
@@ -673,7 +695,6 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
       <path d="M552 140 L666 130" class="ln" marker-end="url(#m2)" marker-start="url(#m2)"/>
       <path d="M552 165 L666 178" class="ln" marker-end="url(#m2)"/>
       <path d="M552 190 L666 226" class="ln" marker-end="url(#m2)"/>
-      <path d="M552 210 L666 272" class="ln-d" marker-end="url(#m2)"/>
     </svg>
   </div>
 </section>
@@ -686,7 +707,7 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
     <div class="card"><span class="k">P3</span><h4>Append, never rewrite</h4><p>Transcripts, the log and transcript-affecting decisions are all append-only. A change is a new event.</p></div>
     <div class="card"><span class="k">P4</span><h4>Everything speaks events</h4><p>The core receives <code>Op</code>s and emits <code>Event</code>s. UIs and servers only listen and send. Nothing in a library prints.</p></div>
     <div class="card"><span class="k">P5</span><h4>Capabilities, not provider names</h4><p>Code asks "does this model support PDF?" rather than "is this Anthropic?".</p></div>
-    <div class="card"><span class="k">P6</span><h4>Out-of-process extension</h4><p>Hooks, MCP and delegates run as separate processes, with timeouts and isolation.</p></div>
+    <div class="card"><span class="k">P6</span><h4>Out-of-process extension</h4><p>Hooks and MCP servers run as separate processes, with timeouts and isolation.</p></div>
     <div class="card"><span class="k">P7</span><h4>Safe by default, explicit to loosen</h4><p>Every loosening (trust, always-allow, full access) is a visible, logged choice.</p></div>
     <div class="card"><span class="k">P8</span><h4>Standards over invention</h4><p>Use AGENTS.md, SKILL.md, MCP and JSON Schema as they are.</p></div>
   </div>
@@ -725,7 +746,7 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
       </g>
 
       <rect x="10" y="372" width="840" height="88" rx="12" class="band"/><text x="24" y="392" class="tl">L5 · ADAPTERS</text>
-      <text x="30" y="416" class="t2">provider-anthropic · provider-openai · provider-delegate · tools (builtins) · mcp (rmcp → Tool) · store-sqlite</text>
+      <text x="30" y="416" class="t2">provider-anthropic · provider-openai · tools (builtins) · mcp (rmcp → Tool) · store-sqlite</text>
       <text x="30" y="436" class="t2">memory-sqlite (FTS5 / sqlite-vec) · policy (rules) · sandbox-linux (bwrap / landlock) · hooks (command runner) · ingest</text>
       <text x="30" y="452" class="t2">skills (loader) · persona (loader) — loaders feed config into the runtime, they are not ports</text>
     </svg>
@@ -734,20 +755,19 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
 
 <section class="sec sdd-s" id="s2-4">
   <div class="sh"><span class="sid">2.4</span><h2>Crate map</h2></div>
-  <p>One Cargo workspace. The "Must not depend on" column is enforced in CI with <code>cargo deny</code> bans or a small dependency-graph test.</p>
+  <p>One Cargo workspace. Package names carry a <code>harness-</code> prefix (for example <code>harness-types</code>, library path <code>harness_types</code>); the table uses the folder names under <code>crates/</code> (ADR-013). The dependency rules are enforced by a test that reads <code>cargo metadata</code> (<code>harness_testkit::arch</code>); every crate must have a rule.</p>
   <div class="tw"><table><thead><tr><th>Crate</th><th>Layer</th><th>Responsibility</th><th>Depends on</th><th>Must not depend on</th></tr></thead><tbody>
     <tr><td class="id">types</td><td>shared</td><td>Domain types: ids, Message, ContentBlock, Usage, Risk, BlobRef</td><td>serde</td><td>anything internal</td></tr>
     <tr><td class="id">protocol</td><td>L2</td><td>Op, Event, Envelope, ApprovalRequest</td><td>types</td><td>runtime, adapters</td></tr>
-    <tr><td class="id">ports</td><td>L4</td><td>Traits: Provider, Tool, EventLog, BlobStore, MemoryStore, Policy, Sandbox, HookRunner, Clock</td><td>types, protocol</td><td>adapters</td></tr>
+    <tr><td class="id">ports</td><td>L4</td><td>Traits: Provider, Tool, EventLog, BlobStore, Sandbox, ReadLedger, EventSink, Clock (Policy, HookRunner, MemoryStore added in Phases 2, 7, 14; ADR-017). Shared types: <code>ToolRegistry</code> (ADR-022), <code>ApiKey</code>, <code>backoff_delay</code> (ADR-019)</td><td>types, protocol</td><td>adapters</td></tr>
     <tr><td class="id">config</td><td>shared</td><td>Layered config loading, trust, validation</td><td>types</td><td>runtime</td></tr>
-    <tr><td class="id">runtime</td><td>L3</td><td>Session actor, turn engine, task manager</td><td>ports, protocol, context</td><td>any adapter crate</td></tr>
-    <tr><td class="id">context</td><td>L3</td><td>Request assembly, token budgets, compaction, anchors, recall, auto-recall</td><td>ports, types</td><td>adapters</td></tr>
+    <tr><td class="id">runtime</td><td>L3</td><td>Session actor, turn engine, task manager</td><td>types, ports, protocol, context (ADR-016)</td><td>any adapter crate</td></tr>
+    <tr><td class="id">context</td><td>L3</td><td>Request assembly, token budgets, compaction, anchors, recall, auto-recall</td><td>types, protocol, ports</td><td>adapters</td></tr>
     <tr><td class="id">persona</td><td>loader</td><td>PERSONA.md parsing, inheritance, resolution</td><td>config, types</td><td>runtime</td></tr>
     <tr><td class="id">skills</td><td>loader</td><td>SKILL.md discovery, index, activation</td><td>types</td><td>runtime</td></tr>
     <tr><td class="id">provider-anthropic</td><td>L5</td><td>Messages API adapter</td><td>ports, reqwest</td><td>runtime</td></tr>
     <tr><td class="id">provider-openai</td><td>L5</td><td>Responses API adapter</td><td>ports, reqwest</td><td>runtime</td></tr>
-    <tr><td class="id">provider-delegate</td><td>L5</td><td><code>claude</code> / <code>codex</code> CLI as external agents</td><td>ports</td><td>runtime</td></tr>
-    <tr><td class="id">tools</td><td>L5</td><td>Built-in tools, read ledger, patch engine, PTY manager</td><td>ports</td><td>runtime</td></tr>
+    <tr><td class="id">tools</td><td>L5</td><td>Built-in tools, read ledger, patch engine, PTY manager; in-memory blob store until Phase 3</td><td>ports</td><td>runtime</td></tr>
     <tr><td class="id">mcp</td><td>L5</td><td>MCP client manager, wraps MCP tools as <code>Tool</code></td><td>ports, rmcp</td><td>runtime</td></tr>
     <tr><td class="id">store-sqlite</td><td>L5</td><td>EventLog + BlobStore + snapshots on SQLite</td><td>ports, rusqlite</td><td>runtime</td></tr>
     <tr><td class="id">memory-sqlite</td><td>L5</td><td>MemoryStore on FTS5 (+ sqlite-vec)</td><td>ports, rusqlite</td><td>runtime</td></tr>
@@ -756,7 +776,7 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
     <tr><td class="id">hooks</td><td>L5</td><td>Command hook runner, matchers, timeouts</td><td>ports</td><td>runtime</td></tr>
     <tr><td class="id">ingest</td><td>L5</td><td>File type detection, converters, attachment cards</td><td>ports</td><td>runtime</td></tr>
     <tr><td class="id">tui · cli · server</td><td>L1</td><td>Front-ends. <code>cli</code> builds the binary and wires the adapters.</td><td>everything</td><td>n/a</td></tr>
-    <tr><td class="id">testkit</td><td>dev</td><td>Fake provider, recorded-stream replayer, temp projects, invariant checkers</td><td>ports, protocol</td><td>n/a (dev-only)</td></tr>
+    <tr><td class="id">testkit</td><td>dev</td><td>Fake provider, temp projects, fixed clock, recording sink, invariant checkers, layering checker</td><td>types, ports, protocol</td><td>n/a (dev-only)</td></tr>
   </tbody></table></div>
 </section>
 
@@ -772,8 +792,8 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
 
   <h3>C2 · Providers</h3>
   <div class="grid2">
-    <div class="card"><p>A <code>Provider</code> turns a neutral <code>ModelRequest</code> into a vendor's wire format and maps the streamed reply back into neutral <code>ProviderEvent</code>s. Provider-specific blocks (Claude's signed thinking blocks, OpenAI's encrypted reasoning items) are kept as <code>Opaque</code> content and replayed exactly.</p></div>
-    <div class="card"><p>A <code>ProviderRouter</code> resolves <code>"anthropic/claude-opus-5-5"</code> to an adapter and handles fallback chains. A delegate backend is a different trait, <code>AgentBackend</code>, because it runs a whole agent rather than a single model call. To the runtime it looks like a subagent.</p></div>
+    <div class="card"><p>A <code>Provider</code> turns a neutral <code>ModelRequest</code> into a vendor's wire format and maps the streamed reply back into neutral <code>ProviderEvent</code>s. Each finished block arrives as <code>ProviderEvent::BlockComplete</code>; provider-specific blocks (Claude's signed thinking blocks, OpenAI's encrypted reasoning items) are kept as <code>Opaque</code> content and replayed exactly (ADR-020).</p></div>
+    <div class="card"><p>A <code>ProviderRouter</code> resolves <code>"anthropic/claude-opus-5-5"</code> to an adapter and handles fallback chains.</p></div>
   </div>
 
   <h3>C3 · Tools</h3>
@@ -891,7 +911,7 @@ sequenceDiagram
   Po-->>T: Ask
   T-->>UI: Event::ApprovalRequested
   UI->>S: Op::Approve(Session)
-  T->>L: append ApprovalGranted + ToolStarted
+  T->>L: append ApprovalResolved + ToolStarted
   T->>X: run
   X-->>T: output (18k tokens)
   T->>L: append ToolFinished (full output)
@@ -977,8 +997,9 @@ stateDiagram-v2
     USER.md              # who you are, preferences
     notes/*.md           # user-scope memories
 ~/.local/share/harness/
-  user.db                # index of user memories, trusted projects
-  logs/harness.log       # tracing output (rotated)
+  trust.toml             # trusted projects (ADR-014)
+  user.db                # index of user memories (Phase 14)
+  logs/harness.YYYY-MM-DD.log   # tracing output, rotated daily, 7 kept
 # credentials: OS keyring only (service "harness")</script></div>
     <div class="cwrap"><div class="fname">Project level</div><script type="text/plain" data-code="text"><project>/
   AGENTS.md              # shared instructions standard
@@ -1005,7 +1026,7 @@ stateDiagram-v2
     <div class="slot"><b>2</b><span><code>~/.config/harness/config.toml</code></span><span class="tg">user</span></div>
     <div class="slot"><b>3</b><span><code>.harness/config.toml</code>, only if the project is trusted</span><span class="tg">project</span></div>
     <div class="slot"><b>4</b><span>Resolved persona (<code>[model]</code>, <code>[policy]</code>, etc.)</span><span class="tg">persona</span></div>
-    <div class="slot"><b>5</b><span>Environment variables <code>HARNESS_*</code></span><span class="tg">env</span></div>
+    <div class="slot"><b>5</b><span>Environment variables: <code>HARNESS_POLICY__PROFILE=ci</code> sets <code>policy.profile</code> (double underscore = nesting; <code>HARNESS_LOG</code> is reserved; ADR-017)</span><span class="tg">env</span></div>
     <div class="slot"><b>6</b><span>CLI flags and slash commands (session-only)</span><span class="tg">highest</span></div>
   </div>
 </section>
@@ -1088,7 +1109,7 @@ stateDiagram-v2
     <tr><td>MCP</td><td><code>rmcp</code> (official Rust SDK)</td><td>Client feature with stdio and streamable HTTP transports</td><td>A hand-rolled JSON-RPC client</td></tr>
     <tr><td>Ingest</td><td><code>infer</code>, <code>mime_guess</code>, <code>image</code>, <code>lopdf</code>/<code>pdf-extract</code>, <code>calamine</code>, <code>zip</code>, <code>quick-xml</code>, <code>csv</code></td><td><code>pdfium-render</code> optional for page images. <code>pandoc</code> and <code>ffmpeg</code> optional via CLI.</td><td></td></tr>
     <tr><td>Embeddings (P2)</td><td><code>fastembed</code> (local ONNX) or a provider embeddings API</td><td>Local by default, for privacy</td><td></td></tr>
-    <tr><td>Secrets</td><td><code>keyring</code></td><td></td><td>Plain-text keys in config</td></tr>
+    <tr><td>Secrets</td><td><code>keyring-core</code> + <code>zbus-secret-service-keyring-store</code> (pure-Rust crypto)</td><td>Linux Secret Service; other platforms fall back to environment variables for now (ADR-023)</td><td>Plain-text keys in config; the all-in-one <code>keyring</code> crate (its docs tell apps to use <code>keyring-core</code>)</td></tr>
     <tr><td>Testing</td><td><code>insta</code>, <code>wiremock</code>, <code>proptest</code>, <code>assert_cmd</code>, <code>tempfile</code></td><td></td><td></td></tr>
   </tbody></table></div>
 </section>
@@ -1105,7 +1126,7 @@ stateDiagram-v2
     types/  protocol/  ports/  config/
     runtime/  context/
     persona/  skills/
-    provider-anthropic/  provider-openai/  provider-delegate/
+    provider-anthropic/  provider-openai/
     tools/  mcp/  policy/  sandbox/  hooks/  ingest/
     store-sqlite/  memory-sqlite/
     tui/  server/  cli/     # cli = the `harness` binary
@@ -1118,20 +1139,25 @@ stateDiagram-v2
     needle/  compaction/  recovery/</script></div>
     <div class="cwrap"><div class="fname">Cargo.toml (excerpt)</div><script type="text/plain" data-code="toml">[workspace]
 resolver = "3"
-members = ["crates/*"]
+members = [                # listed explicitly (ADR-017)
+    "crates/types",
+    "crates/protocol",
+    # …one line per crate
+]
 
 [workspace.package]
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "MIT OR Apache-2.0"   # ADR-018
+publish = false
 
 [workspace.dependencies]
-# internal crates by path, so any crate can depend on any port
-types    = { path = "crates/types" }
-protocol = { path = "crates/protocol" }
-ports    = { path = "crates/ports" }
+# internal crates by path; packages use the harness- prefix (ADR-013)
+harness-types    = { path = "crates/types" }
+harness-protocol = { path = "crates/protocol" }
+harness-ports    = { path = "crates/ports" }
 # external crates: pin exact versions on day one
-tokio    = { version = "…", features = ["full"] }
-reqwest  = { version = "…", default-features = false, features = ["rustls-tls", "stream", "json"] }
+tokio    = { version = "…", default-features = false }   # crates enable the features they use
+reqwest  = { version = "…", default-features = false, features = ["rustls", "stream", "json", "http2", "system-proxy"] }
 rusqlite = { version = "…", features = ["bundled"] }
 
 [workspace.lints.clippy]
@@ -1142,9 +1168,11 @@ print_stdout = "deny"    # libraries emit events, never print</script></div>
 
 <section class="sec spec-s" id="s3-3">
   <div class="sh"><span class="sid">3.3</span><h2>Core types &amp; protocol</h2></div>
-  <div class="cwrap"><div class="fname">crates/types/src/lib.rs (essentials)</div><script type="text/plain" data-code="rust">pub type SessionId = Ulid;  pub type TaskId = Ulid;  pub type Seq = u64;
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct BlobRef(pub [u8; 32]);            // blake3 of the bytes
+  <div class="cwrap"><div class="fname">crates/types/src/lib.rs (essentials)</div><script type="text/plain" data-code="rust">// ULID newtypes, serialised as strings (ADR-017)
+pub struct SessionId(Ulid);  pub struct TaskId(Ulid);  pub struct ApprovalId(Ulid);
+pub struct Seq(pub u64);                     // newtype; Seq::FIRST == Seq(1)
+pub struct BlobRef([u8; 32]);                // blake3 of the bytes, serialised as 64 hex chars
+pub struct ModelRef { provider: String, model: String }   // "openai/gpt-6-luna"
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub enum Role { User, Assistant, System }   // System = appended mid-conversation note
@@ -1171,7 +1199,7 @@ pub struct Usage { pub input: u64, pub output: u64, pub cache_read: u64, pub cac
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum StopReason { EndTurn, ToolUse, MaxTokens, PauseTurn,
-                      Refusal { category: Option<String> }, Other(String) }
+                      Refusal { category: Option<String> }, Other { raw: String } }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Risk { ReadOnly { paths: Vec<PathBuf> }, Write { paths: Vec<PathBuf> },
@@ -1193,25 +1221,32 @@ pub enum Risk { ReadOnly { paths: Vec<PathBuf> }, Write { paths: Vec<PathBuf> },
 }
 pub enum Decision { Once, ForSession, Always { scope: RuleScope },
                     Deny { reason: Option<String> } }
-pub enum InputItem { Text(String), File(PathBuf), Blob(BlobRef) }</script></div>
+pub enum InputItem { Text { text: String }, File { path: PathBuf }, Blob { blob: BlobRef } }</script></div>
     <div class="cwrap"><div class="fname">crates/protocol: Event (out of the core)</div><script type="text/plain" data-code="rust">pub struct Envelope { pub seq: Seq, pub ts: i64,
                       pub session: SessionId, pub event: Event }
 pub enum Event {
     SessionOpened { persona: String, segment: u32 },
+    UserInput  { task: TaskId, message: Message },                 // ADR-015
+    SystemNote { task: TaskId, text: String },                     // ADR-015
     TaskState  { task: TaskId, from: TaskState, to: TaskState, reason: String },
     TurnStarted { task: TaskId, turn: u32 },
     TextDelta  { task: TaskId, text: String },
     ThinkingDelta { task: TaskId, text: String },   // only if display=summarized
     AssistantMessage { task: TaskId, message: Message },
+    AssistantAborted { task: TaskId, partial_text: String },     // ADR-015
     ToolCall   { task: TaskId, id: String, name: String, input: Value, risk: Risk },
     ApprovalRequested { id: ApprovalId, task: TaskId, call_id: String, reason: String },
+    ApprovalResolved  { id: ApprovalId, decision: Decision },   // ADR-015
     ToolStarted  { call_id: String },
     ToolOutput   { call_id: String, chunk: String },          // live stream
     ToolFinished { call_id: String, ok: bool, full: BlobOrText, sent: Vec<ContentBlock> },
     HookRan    { hook: String, event: String, outcome: HookOutcome },
+    CompactionStarted { segment: u32 },                          // ADR-015
     Compacted  { from_segment: u32, to_segment: u32, anchors: u32, before: u64, after: u64 },
+    SegmentOpened { segment: u32, opener: Message },             // ADR-015
     Recalled   { anchor: Option<String>, tokens: u64, auto: bool },
     SubagentSpawned { parent: TaskId, child: TaskId, persona: String },
+    UndoApplied { task: TaskId, paths: Vec<String> },            // ADR-015
     Usage      { task: TaskId, usage: Usage, cost_micros: u64 },
     Warning    { kind: String, message: String },
     Error      { kind: String, message: String, hint: Option<String> },
@@ -1247,13 +1282,18 @@ pub struct ModelRequest {
     pub cache_plan: CachePlan, pub output_schema: Option<Value>, pub show_thinking: bool,
 }
 
+// The runtime builds the assistant message ONLY from BlockComplete, in order,
+// so it matches the model's output exactly (ADR-003, ADR-020). The rest is for live display.
 pub enum ProviderEvent {
-    TextDelta(String), ThinkingDelta(String),
+    TextDelta { text: String }, ThinkingDelta { text: String },
     ToolCallStart { id: String, name: String }, ToolCallInputDelta { id: String, json: String },
-    ToolCallEnd { id: String },
-    Opaque(Value),                      // complete provider block to store and replay verbatim
-    Usage(Usage), Stop(StopReason), Notice(String),   // e.g. thinking dropped, fallback used
-}</script></div>
+    BlockComplete { block: ContentBlock },   // text, tool call (parsed input), or Opaque
+    Usage { usage: Usage }, Stop { reason: StopReason },
+    Notice { message: String },              // e.g. thinking dropped, fallback used
+}
+
+pub struct ApiKey(String);                   // Debug prints ApiKey(***) (ADR-019)
+pub fn backoff_delay(attempt: u32, retry_after: Option<Duration>, jitter_seed: u64) -> Duration;</script></div>
 
   <h3>Anthropic adapter (Messages API)</h3>
   <div class="grid2">
@@ -1281,7 +1321,7 @@ content-type: application/json
       <li>No assistant prefill, and no forced <code>tool_choice</code> (<code>any</code>/<code>tool</code>) on current models. Use <code>auto</code> plus <code>strict: true</code> tools, or structured output (<code>output_config.format</code>).</li>
       <li>Return <b>all</b> tool results of one assistant turn in <b>one</b> user message. Failures use <code>is_error: true</code>.</li>
       <li>Store every <code>thinking</code> and <code>redacted_thinking</code> block (with its signature) as <code>Opaque</code> and replay it unchanged within its segment.</li>
-      <li>Check <code>stop_reason</code> before reading content: <code>refusal</code> (read <code>stop_details</code>), <code>max_tokens</code> (a tool input may be truncated, so re-issue), <code>pause_turn</code> (resend to continue).</li>
+      <li>Check <code>stop_reason</code> before reading content: <code>refusal</code> (read <code>stop_details</code>), <code>max_tokens</code> (a tool input may be truncated, so re-issue), <code>pause_turn</code> (only produced by server-side tools; until those exist the task ends with a warning instead of sending an assistant-final request, ADR-025).</li>
       <li>For tools with large inputs (<code>write_file</code>, <code>apply_patch</code>) set <code>eager_input_streaming: true</code> and validate the parsed input against the schema yourself before running it.</li>
       <li>At most 4 cache breakpoints. Check <code>usage.cache_read_input_tokens</code>. If it stays at zero, something is changing the prefix.</li>
       <li>Send images and PDFs as base64 from the blob store, or as a Files API <code>file_id</code>. Never send a URL whose bytes might change.</li>
@@ -1323,10 +1363,12 @@ Authorization: Bearer <key>
     <div class="card"><h4>Rules</h4><ul>
       <li>Keep <code>store: false</code> and own the history yourself, so the event log stays the only source of truth.</li>
       <li>Replay <code>reasoning</code> items (with <code>encrypted_content</code>) as <code>Opaque</code>, in order, within the segment.</li>
-      <li>Map stream events: <code>response.output_text.delta</code> → TextDelta; <code>response.function_call_arguments.delta</code> → ToolCallInputDelta; <code>response.output_item.done</code> → Opaque or ToolCallEnd; <code>response.completed</code> → Usage + Stop.</li>
+      <li>Map stream events: <code>response.output_text.delta</code> → TextDelta; <code>response.function_call_arguments.delta</code> → ToolCallInputDelta; <code>response.reasoning_summary_text.delta</code> → ThinkingDelta; <code>response.output_item.done</code> → BlockComplete (text, function call, or Opaque reasoning); <code>response.completed</code> → Usage + Stop (<code>ToolUse</code> if the response had function calls).</li>
+      <li>Usage: <code>input_tokens</code> includes cache reads and writes; split them out using <code>input_tokens_details.cached_tokens</code> and <code>cache_write_tokens</code>.</li>
+      <li>Tools are <code>strict</code> only when every property is required and <code>additionalProperties</code> is false. A 429 with <code>insufficient_quota</code> is not retried.</li>
       <li>Caching is automatic on stable prefixes, so the same layout rules apply.</li>
       <li>Structured output uses <code>text.format</code> with a JSON schema.</li>
-      <li>OpenAI has no mid-conversation system role equivalent, so appended notes become a <code>&lt;harness-note&gt;</code> text block at the end of the next user message.</li>
+      <li>Appended notes become <code>developer</code> messages, which the Responses API accepts anywhere in the input.</li>
     </ul></div>
   </div>
 
@@ -1334,9 +1376,9 @@ Authorization: Bearer <key>
   <div class="tw"><table><thead><tr><th>Source</th><th>Mechanism</th><th>Status</th></tr></thead><tbody>
     <tr><td>Anthropic API key</td><td><code>x-api-key</code>. Read from the keyring or <code>ANTHROPIC_API_KEY</code>.</td><td><span class="pr p0">P0</span></td></tr>
     <tr><td>Anthropic OAuth profile (API organisation)</td><td>Run <code>ant auth print-credentials --access-token</code>, then send <code>Authorization: Bearer</code> plus <code>anthropic-beta: oauth-2025-04-20</code>. Fetch fresh per session and never store it.</td><td><span class="pr p2">P2</span></td></tr>
-    <tr><td>OpenAI API key</td><td><code>Authorization: Bearer</code>. Read from the keyring or <code>OPENAI_API_KEY</code>.</td><td><span class="pr p1">P1</span></td></tr>
-    <tr><td>Claude Pro/Max subscription</td><td><b>Not supported as a model provider.</b> Optional delegate: start the official <code>claude -p --output-format stream-json</code> as an external agent, only if Anthropic's terms allow your use when you build it.</td><td><span class="pr p2">P2 · gated</span></td></tr>
-    <tr><td>ChatGPT Plus/Pro</td><td>Official "Sign in with ChatGPT" only, if your app can register. Otherwise use the delegate <code>codex exec --json</code> or <code>codex app-server</code>.</td><td><span class="pr p2">P2 · gated</span></td></tr>
+    <tr><td>OpenAI API key</td><td><code>Authorization: Bearer</code>. Read from <code>keyring:openai</code> or <code>OPENAI_API_KEY</code>.</td><td><span class="pr p0">P0 (ADR-019)</span></td></tr>
+    <tr><td>Claude Pro/Max subscription</td><td><b>Not supported.</b> Anthropic's terms forbid third-party use of subscription logins, and harness does not delegate to the <code>claude</code> CLI (ADR-026). Claude needs an Anthropic API key.</td><td><span class="pr p2">—</span></td></tr>
+    <tr><td>ChatGPT Plus/Pro</td><td>Official "Sign in with ChatGPT" for the Responses API only, if your app can register. No delegation to the <code>codex</code> CLI (ADR-026).</td><td><span class="pr p2">P2 · gated</span></td></tr>
   </tbody></table></div>
 </section>
 
@@ -1353,10 +1395,13 @@ pub trait Tool: Send + Sync {
 
 pub struct ToolCtx {
     pub cwd: PathBuf, pub session: SessionId, pub task: TaskId,
+    pub call_id: String,                              // for live ToolOutput events (ADR-021)
     pub cancel: CancellationToken, pub sandbox: Arc<dyn Sandbox>,
-    pub blobs: Arc<dyn BlobStore>, pub ledger: Arc<ReadLedger>,
-    pub events: EventSink, pub writable_roots: Vec<PathBuf>,
+    pub blobs: Arc<dyn BlobStore>, pub ledger: Arc<dyn ReadLedger>,
+    pub events: Arc<dyn EventSink>, pub writable_roots: Vec<PathBuf>,
 }
+
+pub struct ToolRegistry { /* tools by name; specs() sorted by name */ }   // in ports (ADR-022)
 
 pub struct ToolOutput { pub content: Vec<ContentBlock>, pub summary: String,
                         pub touched: Vec<PathBuf> }     // for snapshots / undo</script></div>
@@ -1650,7 +1695,6 @@ quote exactly, and say plainly when evidence is weak. …</script></div>
     <li>The child finishes by calling the <code>return_result</code> tool (strict schema). If it ends without calling it, the harness makes one more request using structured output to extract the result. Forced <code>tool_choice</code> is not available on current Claude models.</li>
     <li>Approval requests bubble up to the user, labelled <code>[reader#2]</code>. Cancelling the parent cancels its children.</li>
     <li>Depth limit (default 2), a per-parent <code>max_parallel</code> semaphore, and a global limit (default 3).</li>
-    <li>A delegate (<code>delegate:claude-code</code>, <code>delegate:codex</code>) is spawned the same way but runs as an external agent. Your tools, hooks and rules don't apply inside it, and the UI marks it clearly.</li>
   </ul></div>
 </section>
 
@@ -1743,7 +1787,7 @@ CREATE VIRTUAL TABLE memories_fts USING fts5(title, body, tokenize = 'porter uni
   <div class="grid2">
     <div class="card"><h4>Invariants (tested)</h4><ol>
       <li><b>I1</b> Within a segment, request <em>n+1</em> equals request <em>n</em> plus appended messages: the same system, tools and message prefix, byte for byte.</li>
-      <li><b>I2</b> Every <code>ToolCall</code> in the transcript has exactly one <code>ToolResult</code> before the next model call.</li>
+      <li><b>I2</b> Every <code>ToolCall</code> in the transcript has exactly one <code>ToolResult</code> before the next model call. A user message may follow a user message when the previous turn produced no reply, such as a refusal (ADR-024); a request never ends with an assistant message.</li>
       <li><b>I3</b> Opaque blocks are replayed unchanged, only within the segment that produced them.</li>
       <li><b>I4</b> Compaction never happens while an assistant tool call is waiting for its result.</li>
       <li><b>I5</b> Every pinned fact is a verified substring of its source event.</li>
@@ -1920,6 +1964,7 @@ slash: /persona /model /effort /compact /recall /context /cost
 <section class="sec spec-s" id="s3-17">
   <div class="sh"><span class="sid">3.17</span><h2>Config reference</h2></div>
   <div class="cwrap"><div class="fname">~/.config/harness/config.toml (all keys, with defaults)</div><script type="text/plain" data-code="toml">default_persona = "default"
+default_model = "anthropic/claude-opus-5-5"   # e.g. "openai/gpt-6-luna" (ADR-019)
 
 [providers.anthropic]
 api_key = "keyring:anthropic"          # or env ANTHROPIC_API_KEY
@@ -1929,13 +1974,8 @@ preserved_thinking_mismatch = "drop_block"   # tests/CI use "error"
 betas = []                             # extra opt-in betas
 
 [providers.openai]
-api_key = "keyring:openai"
+api_key = "keyring:openai"             # or env OPENAI_API_KEY
 store = false
-
-[providers.delegate]
-enabled = false                        # Phase 12, ToS-gated
-claude_cmd = "claude"
-codex_cmd = "codex"
 
 [context]
 compact_at_ratio = 0.70
@@ -2025,7 +2065,7 @@ theme = "auto"</script></div>
 <section class="sec guard-s" id="s5-1">
   <div class="sh"><span class="sid">5.1</span><h2>What not to do</h2></div>
   <div class="dont">
-    <div><span class="x">01</span><div><b>Don't reuse or spoof Claude subscription logins.</b><p>It breaks Anthropic's terms, and requests are blocked server-side. <em>Instead:</em> use API keys, the <code>ant</code> OAuth profile billed to the API organisation, or a delegate that runs the official CLI where its terms allow.</p></div></div>
+    <div><span class="x">01</span><div><b>Don't reuse or spoof Claude subscription logins.</b><p>It breaks Anthropic's terms, and requests are blocked server-side. <em>Instead:</em> use API keys or the <code>ant</code> OAuth profile billed to the API organisation. Never hand tasks to a vendor's agent CLI either (ADR-026).</p></div></div>
     <div><span class="x">02</span><div><b>Don't edit a transcript after sending it.</b><p>On Claude Opus 5.5 and newer, it invalidates every later thinking block, and it throws away the prompt cache on every provider. <em>Instead:</em> append notes, cap outputs when recording them, and compact into a new segment.</p></div></div>
     <div><span class="x">03</span><div><b>Don't trim old tool outputs later.</b><p>That is a history edit. <em>Instead:</em> decide the capped form when the output is first recorded, and keep the full output in the log behind a recall handle.</p></div></div>
     <div><span class="x">04</span><div><b>Don't keep recent turns verbatim after a summary ("keep-tail" compaction).</b><p>Their thinking blocks were made with the full history present and fail the check. <em>Instead:</em> use simple compaction: summary + anchors + pending input, and nothing else replayed.</p></div></div>
@@ -2034,7 +2074,7 @@ theme = "auto"</script></div>
     <div><span class="x">07</span><div><b>Don't send temperature, top_p, top_k, assistant prefill or forced tool_choice to current Claude models.</b><p>They return 400 errors. <em>Instead:</em> control behaviour with effort, prompts, <code>strict</code> tools and structured output.</p></div></div>
     <div><span class="x">08</span><div><b>Don't store base64 in events, or reference images by changing URLs.</b><p>The log grows fast, and the API binds content by its bytes. <em>Instead:</em> use content-addressed blobs, and send base64 or a Files API id.</p></div></div>
     <div><span class="x">09</span><div><b>Don't let <code>runtime</code> import an adapter crate.</b><p>Once it does, modularity is gone. <em>Instead:</em> wire adapters in the <code>cli</code> crate, and enforce the rule with a dependency test.</p></div></div>
-    <div><span class="x">10</span><div><b>Don't build in-process dynamic plugins.</b><p>Rust has no stable ABI, and a bad plugin crashes everything. <em>Instead:</em> use hooks as commands, MCP servers and delegates, and consider WASM after v1.0.</p></div></div>
+    <div><span class="x">10</span><div><b>Don't build in-process dynamic plugins.</b><p>Rust has no stable ABI, and a bad plugin crashes everything. <em>Instead:</em> use hooks as commands and MCP servers, and consider WASM after v1.0.</p></div></div>
     <div><span class="x">11</span><div><b>Don't trust command parsing as your only defence.</b><p>There is always another way to write a dangerous command. <em>Instead:</em> rules for convenience, the sandbox as the wall.</p></div></div>
     <div><span class="x">12</span><div><b>Don't treat tool, web, file or MCP output as instructions.</b><p>That is how prompt injection works. <em>Instead:</em> wrap and label it as untrusted, and keep approvals and the sandbox in front of risky actions.</p></div></div>
     <div><span class="x">13</span><div><b>Don't re-run a non-read-only tool after a crash.</b><p><code>git push</code> twice, or a payment sent twice, can't be undone. <em>Instead:</em> report "outcome unknown" to the model and let it check.</p></div></div>
@@ -2058,11 +2098,25 @@ theme = "auto"</script></div>
     <div><div class="h"><code>ADR-005</code><b>SQLite FTS5 (then sqlite-vec) for memory; RushDB and graphify optional</b><span class="st">accepted</span></div><p><b>Context:</b> You asked whether RushDB or graphify improve memory. <b>Decision:</b> graphify solves code-structure exploration, so integrate it as a skill or MCP server. RushDB needs a Neo4j server; add it as a <code>MemoryStore</code> adapter only if you need shared memory across agents or machines. <b>Consequences:</b> zero-ops local memory now, with a clear upgrade path.</p></div>
     <div><div class="h"><code>ADR-006</code><b>Persona is a bundle; a subagent is a persona instance</b><span class="st">accepted</span></div><p><b>Context:</b> Personas and subagents overlap. <b>Decision:</b> one <code>ResolvedPersona</code> configures every task, top-level or child. <b>Consequences:</b> one mechanism, and any persona can be a subagent.</p></div>
     <div><div class="h"><code>ADR-007</code><b>Use AGENTS.md, SKILL.md and MCP as they are</b><span class="st">accepted</span></div><p><b>Decision:</b> read the standard formats and locations, including <code>.claude/skills</code> for compatibility. <b>Consequences:</b> existing skills and servers work on day one.</p></div>
-    <div><div class="h"><code>ADR-008</code><b>Legitimate auth only</b><span class="st">accepted</span></div><p><b>Decision:</b> API keys, the Anthropic OAuth profile for API organisations, and official ChatGPT sign-in if your app can register. Delegates are off by default and gated on the vendor's terms. <b>Consequences:</b> subscriptions are usable only through delegates, where their terms allow.</p></div>
-    <div><div class="h"><code>ADR-009</code><b>Extensions run out of process</b><span class="st">accepted</span></div><p><b>Decision:</b> hooks as commands, MCP for tools, delegates for agents. Revisit WASM after v1.0. <b>Consequences:</b> process start-up costs a few milliseconds, but crashes and hangs stay isolated.</p></div>
+    <div><div class="h"><code>ADR-008</code><b>Legitimate auth only</b><span class="st">accepted</span></div><p><b>Decision:</b> API keys, the Anthropic OAuth profile for API organisations, and official ChatGPT sign-in if your app can register. <b>Consequences:</b> subscriptions cannot be used. Delegate backends were removed by ADR-026.</p></div>
+    <div><div class="h"><code>ADR-009</code><b>Extensions run out of process</b><span class="st">accepted</span></div><p><b>Decision:</b> hooks as commands, MCP for tools (delegate agents removed by ADR-026). Revisit WASM after v1.0. <b>Consequences:</b> process start-up costs a few milliseconds, but crashes and hangs stay isolated.</p></div>
     <div><div class="h"><code>ADR-010</code><b>Linux-first sandbox via bubblewrap</b><span class="st">accepted</span></div><p><b>Decision:</b> bwrap with no network by default, Landlock as a fallback, macOS seatbelt as P1, and Windows unsandboxed with warnings. <b>Consequences:</b> strong safety on your platform, and portable later.</p></div>
     <div><div class="h"><code>ADR-011</code><b>Two edit tools</b><span class="st">accepted</span></div><p><b>Decision:</b> <code>edit_file</code> (exact replace + read guard) and <code>apply_patch</code> (multi-file). Personas pick which to expose. Claude models do well with string replace and OpenAI models are trained on the patch format. <b>Consequences:</b> slightly more code, better results on both providers.</p></div>
     <div><div class="h"><code>ADR-012</code><b>Raw HTTP providers</b><span class="st">accepted</span></div><p><b>Context:</b> there is no official Anthropic Rust SDK. <b>Decision:</b> <code>reqwest</code> + <code>eventsource-stream</code>, with typed request and response structs and replay tests against recorded streams. <b>Consequences:</b> you track API changes yourself. Fixture tests catch regressions.</p></div>
+    <div><div class="h"><code>ADR-013</code><b>Crate package names use the <code>harness-</code> prefix</b><span class="st">accepted</span></div><p><b>Context:</b> short names like <code>types</code> and <code>config</code> are ambiguous and clash with crates.io names. <b>Decision:</b> packages are <code>harness-&lt;name&gt;</code>; folders stay <code>crates/&lt;name&gt;</code>. <b>Consequences:</b> slightly longer names, unambiguous paths.</p></div>
+    <div><div class="h"><code>ADR-014</code><b>The trusted-project list is a TOML file</b><span class="st">accepted</span></div><p><b>Context:</b> Phase 0 needs trust before SQLite exists, and the list is tiny. <b>Decision:</b> <code>~/.local/share/harness/trust.toml</code>, canonical paths, atomic saves, permanently. <b>Consequences:</b> readable and editable by hand; <code>user.db</code> keeps its memory role.</p></div>
+    <div><div class="h"><code>ADR-015</code><b>Protocol events completed from the spec's flows</b><span class="st">accepted</span></div><p><b>Context:</b> the flows use events that the 3.3 list omitted, so transcripts could not be rebuilt from the log. <b>Decision:</b> add <code>UserInput</code>, <code>SystemNote</code>, <code>AssistantAborted</code>, <code>ApprovalResolved</code> (records denials too), <code>CompactionStarted</code>, <code>SegmentOpened</code>, <code>UndoApplied</code>. <b>Consequences:</b> any session can be replayed exactly.</p></div>
+    <div><div class="h"><code>ADR-016</code><b><code>runtime</code> may depend on <code>context</code></b><span class="st">accepted</span></div><p><b>Context:</b> the agent loop calls the context engine every turn; both are core logic. <b>Decision:</b> runtime → context is allowed; neither may depend on an adapter. <b>Consequences:</b> no extra port; the layering test still rejects adapter imports.</p></div>
+    <div><div class="h"><code>ADR-017</code><b>Phase 0 conventions</b><span class="st">accepted</span></div><p><b>Decision:</b> <code>ApprovalId</code> in types; <code>Seq</code> is a newtype; <code>HARNESS_SECTION__KEY</code> environment variables (<code>HARNESS_LOG</code> reserved); workspace members listed explicitly; ports are added in the phase that first uses them. <b>Consequences:</b> port shapes are designed with their first real use.</p></div>
+    <div><div class="h"><code>ADR-018</code><b>Licence: MIT OR Apache-2.0</b><span class="st">accepted</span></div><p><b>Decision:</b> dual licence, files <code>LICENSE-MIT</code> and <code>LICENSE-APACHE</code>. <b>Consequences:</b> anyone may use and modify the code with attribution; Apache-2.0 adds a patent grant.</p></div>
+    <div><div class="h"><code>ADR-019</code><b>OpenAI provider moved into Phase 1</b><span class="st">accepted</span></div><p><b>Context:</b> no Anthropic API key, and a Claude subscription cannot be used by third-party tools (ADR-008). <b>Decision:</b> build <code>provider-openai</code> in Phase 1, add <code>default_model</code>, route by the model's provider, share <code>ApiKey</code> and <code>backoff_delay</code> in ports. <b>Consequences:</b> Phase 1 verified live with OpenAI; Phase 12 shrinks.</p></div>
+    <div><div class="h"><code>ADR-020</code><b><code>ProviderEvent::BlockComplete</code></b><span class="st">accepted</span></div><p><b>Context:</b> rebuilding the assistant message from deltas can merge separate text blocks and break Claude's preserved thinking. <b>Decision:</b> adapters emit each finished block exactly; the runtime builds the transcript only from these. <code>ToolCallEnd</code> and <code>Opaque</code> events are removed. <b>Consequences:</b> exact transcripts on every provider.</p></div>
+    <div><div class="h"><code>ADR-021</code><b><code>ToolCtx</code> carries <code>call_id</code></b><span class="st">accepted</span></div><p><b>Context:</b> tools emit live output that the UI must attach to the right call. <b>Decision:</b> add <code>call_id</code> to <code>ToolCtx</code>. <b>Consequences:</b> one more field when building a context.</p></div>
+    <div><div class="h"><code>ADR-022</code><b><code>ToolRegistry</code> lives in ports</b><span class="st">accepted</span></div><p><b>Context:</b> runtime and context need the registry and must not depend on the <code>tools</code> adapter. <b>Decision:</b> the registry is a small shared type in ports. <b>Consequences:</b> MCP and skill tools register the same way as built-ins.</p></div>
+    <div><div class="h"><code>ADR-023</code><b>Keyring through <code>keyring-core</code></b><span class="st">accepted</span></div><p><b>Context:</b> the all-in-one <code>keyring</code> crate's docs tell applications to use <code>keyring-core</code> plus a chosen store. <b>Decision:</b> <code>keyring-core</code> + <code>zbus-secret-service-keyring-store</code> (pure-Rust crypto) on Linux; environment variables elsewhere for now. <b>Consequences:</b> fewer dependencies; macOS and Windows stores added later.</p></div>
+    <div><div class="h"><code>ADR-024</code><b>A user message may follow an unanswered user message</b><span class="st">accepted</span></div><p><b>Context:</b> after a refusal or empty reply no assistant message exists, which would block further input. <b>Decision:</b> allow it; both providers merge consecutive user turns. Tool pairing (I2) is unchanged. <b>Consequences:</b> a refusal never leaves a session stuck.</p></div>
+    <div><div class="h"><code>ADR-025</code><b><code>pause_turn</code> ends the task until server-side tools exist</b><span class="st">accepted</span></div><p><b>Context:</b> only server-side tools pause a turn, and continuing means sending an assistant-final request. <b>Decision:</b> end the task with a warning for now. <b>Consequences:</b> revisit when server-side tools are added.</p></div>
+    <div><div class="h"><code>ADR-026</code><b>No delegate backends</b><span class="st">accepted</span></div><p><b>Context:</b> delegating a task to the <code>claude</code> or <code>codex</code> CLI runs the vendor's agent loop instead of harness's, which defeats the purpose of the project. <b>Decision:</b> harness never hands tasks to external agent CLIs; FR-PRV-08 and <code>provider-delegate</code> are removed. <b>Consequences:</b> Claude needs an Anthropic API key; supersedes the delegate parts of ADR-008, ADR-009 and ADR-019.</p></div>
   </div>
 </section>
 
@@ -2070,7 +2124,7 @@ theme = "auto"</script></div>
   <div class="sh"><span class="sid">5.3</span><h2>Risk register</h2></div>
   <div class="tw"><table><thead><tr><th>Risk</th><th>Likelihood</th><th>Impact</th><th>Mitigation</th></tr></thead><tbody>
     <tr><td>Provider API changes break adapters</td><td>High</td><td>Medium</td><td>Version headers pinned in config, replay fixtures, a nightly live smoke test, adapters isolated in their own crates.</td></tr>
-    <tr><td>Vendor terms change around subscriptions or delegates</td><td>Medium</td><td>Medium</td><td>Delegates off by default. Re-check terms at Phase 12 and before each release.</td></tr>
+    <tr><td>Vendor terms change around API access or sign-in programs</td><td>Medium</td><td>Medium</td><td>API keys only; no subscription or delegate paths (ADR-026). Re-check provider terms before each release.</td></tr>
     <tr><td>Anchored compaction doesn't beat a plain summary</td><td>Medium</td><td>High</td><td>Build the needle eval first, compare against the server-compaction baseline, and tune anchor descriptions and auto-recall.</td></tr>
     <tr><td>Scope creep stalls the project</td><td>High</td><td>High</td><td>Strict phase exit criteria. P2 items may slip. Keep a "later" list.</td></tr>
     <tr><td>Token costs during development</td><td>Medium</td><td>Medium</td><td>Fake provider and fixtures for most tests. Haiku 5.5 for evals. A cost display from Phase 4.</td></tr>
@@ -2104,7 +2158,6 @@ theme = "auto"</script></div>
     <dt>Anchor</dt><dd>A labelled pointer in a summary to a range of events in the log, with a list of what that range contains.</dd>
     <dt>Append-only</dt><dd>History only grows. Nothing already sent to the model is changed or removed.</dd>
     <dt>Capability</dt><dd>A feature flag describing what a model supports (vision, PDF, caching style…).</dd>
-    <dt>Delegate</dt><dd>An external agent CLI (Claude Code, Codex) run as a subagent. Your tools and rules don't apply inside it.</dd>
     <dt>Event</dt><dd>An immutable record of something that happened. The event log is the source of truth.</dd>
     <dt>Opaque block</dt><dd>Provider data (signed thinking, encrypted reasoning) stored and replayed byte for byte.</dd>
     <dt>Persona</dt><dd>A bundle of prompt, model, tools, skills, MCP servers, hooks, policy and memory scope.</dd>
@@ -2180,8 +2233,8 @@ theme = "auto"</script></div>
     tasks:['Create the workspace, rust-toolchain.toml, workspace.dependencies and lints (deny unwrap_used, print_stdout).','CI: fmt, clippy -D warnings, nextest, cargo deny, with Linux x86_64 and aarch64 runners.','Crates types and protocol with the types from 3.3. Serde round-trip tests.','Crate ports with empty trait definitions from 3.4, 3.5 and 3.12.','Crate config: layered loading (2.10), keyring references, a trust list.','Tracing setup with a rotating file appender. HARNESS_LOG env filter.','testkit: FakeProvider that replays scripted ProviderEvents. Temp project helper.','docs/adr with ADR-001 to ADR-012 copied from 5.2.','Dependency-direction test: runtime must not depend on any adapter crate.'],
     exit:'cargo build and test pass in CI. The dependency test fails if runtime imports an adapter.',learn:'Cargo workspaces, trait design, serde enums.'},
    {n:1,t:'First loop',w:2,s:2,goal:'An end-to-end agent: prompt in, tool calls run, answer out, through the event protocol.',
-    reqs:'FR-PRV-01/03/04, FR-TOOL-01/02, FR-UI-01, FR-IN-01, FR-CTX-02',
-    tasks:['provider-anthropic: request structs, headers (version 2026-10-21), SSE parsing with eventsource-stream, text and tool_use deltas.','Thinking adaptive + effort. Store thinking blocks as Opaque and replay them.','Retries with backoff and retry-after. Typed errors. Capabilities from GET /v1/models/{id}.','Record fixtures from the live API and write wiremock replay tests with insta snapshots of request bodies.','tools: Tool trait, registry, shell (no sandbox yet, ask every time) and read_file.','runtime: session actor, turn engine loop, ToolCall→ToolResult pairing (I2), all results of a batch in one message.','context: minimal request builder following the 2.6 slot order, built-in default persona, AGENTS.md chain loader.','cli: harness run PROMPT printing events (human and --json formats). Exit codes.','Append-only invariant test in testkit (I1), enabled from now on.'],
+    reqs:'FR-PRV-01/02/03/04, FR-TOOL-01/02, FR-UI-01, FR-IN-01, FR-CTX-02',
+    tasks:['provider-anthropic: request structs, headers (version 2026-10-21), SSE parsing with eventsource-stream, text and tool_use deltas.','Thinking adaptive + effort. Store thinking blocks as Opaque and replay them.','Retries with backoff and retry-after. Typed errors. Capabilities from GET /v1/models/{id}.','Record fixtures from the live API and write wiremock replay tests with insta snapshots of request bodies.','tools: Tool trait, registry, shell (no sandbox yet, ask every time) and read_file.','runtime: session actor, turn engine loop, ToolCall→ToolResult pairing (I2), all results of a batch in one message.','context: minimal request builder following the 2.6 slot order, built-in default persona, AGENTS.md chain loader.','cli: harness run PROMPT printing events (human and --json formats). Exit codes.','Append-only invariant test in testkit (I1), enabled from now on.','provider-openai: Responses API mapping (3.4), encrypted reasoning replay, live fixtures and replay tests; default_model config key and provider routing in the CLI (ADR-019).'],
     exit:'harness run "how many .rs files are here and which is largest" works against the real API. The invariant test passes on 5 scripted sessions.',learn:'SSE streaming, async streams, the agent loop.'},
    {n:2,t:'Tools & policy',w:2,s:4,goal:'A useful coding agent that asks before it acts and can be trusted with edits.',
     reqs:'FR-TOOL-02..08, FR-SAFE-01/02/03/06',
@@ -2223,9 +2276,9 @@ theme = "auto"</script></div>
     reqs:'FR-IN-02/04/05/06',
     tasks:['ingest crate: type detection, blob storage, capability check.','Images: downscale and re-encode. Native blocks for both providers.','PDF: native document blocks. Text and page-image fallback.','Attachment cards and the read_attachment tool with page and range paging.','DOCX, PPTX, XLSX, CSV and archive converters.','Audio and video (P2): transcript and keyframes through optional external tools.'],
     exit:'UC-02 works with an 80-page PDF and a spreadsheet. A model without vision gets text fallbacks.',learn:'File formats, capability-driven design.'},
-   {n:12,t:'Providers II',w:2,s:22,goal:'Multiple providers, fallbacks, and legitimate subscription paths.',
-    reqs:'FR-PRV-02/05/07/08/09',
-    tasks:['provider-openai: Responses API mapping (3.4), encrypted reasoning replay, fixtures and replay tests.','ProviderRouter with per-persona fallback chains. Anthropic server-side refusal fallbacks.','Anthropic OAuth profile auth through ant print-credentials (P2).','Re-check vendor terms. If allowed, provider-delegate for claude -p and codex exec/app-server as AgentBackend.','If OpenAI\'s sign-in program accepts your app, implement it. Otherwise document the delegate path.','Cross-provider test: the same persona on both providers passes UC-01.'],
+   {n:12,t:'Providers II',w:2,s:22,goal:'Fallback chains and official sign-in paths (OpenAI moved to Phase 1, ADR-019; no delegates, ADR-026).',
+    reqs:'FR-PRV-05/07/09',
+    tasks:['Record Anthropic fixtures (needs an Anthropic API key) and add replay tests; check OpenAI token counting and xhigh effort.','ProviderRouter with per-persona fallback chains. Anthropic server-side refusal fallbacks.','Anthropic OAuth profile auth through ant print-credentials (P2).','If OpenAI\'s sign-in program accepts your app, implement it for the Responses API.','Cross-provider test: the same persona on both providers passes UC-01.'],
     exit:'UC-01 passes on both providers. A fallback triggers correctly in a simulated outage.',learn:'Adapter design, API differences.'},
    {n:13,t:'Sandbox',w:1,s:24,goal:'Commands run inside walls, not just behind questions.',
     reqs:'FR-SAFE-03/04, NFR-08',
