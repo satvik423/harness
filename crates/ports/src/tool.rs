@@ -65,6 +65,13 @@ impl fmt::Display for ToolName {
     }
 }
 
+// Lets maps keyed by `ToolName` be queried with `&str`; ordering matches `String`.
+impl std::borrow::Borrow<str> for ToolName {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
 impl TryFrom<String> for ToolName {
     type Error = InvalidToolName;
 
@@ -113,6 +120,8 @@ pub struct ToolCtx {
     pub session: SessionId,
     /// The task.
     pub task: TaskId,
+    /// Provider id of the tool call being run (used in live output events).
+    pub call_id: String,
     /// Cancelled when the call is interrupted; tools must stop promptly.
     pub cancel: CancellationToken,
     /// Wraps process execution (Phase 13; a pass-through until then).
@@ -133,6 +142,7 @@ impl fmt::Debug for ToolCtx {
             .field("cwd", &self.cwd)
             .field("session", &self.session)
             .field("task", &self.task)
+            .field("call_id", &self.call_id)
             .field("writable_roots", &self.writable_roots)
             .finish_non_exhaustive()
     }

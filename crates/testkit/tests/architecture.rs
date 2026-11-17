@@ -1,5 +1,8 @@
 //! Enforces the workspace's layering rules against the real `cargo metadata`.
 
+// Test-only file: helpers may unwrap (clippy's test exemption covers only #[test] fns).
+#![allow(clippy::unwrap_used)]
+
 use std::path::Path;
 
 use harness_testkit::arch::{DependencyGraph, check, harness_rules};

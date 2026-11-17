@@ -7,6 +7,11 @@ members = [
     "crates/config",
     "crates/testkit",
     "crates/cli",
+    "crates/tools",
+    "crates/context",
+    "crates/runtime",
+    "crates/provider-anthropic",
+    "crates/provider-openai",
 ]
 
 [workspace.package]
@@ -22,13 +27,24 @@ harness-types = { path = "crates/types" }
 harness-protocol = { path = "crates/protocol" }
 harness-ports = { path = "crates/ports" }
 harness-config = { path = "crates/config" }
+harness-context = { path = "crates/context" }
+harness-provider-anthropic = { path = "crates/provider-anthropic" }
+harness-provider-openai = { path = "crates/provider-openai" }
+harness-runtime = { path = "crates/runtime" }
+harness-testkit = { path = "crates/testkit" }
+harness-tools = { path = "crates/tools" }
 
 # ---- external crates: one version each, minimal features ----
 anyhow = "1.0.104"
 async-trait = "0.1.92"
+blake3 = "1.8.7"
 clap = { version = "4.6.7", features = ["derive"] }
 directories = "6.0.0"
+eventsource-stream = "0.2.3"
 futures = { version = "0.3.34", default-features = false, features = ["std", "alloc"] }
+keyring-core = "1.0.1"
+nix = { version = "0.32.0", default-features = false, features = ["signal"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream", "json", "http2", "system-proxy"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"
@@ -39,10 +55,13 @@ tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["env-filter", "fmt", "std"] }
 ulid = { version = "3.0.0", features = ["serde"] }
+zbus-secret-service-keyring-store = { version = "1.0.1", default-features = false, features = ["rt-async-io-crypto-rust"] }
 
 # ---- dev / test ----
+insta = { version = "1.49.0", features = ["json"] }
 proptest = "1.12.0"
 tempfile = "3.27.0"
+wiremock = "0.6.5"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

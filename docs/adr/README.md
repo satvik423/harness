@@ -22,3 +22,4 @@ Each record states the context, the decision and its consequences. Records 0001â
 | [ADR-016](0016-runtime-may-use-context.md) | `runtime` may depend on `context` | Accepted |
 | [ADR-017](0017-phase-0-conventions.md) | Phase 0 conventions | Accepted |
 | [ADR-018](0018-licence.md) | Licence: MIT OR Apache-2.0 | Accepted |
+| [ADR-019](0019-openai-provider-in-phase-1.md) | OpenAI provider moved into Phase 1 | Accepted |

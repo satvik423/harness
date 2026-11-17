@@ -3,6 +3,8 @@
 //! - [`FakeProvider`]: a scripted [`harness_ports::Provider`] that records every request
 //! - [`TempProject`]: a throwaway project directory
 //! - [`FixedClock`]: a controllable [`harness_ports::Clock`]
+//! - [`RecordingSink`]: an [`harness_ports::EventSink`] that keeps every event
+//! - [`invariants`]: transcript invariant checks (append-only I1, tool pairing I2, no prefill)
 //! - [`arch`]: layering checks that keep the architecture honest (P0-T9)
 //!
 //! This crate is a dev-dependency only; production crates must never depend
@@ -22,8 +24,11 @@
 pub mod arch;
 mod clock;
 mod fake_provider;
+pub mod invariants;
 mod project;
+mod sink;
 
 pub use clock::FixedClock;
 pub use fake_provider::FakeProvider;
 pub use project::{TempProject, TempProjectError};
+pub use sink::RecordingSink;

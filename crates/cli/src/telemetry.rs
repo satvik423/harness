@@ -70,6 +70,12 @@ pub fn filter_from(value: Option<&str>) -> Result<EnvFilter, TelemetryError> {
 /// # Errors
 /// [`TelemetryError::Appender`] if the directory cannot be created or opened.
 pub fn file_appender(dir: &Path) -> Result<RollingFileAppender, TelemetryError> {
+    // The appender prunes old files while it is being built and prints an
+    // error to stderr if the directory does not exist yet, so create it first.
+    std::fs::create_dir_all(dir).map_err(|e| TelemetryError::Appender {
+        dir: dir.display().to_string(),
+        message: e.to_string(),
+    })?;
     RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
         .filename_prefix("harness")

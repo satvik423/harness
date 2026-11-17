@@ -1,27 +1,40 @@
 # harness-cli
 
-The `harness` binary. In later phases it wires adapters into the runtime and
-hosts the commands from Tech spec 3.16. In Phase 0 it parses `--help` /
-`--version`, sets up logging and prints help.
+The `harness` binary. Wires the adapters into the runtime and hosts the commands.
 
-## Public API (library half)
+## Commands (Phase 1)
 
-| Item | Purpose |
+| Command | What it does |
 |---|---|
-| `telemetry::filter_from` | Parses `HARNESS_LOG` (default `info`) |
-| `telemetry::file_appender` | `harness.YYYY-MM-DD.log`, rotated daily, 7 files kept |
-| `telemetry::init` | Installs the global subscriber; keep the returned guard alive |
+| `harness` | Prints help |
+| `harness run PROMPT [--json] [--model provider/model] [--max-turns N] [--approval on-request\|never]` | Runs one prompt headless (Anthropic or OpenAI) and exits |
 
-## Usage
+See the [running guide](../guides/running.md) for setup and examples.
 
-```sh
-harness --version
-HARNESS_LOG=harness=debug,info harness
-tail -f ~/.local/share/harness/logs/harness.*.log
-```
+## Library modules
+
+| Module | Purpose |
+|---|---|
+| `run` | `run_session`: drives a session, renders events, asks approvals, handles Ctrl-C; `anthropic_settings` maps config to adapter settings |
+| `render` | `Renderer` (human: answer → stdout, activity → stderr; `--json`: one envelope per line) and `Outcome` (exit codes) |
+| `secrets` | `resolve_key(KeyFor::…)`: keyring entry (service `harness`), then the provider's environment variable; errors never show the key and include the `secret-tool` command |
+| `wiring` | `build_provider`: Anthropic or OpenAI adapter for the chosen model |
+| `telemetry` | Daily-rotated log file filtered by `HARNESS_LOG` |
+
+## Exit codes of `harness run`
+
+| Code | Meaning |
+|---|---|
+| 0 | Completed |
+| 1 | Error (provider, configuration, missing key) |
+| 2 | Turn budget exhausted (`--max-turns`) |
+| 3 | The model declined the request |
+| 4 | Completed, but actions needing approval were denied (`--approval never`) |
+| 130 | Interrupted (Ctrl-C) or cancelled |
 
 ## Design notes
 
-- Logs never go to stdout or stderr, because the TUI (Phase 4) owns the terminal.
-- The end-to-end tests run the real binary with `HOME` pointed at a temp dir,
-  so they never touch the user's files.
+- The keyring is read before the async runtime starts, because the keyring client blocks.
+- The first Ctrl-C interrupts the task; a second exits immediately with 130.
+- `run_session` takes injected streams and dependencies, so tests drive it with
+  `FakeProvider` and in-memory buffers.

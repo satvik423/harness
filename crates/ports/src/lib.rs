@@ -27,18 +27,24 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod credentials;
 mod ledger;
 mod provider;
+mod registry;
+mod retry;
 mod runtime;
 mod sandbox;
 mod store;
 mod tool;
 
+pub use credentials::ApiKey;
 pub use ledger::{FileStamp, LedgerCheck, ReadLedger};
 pub use provider::{
     CachePlan, CacheStyle, Capabilities, Effort, ModelRequest, Provider, ProviderError,
     ProviderEvent, ProviderStream, SystemPart, SystemSlot,
 };
+pub use registry::{DuplicateTool, ToolRegistry};
+pub use retry::{MAX_BACKOFF, MAX_RETRY_AFTER, backoff_delay};
 pub use runtime::{Clock, EventSink, SystemClock};
 pub use sandbox::{CommandSpec, Sandbox, SandboxError, SandboxMode};
 pub use store::{AppendRequest, BlobMeta, BlobStore, EventLog, LoggedEvent, SearchHit, StoreError};

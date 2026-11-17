@@ -8,7 +8,7 @@ use futures::StreamExt;
 use harness_ports::{
     CacheStyle, Capabilities, ModelRequest, Provider, ProviderError, ProviderEvent, ProviderStream,
 };
-use harness_types::{StopReason, Usage};
+use harness_types::{ContentBlock, StopReason, Usage};
 use tokio_util::sync::CancellationToken;
 
 type Turn = Vec<Result<ProviderEvent, ProviderError>>;
@@ -88,6 +88,9 @@ impl FakeProvider {
             Ok(ProviderEvent::TextDelta {
                 text: text.to_owned(),
             }),
+            Ok(ProviderEvent::BlockComplete {
+                block: ContentBlock::text(text),
+            }),
             Ok(ProviderEvent::Usage { usage }),
             Ok(ProviderEvent::Stop {
                 reason: StopReason::EndTurn,
@@ -98,38 +101,27 @@ impl FakeProvider {
     /// Appends a turn that requests one tool call with the given JSON input.
     #[must_use]
     pub fn with_tool_call_turn(self, id: &str, name: &str, input: &serde_json::Value) -> Self {
-        // Split the JSON in two so consumers must accumulate input deltas.
-        let json = input.to_string();
-        let mid = json
-            .char_indices()
-            .nth(json.chars().count() / 2)
-            .map_or(json.len(), |(i, _)| i);
-        let (first, second) = json.split_at(mid);
-        self.with_turn(vec![
-            Ok(ProviderEvent::ToolCallStart {
-                id: id.to_owned(),
-                name: name.to_owned(),
-            }),
-            Ok(ProviderEvent::ToolCallInputDelta {
-                id: id.to_owned(),
-                json: first.to_owned(),
-            }),
-            Ok(ProviderEvent::ToolCallInputDelta {
-                id: id.to_owned(),
-                json: second.to_owned(),
-            }),
-            Ok(ProviderEvent::ToolCallEnd { id: id.to_owned() }),
-            Ok(ProviderEvent::Usage {
-                usage: Usage {
-                    input: 10,
-                    output: 5,
-                    ..Usage::default()
-                },
-            }),
-            Ok(ProviderEvent::Stop {
-                reason: StopReason::ToolUse,
-            }),
-        ])
+        self.with_tool_calls_turn(&[(id, name, input.clone())])
+    }
+
+    /// Appends a turn that requests several tool calls in one reply.
+    #[must_use]
+    pub fn with_tool_calls_turn(self, calls: &[(&str, &str, serde_json::Value)]) -> Self {
+        let mut events: Turn = calls
+            .iter()
+            .flat_map(|(id, name, input)| tool_call_events(id, name, input))
+            .collect();
+        events.push(Ok(ProviderEvent::Usage {
+            usage: Usage {
+                input: 10,
+                output: 5,
+                ..Usage::default()
+            },
+        }));
+        events.push(Ok(ProviderEvent::Stop {
+            reason: StopReason::ToolUse,
+        }));
+        self.with_turn(events)
     }
 
     /// Number of scripted turns not yet consumed.
@@ -203,6 +195,40 @@ impl Provider for FakeProvider {
     }
 }
 
+/// Start, two input fragments, and the completed block for one tool call.
+///
+/// The JSON is split in two so consumers must accumulate input deltas, as with
+/// real providers.
+fn tool_call_events(id: &str, name: &str, input: &serde_json::Value) -> Turn {
+    let json = input.to_string();
+    let mid = json
+        .char_indices()
+        .nth(json.chars().count() / 2)
+        .map_or(json.len(), |(i, _)| i);
+    let (first, second) = json.split_at(mid);
+    vec![
+        Ok(ProviderEvent::ToolCallStart {
+            id: id.to_owned(),
+            name: name.to_owned(),
+        }),
+        Ok(ProviderEvent::ToolCallInputDelta {
+            id: id.to_owned(),
+            json: first.to_owned(),
+        }),
+        Ok(ProviderEvent::ToolCallInputDelta {
+            id: id.to_owned(),
+            json: second.to_owned(),
+        }),
+        Ok(ProviderEvent::BlockComplete {
+            block: ContentBlock::ToolCall {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                input: input.clone(),
+            },
+        }),
+    ]
+}
+
 /// One token per four characters, rounded up.
 fn estimate_tokens(chars: usize) -> u64 {
     u64::try_from(chars).unwrap_or(u64::MAX).div_ceil(4)
@@ -248,6 +274,9 @@ mod tests {
                 text: "Hi there".into()
             })
         );
+        assert!(events.contains(&ProviderEvent::BlockComplete {
+            block: ContentBlock::text("Hi there")
+        }));
         assert!(
             events
                 .iter()
@@ -292,13 +321,42 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&json).unwrap(),
             input
         );
-        assert!(events.contains(&ProviderEvent::ToolCallEnd { id: "c1".into() }));
+        assert!(events.contains(&ProviderEvent::BlockComplete {
+            block: ContentBlock::ToolCall {
+                id: "c1".into(),
+                name: "shell".into(),
+                input: input.clone()
+            }
+        }));
         assert_eq!(
             events.last(),
             Some(&ProviderEvent::Stop {
                 reason: StopReason::ToolUse
             })
         );
+    }
+
+    #[tokio::test]
+    async fn multi_call_turn_completes_each_call_in_order() {
+        let fake = FakeProvider::new().with_tool_calls_turn(&[
+            ("a", "read_file", serde_json::json!({"path": "x"})),
+            ("b", "shell", serde_json::json!({"command": "ls"})),
+        ]);
+        let ids: Vec<String> = collect(
+            fake.stream(request("x"), CancellationToken::new())
+                .await
+                .unwrap(),
+        )
+        .await
+        .into_iter()
+        .filter_map(|e| match e.unwrap() {
+            ProviderEvent::BlockComplete {
+                block: ContentBlock::ToolCall { id, .. },
+            } => Some(id),
+            _ => None,
+        })
+        .collect();
+        assert_eq!(ids, ["a", "b"]);
     }
 
     #[tokio::test]

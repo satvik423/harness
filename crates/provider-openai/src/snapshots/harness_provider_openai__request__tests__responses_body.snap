@@ -1,0 +1,80 @@
+---
+source: crates/provider-openai/src/request.rs
+expression: body()
+---
+{
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "input": [
+    {
+      "content": [
+        {
+          "text": "<environment/>",
+          "type": "input_text"
+        },
+        {
+          "text": "run ls",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    },
+    {
+      "encrypted_content": "enc",
+      "id": "rs_1",
+      "summary": [],
+      "type": "reasoning"
+    },
+    {
+      "content": [
+        {
+          "text": "Running it.",
+          "type": "output_text"
+        }
+      ],
+      "role": "assistant",
+      "type": "message"
+    },
+    {
+      "arguments": "{\"command\":\"ls\"}",
+      "call_id": "call_1",
+      "name": "shell",
+      "type": "function_call"
+    },
+    {
+      "call_id": "call_1",
+      "output": "a.txt",
+      "type": "function_call_output"
+    }
+  ],
+  "instructions": "base\n\nsoul",
+  "max_output_tokens": 64000,
+  "model": "gpt-test",
+  "reasoning": {
+    "effort": "high"
+  },
+  "store": false,
+  "stream": true,
+  "tools": [
+    {
+      "description": "Run a command.",
+      "name": "shell",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "type": "function"
+    }
+  ]
+}

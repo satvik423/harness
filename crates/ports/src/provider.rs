@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use harness_types::{Message, StopReason, Usage};
+use harness_types::{ContentBlock, Message, StopReason, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -20,7 +20,7 @@ pub type ProviderStream = BoxStream<'static, Result<ProviderEvent, ProviderError
 /// Adapters translate [`ModelRequest`] to their wire format and map the streamed
 /// reply back into [`ProviderEvent`]s. Provider-specific blocks that must be
 /// replayed verbatim (signed thinking, encrypted reasoning) are emitted as
-/// [`ProviderEvent::Opaque`].
+/// opaque blocks inside [`ProviderEvent::BlockComplete`].
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Stable provider id, for example `anthropic` or `openai`.
@@ -182,6 +182,11 @@ pub struct ModelRequest {
 }
 
 /// One item of a streamed model reply.
+///
+/// The runtime builds the assistant message **only** from
+/// [`ProviderEvent::BlockComplete`] events, in arrival order, so the transcript
+/// matches what the model produced exactly (required for preserved reasoning,
+/// ADR-003). The delta and start events exist for live display.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProviderEvent {
@@ -195,7 +200,7 @@ pub enum ProviderEvent {
         /// The fragment.
         text: String,
     },
-    /// A tool call began.
+    /// A tool call began (display only; the call itself arrives in [`ProviderEvent::BlockComplete`]).
     ToolCallStart {
         /// Provider call id.
         id: String,
@@ -209,15 +214,11 @@ pub enum ProviderEvent {
         /// Raw JSON fragment.
         json: String,
     },
-    /// A tool call's input is complete.
-    ToolCallEnd {
-        /// Provider call id.
-        id: String,
-    },
-    /// A complete provider block to store and replay verbatim.
-    Opaque {
-        /// The block exactly as received.
-        raw: Value,
+    /// A content block is complete: text, a tool call with parsed input, or an
+    /// opaque provider block (signed thinking, encrypted reasoning) to replay verbatim.
+    BlockComplete {
+        /// The finished block, exactly as it must appear in the transcript.
+        block: ContentBlock,
     },
     /// Token usage for the call (may arrive more than once; the last one wins).
     Usage {
@@ -414,6 +415,16 @@ mod tests {
                 SystemSlot::Memory
             ]
         );
+    }
+
+    #[test]
+    fn block_complete_round_trips_with_its_block() {
+        let e = ProviderEvent::BlockComplete {
+            block: ContentBlock::text("hi"),
+        };
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["type"], "block_complete");
+        assert_eq!(serde_json::from_value::<ProviderEvent>(v).unwrap(), e);
     }
 
     #[test]

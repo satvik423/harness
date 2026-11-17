@@ -224,6 +224,9 @@ pub fn harness_rules() -> Vec<LayerRule> {
             krate: "harness-testkit",
             allowed: Allowed::Only(&[TYPES, PROTOCOL, PORTS]),
         },
+        adapter("harness-tools"),
+        adapter("harness-provider-anthropic"),
+        adapter("harness-provider-openai"),
         LayerRule {
             krate: "harness-cli",
             allowed: Allowed::AllExcept(&["harness-testkit"]),

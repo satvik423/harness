@@ -1,0 +1,7 @@
+{
+  "id": "gpt-6-luna",
+  "object": "model",
+  "created": 1789406102,
+  "owned_by": "system",
+  "shutdown_date": null
+}

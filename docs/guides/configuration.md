@@ -35,6 +35,14 @@ HARNESS_DEFAULT_PERSONA=coder
 
 `HARNESS_LOG` is reserved for the log filter (for example `harness=debug,info`).
 
+## Default model
+
+```toml
+default_model = "openai/<model-id>"   # or "anthropic/claude-opus-5-5" (the default)
+```
+
+`harness run` uses this unless you pass `--model`. Supported providers: `anthropic`, `openai`.
+
 ## Secrets
 
 Config files never contain API keys. Use a reference instead:
@@ -43,6 +51,9 @@ Config files never contain API keys. Use a reference instead:
 [providers.anthropic]
 api_key = "keyring:anthropic"        # OS keyring, service "harness"
 # api_key = "env:ANTHROPIC_API_KEY"  # or an environment variable
+
+[providers.openai]
+api_key = "keyring:openai"           # falls back to OPENAI_API_KEY
 ```
 
 A plain key in a config file is rejected with an error that does not repeat the key.

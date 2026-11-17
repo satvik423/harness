@@ -16,6 +16,8 @@ use crate::{ConfigError, SecretRef};
 pub struct Config {
     /// Persona used when none is given.
     pub default_persona: String,
+    /// Model for the built-in `default` persona (and `harness run` without `--model`).
+    pub default_model: ModelRef,
     /// Model provider settings.
     pub providers: Providers,
     /// Context engine settings.
@@ -318,6 +320,9 @@ impl Default for Config {
         };
         Self {
             default_persona: "default".into(),
+            default_model: "anthropic/claude-opus-5-5"
+                .parse()
+                .expect("the built-in default model is valid"),
             providers: Providers::default(),
             context: ContextConfig::default(),
             policy: PolicyConfig::default(),
@@ -435,6 +440,17 @@ mod tests {
         assert_eq!(c.policy.profile, PolicyProfile::Auto);
         assert!(c.policy.default_deny_paths.iter().any(|p| p == "**/.env*"));
         assert!(!c.sandbox.network);
+    }
+
+    #[test]
+    fn default_model_defaults_to_claude_and_must_be_a_model_ref() {
+        assert_eq!(
+            Config::default().default_model.to_string(),
+            "anthropic/claude-opus-5-5"
+        );
+        let c: Config = toml::from_str("default_model = \"openai/gpt-5.5\"").unwrap();
+        assert_eq!(c.default_model.provider(), "openai");
+        assert!(toml::from_str::<Config>("default_model = \"gpt-5.5\"").is_err());
     }
 
     #[test]

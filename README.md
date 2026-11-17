@@ -4,7 +4,7 @@ A general-purpose, persona-driven agent harness written in Rust. It takes the
 best ideas from Claude Code, Codex CLI and Hermes, and adds a context engine
 that never loses details (append-only transcripts, anchored compaction, recall).
 
-**Status:** Phase 0 (foundations) complete. See [`docs/phases/`](docs/phases/).
+**Status:** Phase 1 (first loop) complete: `harness run` works with OpenAI and Anthropic models. See [`docs/phases/`](docs/phases/) and the [running guide](docs/guides/running.md).
 
 - Plan (PRD, design, spec, phases, guardrails): [`building-harness.html`](building-harness.html)
 - Documentation: [`docs/`](docs/README.md)

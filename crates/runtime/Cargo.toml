@@ -1,0 +1,30 @@
+[package]
+name = "harness-runtime"
+description = "Runtime: session actor and the agent loop (turn engine)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+futures.workspace = true
+harness-context.workspace = true
+harness-ports.workspace = true
+harness-protocol.workspace = true
+harness-types.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "rt", "macros", "time"] }
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+harness-testkit.workspace = true
+harness-tools.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["sync", "rt", "macros", "time", "rt-multi-thread"] }
+
+[lints]
+workspace = true

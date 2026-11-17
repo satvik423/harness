@@ -1,5 +1,8 @@
 //! `init` installs a global subscriber, so it gets its own test process.
 
+// Test-only file: helpers may unwrap (clippy's test exemption covers only #[test] fns).
+#![allow(clippy::unwrap_used)]
+
 use harness_cli::telemetry::{TelemetryError, filter_from, init};
 
 #[test]

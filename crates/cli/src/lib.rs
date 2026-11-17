@@ -1,8 +1,13 @@
 //! The `harness` binary's library half.
 //!
-//! In later phases this crate wires the adapters (providers, stores, tools,
-//! sandbox) into the runtime and hosts the CLI commands. In Phase 0 it only
-//! provides [`telemetry`]: file logging filtered by `HARNESS_LOG`.
+//! Wires the adapters (provider, tools, in-memory stores) into the runtime and
+//! hosts the CLI commands:
+//!
+//! - [`run`]: `harness run PROMPT` (headless, approvals on the terminal)
+//! - [`render`]: human and JSON output, exit codes
+//! - [`secrets`]: API keys from the keyring or environment
+//! - [`wiring`]: the provider for the chosen model
+//! - [`telemetry`]: file logging filtered by `HARNESS_LOG`
 //!
 //! # Example
 //! ```
@@ -12,4 +17,8 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod render;
+pub mod run;
+pub mod secrets;
 pub mod telemetry;
+pub mod wiring;
