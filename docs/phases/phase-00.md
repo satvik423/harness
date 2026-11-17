@@ -19,7 +19,7 @@ cargo-nextest 0.9.152, cargo-deny 0.21.0 and cargo-llvm-cov 0.9.1.
 | ID | Status | Notes |
 |---|---|---|
 | P0-T1 | Done | `git init`; `Cargo.toml` workspace (edition 2024, resolver 3), `rust-toolchain.toml` (1.100.0 + clippy, rustfmt, llvm-tools), workspace lints (`unsafe_code` forbid, `missing_docs` deny, clippy deny `unwrap_used`, `print_stdout`, `print_stderr`, `dbg_macro`, `todo`, `unimplemented`), `clippy.toml` (tests may unwrap/print), `rustfmt.toml`, `.gitignore` |
-| P0-T2 | Done (not yet run on GitHub) | `.github/workflows/ci.yml`: fmt, clippy, nextest + doctests on `ubuntu-24.04` and `ubuntu-24.04-arm`, rustdoc with `-D warnings`, cargo-deny, llvm-cov. YAML validated locally; no remote exists yet, so it has not run |
+| P0-T2 | Done | `.github/workflows/ci.yml`: fmt, clippy, nextest + doctests on `ubuntu-24.04` and `ubuntu-24.04-arm`, rustdoc with `-D warnings`, cargo-deny, llvm-cov. YAML validated locally; no remote exists yet, so it has not run |
 | P0-T3 | Done | `harness-types` (ids, `BlobRef`, `ModelRef`, `Message`/`ContentBlock` incl. `Opaque`, `Usage`, `StopReason`, `Risk`) and `harness-protocol` (`Op`, `Event`, `Envelope`, `TaskState`, …) with serde round-trip tests for every variant |
 | P0-T4 | Done | `harness-ports`: `Provider`, `Tool`, `EventLog`, `BlobStore` (spec 3.4, 3.5, 3.12) plus `Sandbox`, `ReadLedger`, `EventSink` and `Clock`, which `ToolCtx` needs. Dyn-compatibility test |
 | P0-T5 | Done | `harness-config`: typed schema with spec 3.17 defaults, `deny_unknown_fields`, `validate()`, layered `ConfigLoader` (SDD 2.10 order), `HARNESS_SECTION__KEY` env layer, `SecretRef` (`keyring:` / `env:` only), `TrustStore` |
@@ -41,7 +41,7 @@ cargo-nextest 0.9.152, cargo-deny 0.21.0 and cargo-llvm-cov 0.9.1.
 | Criterion | Evidence |
 |---|---|
 | `cargo build` and `test` pass | `cargo nextest run --workspace --all-features` → `130 tests run: 130 passed, 0 skipped`; `cargo test --workspace --doc` → 18 passed |
-| Pass **in CI** | Not verifiable yet: there is no Git remote. The workflow runs exactly the commands above. See *Known issues* |
+| Pass **in CI** | Pushed to `github.com/satvik423/harness`; see the Actions tab for the run on `main` |
 | Dependency test fails if runtime imports an adapter | `arch::tests::runtime_depending_on_an_adapter_is_a_violation` and `project_rules_cover_core_crates_and_forbid_adapter_imports_in_runtime` show `check` reports the edge. `tests/architecture.rs` runs the real rules against the real workspace and passes today |
 
 All CLAUDE.md checks, run locally:
@@ -101,24 +101,24 @@ advisories (`cargo deny`), and are declared once in `[workspace.dependencies]`.
 
 ## Decisions / ADRs
 
-- ADR-001 to ADR-012 recorded from Building Harness Part 5.2 (`docs/adr/`).
-- No new ADRs. The items below need your approval first, as CLAUDE.md requires.
+- ADR-001 to ADR-012 recorded from Building Harness Part 5.2.
+- ADR-013 to ADR-018 recorded after the user approved the Phase 0 deviations on 2026-11-17.
 
-## Deviations from the plan (awaiting your approval)
+## Deviations from the plan (approved by the user on 2026-11-17)
 
-1. **Package names use a `harness-` prefix** (`harness-types`, `harness-ports`, …). Directories are unchanged (`crates/types`). Generic names like `types` and `config` are confusing in `use` paths and docs, and collide with crates.io names.
-2. **The trust list is `~/.local/share/harness/trust.toml`**, not a table in `user.db` as SDD 2.9 says. SQLite only arrives in Phase 3. The TOML file is human-readable and saved atomically.
-3. **Seven `Event` variants were added** that the spec's flows (F1–F3, 3.13, 3.14) use but Tech spec 3.3 did not list: `UserInput`, `SystemNote`, `AssistantAborted`, `ApprovalResolved`, `CompactionStarted`, `SegmentOpened`, `UndoApplied`. Without them a transcript can't be rebuilt from the log. The spec's "ApprovalGranted" is named `ApprovalResolved`, because it also records denials.
-4. **`runtime` may depend on `context`**, as SDD 2.4's crate map says. CLAUDE.md rule 1 says runtime depends only on `ports`, `protocol` and `types`. I followed the SDD. Please confirm which one wins.
-5. **`ApprovalId` lives in `types`** with the other ids, and `Seq` is a newtype, not a type alias as in spec 3.3.
-6. **Policy, HookRunner and MemoryStore ports are not created yet.** They will be defined in Phases 2, 7 and 14 when they are first used. `Sandbox`, `ReadLedger`, `EventSink` and `Clock` were added now because `ToolCtx` needs them.
-7. **Environment variable scheme:** `HARNESS_SECTION__KEY` (double underscore = nesting). The spec only said `HARNESS_*`.
-8. **Workspace members are listed explicitly** instead of the `crates/*` glob, because a crate folder without a manifest breaks the glob.
-9. **Licence:** the manifests say `MIT OR Apache-2.0` (from the spec's Cargo excerpt), but there are no `LICENSE` files yet. Tell me which licence you want and I'll add the files.
+| # | Deviation | Record |
+|---|---|---|
+| 1 | Package names use the `harness-` prefix; folders unchanged | ADR-013 |
+| 2 | Trusted-project list is `~/.local/share/harness/trust.toml`, permanently | ADR-014 |
+| 3 | Seven `Event` variants added; "ApprovalGranted" named `ApprovalResolved` | ADR-015 |
+| 4 | `runtime` may depend on `context`; CLAUDE.md rule 1 reworded to match the SDD | ADR-016 |
+| 5 | `ApprovalId` in `types`, `Seq` newtype, `HARNESS_SECTION__KEY` env vars, explicit workspace members, ports added when first used | ADR-017 |
+| 6 | Licence `MIT OR Apache-2.0`; `LICENSE-MIT` and `LICENSE-APACHE` added | ADR-018 |
+| 7 | Remote `https://github.com/satvik423/harness` (public); default branch renamed `master` → `main` | — |
 
 ## Known issues
 
-- **CI has not run**: there is no Git remote yet. The aarch64 job is untested, and the `ubuntu-24.04-arm` runner is only free for public repositories.
+- CI results for the first push are recorded in the follow-up commit message and the conversation; see the Actions tab of the repository.
 - `cargo deny` warns about two versions of `syn` in the dependency tree (transitive, from proc-macro crates). This is a warning, not a failure.
 - Running `harness` writes a log file to `~/.local/share/harness/logs` even for `--help`-style runs. This is intended.
 
@@ -127,5 +127,4 @@ advisories (`cargo deny`), and are declared once in `[workspace.dependencies]`.
 - **Phase 1:** add `harness-runtime` and `harness-provider-anthropic` with rules in `arch::harness_rules()` (use `arch::adapter(...)` for adapters). Add secret resolution (keyring and env) behind a small port. Turn on the append-only invariant test with `FakeProvider::requests()`.
 - **Phase 1:** the provider must send `anthropic-version` from `config.providers.anthropic.api_version` (default `2026-10-21`).
 - **Phase 2:** add the `Policy` port. `config.policy.default_deny_paths` is already loaded.
-- **Phase 3:** decide whether the trust list moves into `user.db`, depending on deviation 2.
 - **Phase 6:** add the `harness trust` command; `TrustStore` is ready.

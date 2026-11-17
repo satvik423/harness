@@ -19,9 +19,10 @@ This repository builds **harness**: a general-purpose, persona-driven agent harn
 
 ### 1. Use proper design principles
 
-- Follow the architecture in SDD 2.2–2.4: ports and adapters. `runtime` and `context` depend only on
-  `ports`, `protocol` and `types`. Never on an adapter crate (`provider-*`, `store-*`, `tools`, `mcp`, …).
-  Adapters are wired together only in the `cli` crate.
+- Follow the architecture in SDD 2.2–2.4: ports and adapters. `context` depends only on `types`,
+  `protocol` and `ports`; `runtime` depends only on those plus `context` (ADR-016). Neither ever depends
+  on an adapter crate (`provider-*`, `store-*`, `tools`, `mcp`, …). Adapters are wired together only in
+  the `cli` crate. The rules are enforced by `harness_testkit::arch` and its workspace test.
 - SOLID, adapted to Rust:
   - One responsibility per module and type.
   - Small traits.

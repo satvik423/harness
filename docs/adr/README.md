@@ -1,6 +1,6 @@
 # Architecture decision records
 
-Each record states the context, the decision and its consequences. Records 0001–0012 come from *Building Harness*, Part 5.2.
+Each record states the context, the decision and its consequences. Records 0001–0012 come from *Building Harness*, Part 5.2. Records 0013 onward were made during the build and approved by the user.
 
 | ADR | Title | Status |
 |---|---|---|
@@ -16,3 +16,9 @@ Each record states the context, the decision and its consequences. Records 0001�
 | [ADR-010](0010-linux-first-sandbox.md) | Linux-first sandbox via bubblewrap | Accepted |
 | [ADR-011](0011-two-edit-tools.md) | Two edit tools | Accepted |
 | [ADR-012](0012-raw-http-providers.md) | Raw HTTP providers | Accepted |
+| [ADR-013](0013-crate-package-prefix.md) | Crate package names use the `harness-` prefix | Accepted |
+| [ADR-014](0014-trust-list-file.md) | The trusted-project list is a TOML file | Accepted |
+| [ADR-015](0015-protocol-event-additions.md) | Protocol events completed from the spec's flows | Accepted |
+| [ADR-016](0016-runtime-may-use-context.md) | `runtime` may depend on `context` | Accepted |
+| [ADR-017](0017-phase-0-conventions.md) | Phase 0 conventions | Accepted |
+| [ADR-018](0018-licence.md) | Licence: MIT OR Apache-2.0 | Accepted |
