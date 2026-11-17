@@ -6,7 +6,9 @@ use std::sync::Arc;
 use harness_context::{
     ActivePersona, Environment, SegmentContext, SegmentSpec, load_project_instructions,
 };
-use harness_ports::{BlobStore, Clock, EventSink, Provider, ReadLedger, Sandbox, ToolRegistry};
+use harness_ports::{
+    BlobStore, Clock, EventSink, Policy, Provider, ReadLedger, Sandbox, ToolRegistry,
+};
 use harness_protocol::{Envelope, Event, InputItem, Op, TaskState};
 use harness_types::{ContentBlock, SessionId, TaskId};
 use thiserror::Error;
@@ -15,7 +17,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use crate::approval::Approvals;
+use crate::approval::{Approvals, Questions};
 use crate::turn::{StopKind, StopSlot, TaskCtx, run_task};
 use crate::{ApprovalMode, BroadcastSink};
 
@@ -42,6 +44,8 @@ pub struct RuntimeDeps {
     pub blobs: Arc<dyn BlobStore>,
     /// Read-before-edit ledger.
     pub ledger: Arc<dyn ReadLedger>,
+    /// Decides allow, ask or deny for every tool call.
+    pub policy: Arc<dyn Policy>,
 }
 
 /// Per-session settings.
@@ -55,6 +59,11 @@ pub struct SessionConfig {
     pub approval: ApprovalMode,
     /// Maximum model calls per task.
     pub max_turns: u32,
+    /// Tool output cap in estimated tokens, unless a tool sets its own
+    /// (`context.output_cap_tokens`, default 2,000).
+    pub output_cap_tokens: u64,
+    /// Parallel-safe calls run at once, at most (`runtime.max_parallel_tools`).
+    pub max_parallel_tools: usize,
 }
 
 /// A cloneable handle for sending ops to a session.
@@ -121,6 +130,7 @@ pub fn spawn_session(
         ops: ops_rx,
         segment: None,
         approvals: Arc::default(),
+        questions: Arc::default(),
         running: None,
     };
     tokio::spawn(actor.run());
@@ -157,6 +167,7 @@ struct Actor {
     /// The current segment while idle; moved into the running task while busy.
     segment: Option<SegmentContext>,
     approvals: Arc<Approvals>,
+    questions: Arc<Questions>,
     running: Option<Running>,
 }
 
@@ -198,8 +209,13 @@ impl Actor {
         match op {
             Op::Submit { session, input } => self.submit(session, input).await,
             Op::Approve { request, decision } => {
-                if !self.approvals.resolve(request, decision) {
+                if !self.approvals.resolve(&request, decision) {
                     self.warn("unknown_approval", format!("no pending approval {request}"));
+                }
+            }
+            Op::Answer { request, answer } => {
+                if !self.questions.resolve(&request, answer) {
+                    self.warn("unknown_question", format!("no pending question {request}"));
                 }
             }
             Op::Interrupt { task } => self.stop_task(task, StopKind::Interrupt),
@@ -268,11 +284,14 @@ impl Actor {
             cwd: self.config.cwd.clone(),
             approval: self.config.approval,
             max_turns: self.config.max_turns,
+            output_cap_tokens: self.config.output_cap_tokens,
+            max_parallel_tools: self.config.max_parallel_tools,
             sink: Arc::clone(&self.sink),
             approvals: Arc::clone(&self.approvals),
+            questions: Arc::clone(&self.questions),
             cancel: cancel.clone(),
             stop: Arc::clone(&stop),
-            state: std::sync::Mutex::new(TaskState::Queued),
+            state: Arc::new(std::sync::Mutex::new(TaskState::Queued)),
         };
         let persona = self.config.persona.clone();
         let span = tracing::info_span!("task", session = %self.id, task = %task);

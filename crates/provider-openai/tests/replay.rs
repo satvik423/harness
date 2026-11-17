@@ -1,5 +1,5 @@
 //! Replays real Responses API recordings (`fixtures/streams/openai/`, recorded
-//! with gpt-6-luna by `examples/record_fixtures.rs`) through the provider.
+//! with gpt-6-luna by `examples/record_openai_fixtures.rs`) through the provider.
 
 // Test-only file: helpers may unwrap (clippy's test exemption covers only #[test] fns).
 #![allow(clippy::unwrap_used)]

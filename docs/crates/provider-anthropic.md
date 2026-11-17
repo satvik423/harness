@@ -49,4 +49,4 @@ and between stream events.
 - Unit: body mapping (insta snapshot + targeted asserts), decoder, status mapping, backoff.
 - `tests/http.rs`: wiremock server (headers, retries, retry-after, auth, cut streams, cancellation, count_tokens, capabilities).
 - Live recordings are not made yet (no Anthropic API key); `fixtures/README.md` has the command.
-- `examples/record_fixtures.rs`: re-records those fixtures (needs an API key).
+- `examples/record_anthropic_fixtures.rs`: re-records those fixtures (needs an API key).

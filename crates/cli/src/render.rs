@@ -127,6 +127,18 @@ impl Renderer {
             }
             Event::TurnFinished { .. } | Event::AssistantAborted { .. } => self.end_line(out)?,
             Event::ThinkingDelta { text, .. } => write!(err, "{text}")?,
+            Event::ToolCall { name, input, .. } if name == "todo" => {
+                self.end_line(out)?;
+                writeln!(err, "▸ todo")?;
+                for item in input["items"].as_array().into_iter().flatten() {
+                    let mark = match item["status"].as_str() {
+                        Some("completed") => "[x]",
+                        Some("in_progress") => "[~]",
+                        _ => "[ ]",
+                    };
+                    writeln!(err, "  {mark} {}", item["text"].as_str().unwrap_or(""))?;
+                }
+            }
             Event::ToolCall { name, input, .. } => {
                 self.end_line(out)?;
                 writeln!(err, "▸ {name}: {}", summarize_input(name, input))?;
@@ -177,11 +189,17 @@ fn shorten(text: &str, max: usize) -> String {
 #[must_use]
 pub fn summarize_input(name: &str, input: &Value) -> String {
     let field = match name {
-        "shell" => input["command"].as_str(),
-        "read_file" => input["path"].as_str(),
+        "shell" => input["command"].as_str().map(str::to_owned),
+        "read_file" | "write_file" | "edit_file" => input["path"].as_str().map(str::to_owned),
+        "glob" | "grep" => input["pattern"].as_str().map(str::to_owned),
+        "ask_user" => input["question"].as_str().map(str::to_owned),
+        "apply_patch" => input["patch"]
+            .as_str()
+            .and_then(|p| harness_tools::patch::parse_patch(p).ok())
+            .map(|p| p.paths().join(", ")),
         _ => None,
     };
-    shorten(&field.map_or_else(|| input.to_string(), str::to_owned), 120)
+    shorten(&field.unwrap_or_else(|| input.to_string()), 120)
 }
 
 /// The last non-empty line of a tool result, shortened.
@@ -197,7 +215,8 @@ fn last_line(content: &[ContentBlock]) -> String {
     shorten(
         text.lines()
             .rev()
-            .find(|l| !l.trim().is_empty())
+            .map(str::trim)
+            .find(|l| !l.is_empty() && *l != "</untrusted>")
             .unwrap_or(""),
         100,
     )
@@ -355,6 +374,59 @@ mod tests {
         );
         let other = summarize_input("mcp__x__y", &json!({"q": "a".repeat(300)}));
         assert!(other.chars().count() <= 121, "{other}");
+        for (name, input, want) in [
+            (
+                "write_file",
+                json!({"path": "a.rs", "content": "x"}),
+                "a.rs",
+            ),
+            (
+                "edit_file",
+                json!({"path": "b.rs", "old": "x", "new": "y"}),
+                "b.rs",
+            ),
+            ("glob", json!({"pattern": "**/*.rs"}), "**/*.rs"),
+            (
+                "grep",
+                json!({"pattern": "TODO", "mode": "content"}),
+                "TODO",
+            ),
+            ("ask_user", json!({"question": "Which one?"}), "Which one?"),
+            (
+                "apply_patch",
+                json!({"patch": "*** Begin Patch\n*** Update File: a.rs\n@@\n-x\n+y\n*** Add File: b.rs\n+1\n*** End Patch"}),
+                "a.rs, b.rs",
+            ),
+        ] {
+            assert_eq!(summarize_input(name, &input), want, "{name}");
+        }
+    }
+
+    #[test]
+    fn todo_calls_render_as_a_checklist() {
+        let (_, err) = render(
+            &mut Renderer::new(false),
+            vec![Event::ToolCall {
+                task: TaskId::new(),
+                id: "t".into(),
+                name: "todo".into(),
+                input: json!({"items": [
+                    {"text": "read", "status": "completed"},
+                    {"text": "fix", "status": "in_progress"},
+                    {"text": "test", "status": "pending"}
+                ]}),
+                risk: Risk::ReadOnly { paths: vec![] },
+            }],
+        );
+        assert_eq!(err, "▸ todo\n  [x] read\n  [~] fix\n  [ ] test\n");
+    }
+
+    #[test]
+    fn result_lines_skip_the_untrusted_wrapper() {
+        let sent = vec![ContentBlock::text(
+            "<untrusted source=\"file:a\">\n     1\thello\n</untrusted>",
+        )];
+        assert_eq!(last_line(&sent), "1\thello");
     }
 
     #[test]

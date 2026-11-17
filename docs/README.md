@@ -9,7 +9,7 @@ The full product plan (PRD, design, technical spec, phase plan, guardrails) is
 | [architecture/](architecture/overview.md) | How the crates fit together and which dependency directions are allowed |
 | [crates/](crates/) | One page per crate: purpose, public API, examples, design notes |
 | [adr/](adr/README.md) | Architecture decision records |
-| [guides/](guides/) | User guides: [running](guides/running.md), [configuration](guides/configuration.md) |
+| [guides/](guides/) | User guides: [running](guides/running.md), [configuration](guides/configuration.md), [permissions](guides/permissions.md) |
 | [phases/](phases/) | One report per completed phase |
 
 ## Crates
@@ -23,6 +23,7 @@ The full product plan (PRD, design, technical spec, phase plan, guardrails) is
 | `harness-context` | [context](crates/context.md) | L3 context engine |
 | `harness-runtime` | [runtime](crates/runtime.md) | L3 session actor and agent loop |
 | `harness-tools` | [tools](crates/tools.md) | L5 adapter: built-in tools |
+| `harness-policy` | [policy](crates/policy.md) | L5 adapter: policy engine (rules, profiles, shell analysis) |
 | `harness-provider-anthropic` | [provider-anthropic](crates/provider-anthropic.md) | L5 adapter: Anthropic Messages API |
 | `harness-provider-openai` | [provider-openai](crates/provider-openai.md) | L5 adapter: OpenAI Responses API |
 | `harness-testkit` | [testkit](crates/testkit.md) | dev-only test support |

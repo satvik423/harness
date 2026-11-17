@@ -4,17 +4,21 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use futures::StreamExt;
-use harness_context::{ActivePersona, SegmentContext};
+use harness_context::{ActivePersona, SegmentContext, cap_output};
 use harness_ports::{
-    EventSink, ProviderError, ProviderEvent, ProviderStream, RiskCtx, ToolCtx, ToolError,
+    EventSink, GrantScope, PolicyCall, ProviderError, ProviderEvent, ProviderStream, RiskCtx,
+    ToolCtx, ToolError, Verdict,
 };
-use harness_protocol::{BlobOrText, Decision, Event, TaskState};
+use harness_protocol::{BlobOrText, Decision, Event, RuleScope, TaskState};
 use harness_types::{
     ApprovalId, ContentBlock, Message, Risk, Role, SessionId, StopReason, TaskId, Usage,
 };
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use crate::approval::Approvals;
+use crate::approval::{Approvals, Questions};
+use crate::user::{SessionUser, transition};
 use crate::{ApprovalMode, RuntimeDeps};
 
 /// Why a task was asked to stop early.
@@ -37,11 +41,14 @@ pub(crate) struct TaskCtx {
     pub(crate) cwd: PathBuf,
     pub(crate) approval: ApprovalMode,
     pub(crate) max_turns: u32,
+    pub(crate) output_cap_tokens: u64,
+    pub(crate) max_parallel_tools: usize,
     pub(crate) sink: Arc<dyn EventSink>,
     pub(crate) approvals: Arc<Approvals>,
+    pub(crate) questions: Arc<Questions>,
     pub(crate) cancel: CancellationToken,
     pub(crate) stop: StopSlot,
-    pub(crate) state: Mutex<TaskState>,
+    pub(crate) state: Arc<Mutex<TaskState>>,
 }
 
 /// How the loop ended.
@@ -76,16 +83,7 @@ impl TaskCtx {
 
     /// Moves the task to `to`, emitting the transition from the current state.
     fn set_state(&self, to: TaskState, reason: impl Into<String>) {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let from = *state;
-        *state = to;
-        drop(state);
-        self.emit(Event::TaskState {
-            task: self.task,
-            from,
-            to,
-            reason: reason.into(),
-        });
+        transition(self.sink.as_ref(), self.task, &self.state, to, reason);
     }
 
     fn stop_kind(&self) -> Option<StopKind> {
@@ -281,8 +279,68 @@ async fn collect_reply(ctx: &TaskCtx, mut stream: ProviderStream) -> Reply {
     reply
 }
 
-/// Runs the calls of one assistant message in order. Returns one result per
-/// call (I2) and whether the task was stopped along the way.
+/// How the policy and the user ruled on one call, before it runs.
+enum Assessed {
+    /// Run it; `parallel` if it may run alongside other parallel-safe calls.
+    Run {
+        tool: Arc<dyn harness_ports::Tool>,
+        parallel: bool,
+    },
+    /// Do not run it; report this message to the model as an error result.
+    /// `true` if it was refused only because nobody can approve it.
+    Refused(String, bool),
+    /// The policy wants the user's approval first.
+    Ask {
+        tool: Arc<dyn harness_ports::Tool>,
+        call: PolicyCall,
+        reason: String,
+    },
+}
+
+/// Judges one call with the policy. Pure: emits nothing and asks nobody.
+fn assess(
+    ctx: &TaskCtx,
+    risk_ctx: &RiskCtx,
+    name: &str,
+    input: &serde_json::Value,
+) -> (Assessed, Option<Risk>) {
+    let Some(tool) = ctx.deps.tools.get(name) else {
+        return (
+            Assessed::Refused(format!("unknown tool {name:?}"), false),
+            None,
+        );
+    };
+    let risk = tool.risk(input, risk_ctx);
+    let call = PolicyCall {
+        tool: name.to_owned(),
+        input: input.clone(),
+        risk: risk.clone(),
+        cwd: risk_ctx.cwd.clone(),
+        writable_roots: risk_ctx.writable_roots.clone(),
+    };
+    let assessed = match ctx.deps.policy.evaluate(&call) {
+        Verdict::Allow { reason } => {
+            tracing::debug!(tool = name, %reason, "allowed by policy");
+            Assessed::Run {
+                parallel: tool.parallel_safe() && risk.is_read_only(),
+                tool,
+            }
+        }
+        Verdict::Deny {
+            reason,
+            approval_required,
+        } => Assessed::Refused(reason, approval_required),
+        Verdict::Ask { reason } => Assessed::Ask { tool, call, reason },
+    };
+    (assessed, Some(risk))
+}
+
+/// Runs the calls of one assistant message. Returns one result per call, in
+/// call order (I2), and whether the task was stopped along the way.
+///
+/// Calls are judged and approved one at a time, in order. A run of consecutive
+/// parallel-safe, allowed calls executes together (at most
+/// `max_parallel_tools` at once); every other call runs on its own.
 async fn run_calls(
     ctx: &TaskCtx,
     calls: &[(String, String, serde_json::Value)],
@@ -293,75 +351,204 @@ async fn run_calls(
     };
     let mut results = Vec::with_capacity(calls.len());
     let mut stopped = false;
-    for (id, name, input) in calls {
+    let mut i = 0;
+    while i < calls.len() {
+        let (id, name, input) = &calls[i];
         if stopped || ctx.cancel.is_cancelled() {
             stopped = true;
             results.push(error_result(ctx, id, "not run: the task was interrupted"));
+            i += 1;
             continue;
         }
-        let Some(tool) = ctx.deps.tools.get(name) else {
-            results.push(error_result(ctx, id, &format!("unknown tool {name:?}")));
-            continue;
-        };
-        let risk = tool.risk(input, &risk_ctx);
-        ctx.emit(Event::ToolCall {
-            task: ctx.task,
-            id: id.clone(),
-            name: name.clone(),
-            input: input.clone(),
-            risk: risk.clone(),
-        });
-        if !risk.is_read_only() {
-            match approve(ctx, id, &risk).await {
-                Approval::Granted => {}
-                Approval::Denied(reason) => {
-                    results.push(error_result(ctx, id, &reason));
-                    continue;
+        let (assessed, risk) = assess(ctx, &risk_ctx, name, input);
+        if let Some(risk) = &risk {
+            ctx.emit(Event::ToolCall {
+                task: ctx.task,
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+                risk: risk.clone(),
+            });
+        }
+        match assessed {
+            Assessed::Refused(reason, approval_required) => {
+                if risk.is_some() {
+                    // `approval_denied` tells headless front-ends to exit with code 4.
+                    let kind = if approval_required {
+                        "approval_denied"
+                    } else {
+                        "policy_denied"
+                    };
+                    ctx.emit(Event::Warning {
+                        kind: kind.into(),
+                        message: format!("{name}: {reason}"),
+                    });
                 }
-                Approval::Stopped => {
-                    stopped = true;
-                    results.push(error_result(ctx, id, "not run: the task was interrupted"));
-                    continue;
+                results.push(error_result(ctx, id, &reason));
+                i += 1;
+            }
+            Assessed::Ask { tool, call, reason } => {
+                match approve(ctx, id, &call, &reason).await {
+                    Approval::Granted => {
+                        let (block, cancelled) = run_one(ctx, &risk_ctx, tool, id, input).await;
+                        stopped |= cancelled;
+                        results.push(block);
+                    }
+                    Approval::Denied(reason) => results.push(error_result(ctx, id, &reason)),
+                    Approval::Stopped => {
+                        stopped = true;
+                        results.push(error_result(ctx, id, "not run: the task was interrupted"));
+                    }
                 }
+                i += 1;
+            }
+            Assessed::Run {
+                tool,
+                parallel: false,
+            } => {
+                let (block, cancelled) = run_one(ctx, &risk_ctx, tool, id, input).await;
+                stopped |= cancelled;
+                results.push(block);
+                i += 1;
+            }
+            Assessed::Run {
+                tool,
+                parallel: true,
+            } => {
+                // Gather the following calls that may also run in parallel.
+                let mut batch = vec![(i, tool)];
+                while let Some((next_id, next_name, next_input)) = calls.get(i + batch.len()) {
+                    let (
+                        Assessed::Run {
+                            tool,
+                            parallel: true,
+                        },
+                        Some(risk),
+                    ) = assess(ctx, &risk_ctx, next_name, next_input)
+                    else {
+                        break;
+                    };
+                    ctx.emit(Event::ToolCall {
+                        task: ctx.task,
+                        id: next_id.clone(),
+                        name: next_name.clone(),
+                        input: next_input.clone(),
+                        risk,
+                    });
+                    batch.push((i + batch.len(), tool));
+                }
+                let n = batch.len();
+                let (blocks, cancelled) = run_batch(ctx, &risk_ctx, calls, batch).await;
+                stopped |= cancelled;
+                results.extend(blocks);
+                i += n;
             }
         }
+    }
+    (results, stopped)
+}
+
+/// Builds the context for one call.
+fn tool_ctx(ctx: &TaskCtx, risk_ctx: &RiskCtx, id: &str) -> ToolCtx {
+    ToolCtx {
+        cwd: ctx.cwd.clone(),
+        session: ctx.session,
+        task: ctx.task,
+        call_id: id.to_owned(),
+        cancel: ctx.cancel.child_token(),
+        sandbox: Arc::clone(&ctx.deps.sandbox),
+        blobs: Arc::clone(&ctx.deps.blobs),
+        ledger: Arc::clone(&ctx.deps.ledger),
+        events: Arc::clone(&ctx.sink),
+        writable_roots: risk_ctx.writable_roots.clone(),
+        user: Arc::new(SessionUser {
+            task: ctx.task,
+            call_id: id.to_owned(),
+            mode: ctx.approval,
+            sink: Arc::clone(&ctx.sink),
+            questions: Arc::clone(&ctx.questions),
+            state: Arc::clone(&ctx.state),
+        }),
+    }
+}
+
+/// Turns a tool's outcome into result content; `true` if it was interrupted.
+fn outcome(
+    result: Result<harness_ports::ToolOutput, ToolError>,
+) -> (Vec<ContentBlock>, bool, bool) {
+    match result {
+        Ok(output) => (output.content, true, false),
+        Err(e) => {
+            let cancelled = e == ToolError::Cancelled;
+            (vec![ContentBlock::text(e.to_string())], false, cancelled)
+        }
+    }
+}
+
+/// Runs one call and records its result.
+async fn run_one(
+    ctx: &TaskCtx,
+    risk_ctx: &RiskCtx,
+    tool: Arc<dyn harness_ports::Tool>,
+    id: &str,
+    input: &serde_json::Value,
+) -> (ContentBlock, bool) {
+    ctx.emit(Event::ToolStarted {
+        call_id: id.to_owned(),
+    });
+    let cap = tool.output_cap_tokens().unwrap_or(ctx.output_cap_tokens);
+    let (content, ok, cancelled) =
+        outcome(tool.run(input.clone(), tool_ctx(ctx, risk_ctx, id)).await);
+    (record_result(ctx, id, content, ok, cap).await, cancelled)
+}
+
+/// Runs parallel-safe calls together, at most `max_parallel_tools` at once,
+/// and records their results in call order.
+async fn run_batch(
+    ctx: &TaskCtx,
+    risk_ctx: &RiskCtx,
+    calls: &[(String, String, serde_json::Value)],
+    batch: Vec<(usize, Arc<dyn harness_ports::Tool>)>,
+) -> (Vec<ContentBlock>, bool) {
+    let limit = Arc::new(Semaphore::new(ctx.max_parallel_tools.max(1)));
+    let mut set = JoinSet::new();
+    let mut caps = Vec::with_capacity(batch.len());
+    for (slot, (index, tool)) in batch.into_iter().enumerate() {
+        let (id, _, input) = &calls[index];
         ctx.emit(Event::ToolStarted {
             call_id: id.clone(),
         });
-        let tool_ctx = ToolCtx {
-            cwd: ctx.cwd.clone(),
-            session: ctx.session,
-            task: ctx.task,
-            call_id: id.clone(),
-            cancel: ctx.cancel.child_token(),
-            sandbox: Arc::clone(&ctx.deps.sandbox),
-            blobs: Arc::clone(&ctx.deps.blobs),
-            ledger: Arc::clone(&ctx.deps.ledger),
-            events: Arc::clone(&ctx.sink),
-            writable_roots: risk_ctx.writable_roots.clone(),
-        };
-        let (content, ok) = match tool.run(input.clone(), tool_ctx).await {
-            Ok(output) => (output.content, true),
-            Err(e) => {
-                stopped |= e == ToolError::Cancelled;
-                (vec![ContentBlock::text(e.to_string())], false)
-            }
-        };
-        ctx.emit(Event::ToolFinished {
-            call_id: id.clone(),
-            ok,
-            full: BlobOrText::Text {
-                text: text_of(&content),
-            },
-            sent: content.clone(),
-        });
-        results.push(ContentBlock::ToolResult {
-            call_id: id.clone(),
-            content,
-            is_error: !ok,
+        caps.push((
+            id.clone(),
+            tool.output_cap_tokens().unwrap_or(ctx.output_cap_tokens),
+        ));
+        let tool_ctx = tool_ctx(ctx, risk_ctx, id);
+        let input = input.clone();
+        let limit = Arc::clone(&limit);
+        set.spawn(async move {
+            // The semaphore is never closed, so acquiring only waits for a slot.
+            let _permit = limit.acquire_owned().await;
+            (slot, tool.run(input, tool_ctx).await)
         });
     }
-    (results, stopped)
+    let mut finished: Vec<Option<Result<harness_ports::ToolOutput, ToolError>>> =
+        (0..caps.len()).map(|_| None).collect();
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok((slot, result)) => finished[slot] = Some(result),
+            Err(e) => tracing::error!(error = %e, "a parallel tool call panicked"),
+        }
+    }
+    let mut blocks = Vec::with_capacity(caps.len());
+    let mut cancelled = false;
+    for ((id, cap), result) in caps.into_iter().zip(finished) {
+        let result = result
+            .unwrap_or_else(|| Err(ToolError::Failed("the tool stopped unexpectedly".into())));
+        let (content, ok, was_cancelled) = outcome(result);
+        cancelled |= was_cancelled;
+        blocks.push(record_result(ctx, &id, content, ok, cap).await);
+    }
+    (blocks, cancelled)
 }
 
 /// An error result for a call that did not run, reported to the UI as a failed tool.
@@ -382,17 +569,71 @@ fn error_result(ctx: &TaskCtx, id: &str, message: &str) -> ContentBlock {
     }
 }
 
-/// Asks for (or, under [`ApprovalMode::Never`], refuses) approval of one call.
-async fn approve(ctx: &TaskCtx, call_id: &str, risk: &Risk) -> Approval {
-    let action = describe(risk);
+/// Full outputs larger than this are stored as a blob instead of inline text.
+const INLINE_FULL_MAX_BYTES: usize = 64 * 1024;
+
+/// Records a finished call and returns the result block for the transcript.
+///
+/// This is the one place output is capped (FR-TOOL-04): the capped form is
+/// decided here, stored in the event as `sent`, and never changes afterwards.
+/// The footer points at this event's own sequence number, where `full` keeps
+/// the complete output.
+async fn record_result(
+    ctx: &TaskCtx,
+    id: &str,
+    content: Vec<ContentBlock>,
+    ok: bool,
+    cap_tokens: u64,
+) -> ContentBlock {
+    let text = text_of(&content);
+    let full = if text.len() > INLINE_FULL_MAX_BYTES {
+        match ctx
+            .deps
+            .blobs
+            .put(text.clone().into_bytes(), "text/plain; charset=utf-8", None)
+            .await
+        {
+            Ok(blob) => BlobOrText::Blob { blob },
+            Err(e) => {
+                // Keeping the text inline is worse for the log but loses nothing.
+                tracing::warn!(error = %e, "could not store tool output as a blob");
+                BlobOrText::Text { text }
+            }
+        }
+    } else {
+        BlobOrText::Text { text }
+    };
+    let mut sent = Vec::new();
+    let mut full = Some(full);
+    ctx.sink.emit_with(&mut |seq| {
+        sent = cap_output(&content, cap_tokens, seq);
+        Event::ToolFinished {
+            call_id: id.to_owned(),
+            ok,
+            full: full.take().unwrap_or(BlobOrText::Text {
+                text: String::new(),
+            }),
+            sent: sent.clone(),
+        }
+    });
+    ContentBlock::ToolResult {
+        call_id: id.to_owned(),
+        content: sent,
+        is_error: !ok,
+    }
+}
+
+/// Asks the user about one call (or refuses under [`ApprovalMode::Never`]), and
+/// remembers session and permanent grants with the policy.
+async fn approve(ctx: &TaskCtx, call_id: &str, call: &PolicyCall, reason: &str) -> Approval {
     if ctx.approval == ApprovalMode::Never {
         ctx.emit(Event::Warning {
             kind: "approval_denied".into(),
-            message: format!("denied without asking: {action} (approval policy: never)"),
+            message: format!("denied without asking: {reason} (approval policy: never)"),
         });
-        return Approval::Denied(
-            "Denied: this session does not allow actions that need approval (approval policy: never). Do not retry; continue without it or explain what you need.".into(),
-        );
+        return Approval::Denied(format!(
+            "Denied: {reason} needs approval, and this session does not ask (approval policy: never). Do not retry; continue without it or explain what you need."
+        ));
     }
     let id = ApprovalId::new();
     let rx = ctx.approvals.register(id);
@@ -401,13 +642,13 @@ async fn approve(ctx: &TaskCtx, call_id: &str, risk: &Risk) -> Approval {
         id,
         task: ctx.task,
         call_id: call_id.to_owned(),
-        reason: action,
+        reason: reason.to_owned(),
     });
     let decision = tokio::select! {
         decision = rx => decision.ok(),
         () = ctx.cancel.cancelled() => None,
     };
-    ctx.approvals.forget(id);
+    ctx.approvals.forget(&id);
     let Some(decision) = decision else {
         return Approval::Stopped;
     };
@@ -416,32 +657,38 @@ async fn approve(ctx: &TaskCtx, call_id: &str, risk: &Risk) -> Approval {
         decision: decision.clone(),
     });
     ctx.set_state(TaskState::Running, "approval answered");
-    match decision {
-        Decision::Deny { reason } => Approval::Denied(format!(
-            "The user denied this action{}",
-            reason.map(|r| format!(": {r}")).unwrap_or_default()
-        )),
-        // Phase 1 treats every grant as one-off; remembered grants arrive with the policy engine (Phase 2).
-        Decision::Once | Decision::ForSession | Decision::Always { .. } => Approval::Granted,
+    let scope = match decision {
+        Decision::Deny { reason } => {
+            return Approval::Denied(format!(
+                "The user denied this action{}",
+                reason.map(|r| format!(": {r}")).unwrap_or_default()
+            ));
+        }
+        Decision::Once => return Approval::Granted,
+        Decision::ForSession => GrantScope::Session,
+        Decision::Always {
+            scope: RuleScope::User,
+        } => GrantScope::User,
+        Decision::Always {
+            scope: RuleScope::Project,
+        } => GrantScope::Project,
+    };
+    // Saving a rule may write a file: keep it off the async workers.
+    let policy = Arc::clone(&ctx.deps.policy);
+    let owned = call.clone();
+    let remembered = tokio::task::spawn_blocking(move || policy.remember(&owned, scope)).await;
+    match remembered {
+        Ok(Ok(what)) => tracing::info!(%what, "approval remembered"),
+        Ok(Err(e)) => ctx.emit(Event::Warning {
+            kind: "approval_not_remembered".into(),
+            message: format!("approved this once only: {e}"),
+        }),
+        Err(e) => ctx.emit(Event::Warning {
+            kind: "approval_not_remembered".into(),
+            message: format!("approved this once only: {e}"),
+        }),
     }
-}
-
-/// A short human description of what a call would do.
-fn describe(risk: &Risk) -> String {
-    match risk {
-        Risk::ReadOnly { .. } => "read files".into(),
-        Risk::Write { paths } => format!(
-            "write {}",
-            paths
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        Risk::Exec { command } => format!("run `{command}`"),
-        Risk::Network { host } => format!("contact {host}"),
-        Risk::External { what } => what.clone(),
-    }
+    Approval::Granted
 }
 
 /// Concatenated text of result content.

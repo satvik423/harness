@@ -1,7 +1,8 @@
 //! [`Event`]: everything the core reports, and the [`Envelope`] that orders it.
 
 use harness_types::{
-    ApprovalId, BlobRef, ContentBlock, Message, Risk, Seq, SessionId, StopReason, TaskId, Usage,
+    ApprovalId, BlobRef, ContentBlock, Message, QuestionId, Risk, Seq, SessionId, StopReason,
+    TaskId, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -204,6 +205,28 @@ pub enum Event {
         /// The decision.
         decision: Decision,
     },
+    /// A tool (`ask_user`) asks the user a question; answer with [`crate::Op::Answer`].
+    QuestionAsked {
+        /// The request id to answer with.
+        id: QuestionId,
+        /// The task.
+        task: TaskId,
+        /// The tool call asking.
+        call_id: String,
+        /// The question text.
+        question: String,
+        /// Suggested answers (the user may answer in their own words).
+        options: Vec<String>,
+        /// Whether several options may be chosen.
+        multi: bool,
+    },
+    /// A question was answered.
+    QuestionAnswered {
+        /// The request.
+        id: QuestionId,
+        /// The answer.
+        answer: String,
+    },
     /// A tool started running.
     ToolStarted {
         /// The tool call.
@@ -338,6 +361,8 @@ impl Event {
             Self::ToolCall { .. } => "tool_call",
             Self::ApprovalRequested { .. } => "approval_requested",
             Self::ApprovalResolved { .. } => "approval_resolved",
+            Self::QuestionAsked { .. } => "question_asked",
+            Self::QuestionAnswered { .. } => "question_answered",
             Self::ToolStarted { .. } => "tool_started",
             Self::ToolOutput { .. } => "tool_output",
             Self::ToolFinished { .. } => "tool_finished",
@@ -428,6 +453,18 @@ mod tests {
             Event::ApprovalResolved {
                 id: ApprovalId::new(),
                 decision: Decision::Once,
+            },
+            Event::QuestionAsked {
+                id: QuestionId::new(),
+                task: t,
+                call_id: "c2".into(),
+                question: "Which database?".into(),
+                options: vec!["SQLite".into(), "Postgres".into()],
+                multi: false,
+            },
+            Event::QuestionAnswered {
+                id: QuestionId::new(),
+                answer: "SQLite".into(),
             },
             Event::ToolStarted {
                 call_id: "c1".into(),

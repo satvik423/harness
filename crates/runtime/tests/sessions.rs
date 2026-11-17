@@ -19,8 +19,8 @@ use harness_ports::{
 };
 use harness_protocol::{Decision, Envelope, Event, InputItem, Op, TaskState};
 use harness_runtime::{ApprovalMode, RuntimeDeps, SessionConfig, SessionHandle, spawn_session};
-use harness_testkit::FakeProvider;
 use harness_testkit::invariants::check_all;
+use harness_testkit::{AskForChanges, FakeProvider};
 use harness_tools::{MemoryBlobStore, MemoryReadLedger, Unsandboxed};
 use harness_types::{ContentBlock, Risk, Role, StopReason, TaskId};
 use serde_json::{Value, json};
@@ -35,6 +35,13 @@ struct Echo;
 struct Exec;
 /// Read-only tool that always fails.
 struct Fails;
+/// Like [`Echo`], but with its own 5-token output cap.
+struct EchoTinyCap;
+/// Parallel-safe read that sleeps, tracking how many run at once.
+struct SlowRead {
+    running: Arc<std::sync::atomic::AtomicUsize>,
+    peak: Arc<std::sync::atomic::AtomicUsize>,
+}
 
 fn spec(name: &str) -> ToolSpec {
     ToolSpec {
@@ -93,6 +100,46 @@ impl Tool for Fails {
     }
 }
 
+#[async_trait]
+impl Tool for EchoTinyCap {
+    fn spec(&self) -> ToolSpec {
+        spec("echo_tiny_cap")
+    }
+    fn risk(&self, _: &Value, _: &RiskCtx) -> Risk {
+        Risk::ReadOnly { paths: vec![] }
+    }
+    fn output_cap_tokens(&self) -> Option<u64> {
+        Some(5)
+    }
+    async fn run(&self, input: Value, ctx: ToolCtx) -> Result<ToolOutput, ToolError> {
+        Echo.run(input, ctx).await
+    }
+}
+
+#[async_trait]
+impl Tool for SlowRead {
+    fn spec(&self) -> ToolSpec {
+        spec("slow_read")
+    }
+    fn risk(&self, _: &Value, _: &RiskCtx) -> Risk {
+        Risk::ReadOnly { paths: vec![] }
+    }
+    fn parallel_safe(&self) -> bool {
+        true
+    }
+    async fn run(&self, input: Value, _: ToolCtx) -> Result<ToolOutput, ToolError> {
+        use std::sync::atomic::Ordering;
+        let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(now, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        self.running.fetch_sub(1, Ordering::SeqCst);
+        Ok(ToolOutput {
+            content: vec![ContentBlock::text(input["text"].as_str().unwrap_or(""))],
+            ..ToolOutput::default()
+        })
+    }
+}
+
 /// A provider whose stream never yields until cancelled (for interrupt tests).
 struct Hanging;
 
@@ -128,8 +175,14 @@ use futures::StreamExt;
 struct Run {
     handle: SessionHandle,
     events: broadcast::Receiver<Envelope>,
+    blobs: Arc<MemoryBlobStore>,
+    policy: Arc<AskForChanges>,
+    peak: Arc<std::sync::atomic::AtomicUsize>,
     _dir: tempfile::TempDir,
 }
+
+/// Output cap used by the test sessions (small, so tests can exceed it cheaply).
+const TEST_CAP_TOKENS: u64 = 200;
 
 fn start(provider: Arc<dyn Provider>, approval: ApprovalMode, max_turns: u32) -> Run {
     let dir = tempfile::tempdir().unwrap();
@@ -137,24 +190,41 @@ fn start(provider: Arc<dyn Provider>, approval: ApprovalMode, max_turns: u32) ->
     tools.register(Arc::new(Echo)).unwrap();
     tools.register(Arc::new(Exec)).unwrap();
     tools.register(Arc::new(Fails)).unwrap();
+    tools.register(Arc::new(EchoTinyCap)).unwrap();
+    tools.register(Arc::new(harness_tools::AskUser)).unwrap();
+    let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    tools
+        .register(Arc::new(SlowRead {
+            running: Arc::default(),
+            peak: Arc::clone(&peak),
+        }))
+        .unwrap();
+    let blobs = Arc::new(MemoryBlobStore::default());
+    let policy = Arc::new(AskForChanges::default());
     let deps = RuntimeDeps {
         provider,
         tools,
         clock: Arc::new(SystemClock),
         sandbox: Arc::new(Unsandboxed),
-        blobs: Arc::new(MemoryBlobStore::default()),
+        blobs: Arc::clone(&blobs) as _,
         ledger: Arc::new(MemoryReadLedger::default()),
+        policy: Arc::clone(&policy) as _,
     };
     let config = SessionConfig {
         cwd: dir.path().to_path_buf(),
         persona: builtin_default(),
         approval,
         max_turns,
+        output_cap_tokens: TEST_CAP_TOKENS,
+        max_parallel_tools: 2,
     };
     let (handle, events) = spawn_session(deps, config);
     Run {
         handle,
         events,
+        blobs,
+        policy,
+        peak,
         _dir: dir,
     }
 }
@@ -165,6 +235,8 @@ enum OnApproval {
     Approve,
     Deny,
     Interrupt,
+    ForSession,
+    AlwaysUser,
 }
 
 fn ends_task(e: &Event) -> bool {
@@ -183,6 +255,15 @@ fn ends_task(e: &Event) -> bool {
 
 /// Submits `text` and collects events until the task ends.
 async fn submit(run: &mut Run, text: &str, on_approval: OnApproval) -> Vec<Event> {
+    submit_envelopes(run, text, on_approval)
+        .await
+        .into_iter()
+        .map(|e| e.event)
+        .collect()
+}
+
+/// Like [`submit`], but keeps the envelopes (sequence numbers).
+async fn submit_envelopes(run: &mut Run, text: &str, on_approval: OnApproval) -> Vec<Envelope> {
     run.handle
         .send(Op::Submit {
             session: run.handle.id(),
@@ -197,11 +278,26 @@ async fn submit(run: &mut Run, text: &str, on_approval: OnApproval) -> Vec<Event
             .await
             .expect("event within 10 s")
             .unwrap();
-        let event = env.event;
-        if let Event::UserInput { task: t, .. } = &event {
+        let event = &env.event;
+        if let Event::UserInput { task: t, .. } = event {
             task = Some(*t);
         }
-        if let Event::ApprovalRequested { id, .. } = &event {
+        if let Event::QuestionAsked { id, .. } = event {
+            let op = match on_approval {
+                OnApproval::Interrupt => Op::Interrupt {
+                    task: task.unwrap(),
+                },
+                OnApproval::Approve
+                | OnApproval::Deny
+                | OnApproval::ForSession
+                | OnApproval::AlwaysUser => Op::Answer {
+                    request: *id,
+                    answer: "blue".into(),
+                },
+            };
+            run.handle.send(op).await.unwrap();
+        }
+        if let Event::ApprovalRequested { id, .. } = event {
             let op = match on_approval {
                 OnApproval::Approve => Op::Approve {
                     request: *id,
@@ -216,11 +312,21 @@ async fn submit(run: &mut Run, text: &str, on_approval: OnApproval) -> Vec<Event
                 OnApproval::Interrupt => Op::Interrupt {
                     task: task.unwrap(),
                 },
+                OnApproval::ForSession => Op::Approve {
+                    request: *id,
+                    decision: Decision::ForSession,
+                },
+                OnApproval::AlwaysUser => Op::Approve {
+                    request: *id,
+                    decision: Decision::Always {
+                        scope: harness_protocol::RuleScope::User,
+                    },
+                },
             };
             run.handle.send(op).await.unwrap();
         }
-        let done = ends_task(&event);
-        events.push(event);
+        let done = ends_task(event);
+        events.push(env);
         if done {
             return events;
         }
@@ -822,4 +928,301 @@ async fn shutdown_cancels_a_running_task() {
             break;
         }
     }
+}
+
+// ---------- output capping (P2-T3) ----------
+
+fn numbered_lines(n: usize) -> String {
+    (1..=n)
+        .map(|i| format!("line {i:05}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[tokio::test]
+async fn large_output_is_capped_once_with_a_footer_naming_the_event_that_holds_it() {
+    let big = numbered_lines(8_000); // ~88 KB, over the 64 KB blob threshold
+    let fake = FakeProvider::new()
+        .with_tool_call_turn("c1", "echo", &json!({ "text": big }))
+        .with_text_turn("done");
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let envelopes = submit_envelopes(&mut run, "go", OnApproval::Deny).await;
+
+    let (seq, full, sent) = envelopes
+        .iter()
+        .find_map(|e| match &e.event {
+            Event::ToolFinished { full, sent, .. } => Some((e.seq, full.clone(), sent.clone())),
+            _ => None,
+        })
+        .unwrap();
+    let results = tool_results(&fake.requests()[1]);
+    let text = &results[0].2;
+    assert!(text.starts_with("line 00001\n"), "{text}");
+    assert!(
+        text.ends_with(&format!(
+            "full: recall {{\"seq_from\":{0},\"seq_to\":{0}}}]",
+            seq.0
+        )),
+        "{text}"
+    );
+    assert!(harness_context::estimate_tokens(text) < TEST_CAP_TOKENS + 40);
+    // The event's `sent` is exactly what the model received.
+    assert_eq!(sent, vec![ContentBlock::text(text.clone())]);
+    // Over 64 KB, the full output is kept as a blob.
+    let harness_protocol::BlobOrText::Blob { blob, .. } = full else {
+        panic!("expected a blob, got {full:?}");
+    };
+    use harness_ports::BlobStore;
+    let bytes = run.blobs.get(&blob).await.unwrap();
+    assert_eq!(String::from_utf8(bytes).unwrap(), big);
+    assert_invariants(&fake);
+}
+
+#[tokio::test]
+async fn small_output_is_sent_whole_and_kept_inline() {
+    let fake = FakeProvider::new()
+        .with_tool_call_turn("c1", "echo", &json!({"text": "short"}))
+        .with_text_turn("done");
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let events = submit(&mut run, "go", OnApproval::Deny).await;
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Event::ToolFinished { full: harness_protocol::BlobOrText::Text { text }, .. } if text == "short"
+    )));
+    assert_eq!(tool_results(&fake.requests()[1])[0].2, "short");
+}
+
+#[tokio::test]
+async fn a_tools_own_cap_overrides_the_session_cap() {
+    let fake = FakeProvider::new()
+        .with_tool_call_turn("c1", "echo_tiny_cap", &json!({"text": numbered_lines(20)}))
+        .with_text_turn("done");
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    submit(&mut run, "go", OnApproval::Deny).await;
+    let text = &tool_results(&fake.requests()[1])[0].2;
+    assert!(text.contains("[output trimmed: "), "{text}");
+}
+
+// ---------- ask_user (P2-T8) ----------
+
+#[tokio::test]
+async fn ask_user_waits_for_the_answer_and_returns_it() {
+    let fake = FakeProvider::new()
+        .with_tool_call_turn(
+            "q1",
+            "ask_user",
+            &json!({"question": "Favourite colour?", "options": ["red", "blue"]}),
+        )
+        .with_text_turn("Blue it is.");
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let events = submit(&mut run, "pick", OnApproval::Approve).await;
+    assert_eq!(final_state(&events), TaskState::Completed);
+    let asked = events
+        .iter()
+        .position(|e| {
+            matches!(e, Event::QuestionAsked { question, options, call_id, .. }
+            if question == "Favourite colour?" && options == &["red", "blue"] && call_id == "q1")
+        })
+        .expect("question asked");
+    assert!(matches!(
+        &events[asked - 1],
+        Event::TaskState {
+            to: TaskState::AwaitingApproval,
+            ..
+        }
+    ));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::QuestionAnswered { answer, .. } if answer == "blue"))
+    );
+    assert_eq!(
+        tool_results(&fake.requests()[1]),
+        vec![("q1".into(), false, "The user answered: blue".into())]
+    );
+    assert_invariants(&fake);
+}
+
+#[tokio::test]
+async fn ask_user_in_a_headless_session_answers_no_user_available() {
+    let fake = FakeProvider::new()
+        .with_tool_call_turn("q1", "ask_user", &json!({"question": "?"}))
+        .with_text_turn("ok");
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Never, 10);
+    let events = submit(&mut run, "pick", OnApproval::Approve).await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::QuestionAsked { .. }))
+    );
+    assert_eq!(
+        tool_results(&fake.requests()[1])[0].2,
+        harness_tools::NO_USER_ANSWER
+    );
+}
+
+#[tokio::test]
+async fn interrupting_a_question_pauses_with_a_valid_transcript() {
+    let fake = FakeProvider::new()
+        .with_tool_call_turn("q1", "ask_user", &json!({"question": "?"}))
+        .with_text_turn("after resume");
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let events = submit(&mut run, "pick", OnApproval::Interrupt).await;
+    assert_eq!(final_state(&events), TaskState::Paused);
+    // The next task still gets a well-formed transcript.
+    submit(&mut run, "continue", OnApproval::Approve).await;
+    let req = fake.requests().last().unwrap().clone();
+    assert_eq!(tool_results_before_last_user(&req)[0].0, "q1");
+    assert_invariants(&fake);
+}
+
+#[tokio::test]
+async fn stray_answers_are_warnings() {
+    let fake = FakeProvider::new();
+    let mut run = start(Arc::new(fake), ApprovalMode::Ask, 10);
+    let e = first_problem(
+        &mut run,
+        Op::Answer {
+            request: harness_types::QuestionId::new(),
+            answer: "x".into(),
+        },
+    )
+    .await;
+    assert!(matches!(e, Event::Warning { kind, .. } if kind == "unknown_question"));
+}
+
+// ---------- policy and approvals (P2-T6) ----------
+
+#[tokio::test]
+async fn policy_denials_reach_the_model_without_asking() {
+    let fake = FakeProvider::new()
+        .with_tool_call_turn("c1", "echo", &json!({"text": "x", "deny": true}))
+        .with_text_turn("ok");
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let events = submit(&mut run, "go", OnApproval::Approve).await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::ApprovalRequested { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Warning { kind, .. } if kind == "policy_denied"))
+    );
+    let results = tool_results(&fake.requests()[1]);
+    assert!(results[0].1);
+    assert!(results[0].2.starts_with("Denied by policy"), "{results:?}");
+    assert_invariants(&fake);
+}
+
+#[tokio::test]
+async fn approval_requests_carry_the_policys_reason() {
+    let fake = FakeProvider::new()
+        .with_tool_call_turn("c1", "exec", &json!({"command": "ls"}))
+        .with_text_turn("ok");
+    let mut run = start(Arc::new(fake), ApprovalMode::Ask, 10);
+    let events = submit(&mut run, "go", OnApproval::Approve).await;
+    assert!(events.iter().any(
+        |e| matches!(e, Event::ApprovalRequested { reason, .. } if reason == "exec needs approval")
+    ));
+}
+
+#[tokio::test]
+async fn approving_for_the_session_skips_the_next_question() {
+    let fake = FakeProvider::new()
+        .with_tool_call_turn("c1", "exec", &json!({"command": "ls"}))
+        .with_text_turn("first")
+        .with_tool_call_turn("c2", "exec", &json!({"command": "ls"}))
+        .with_text_turn("second");
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let first = submit(&mut run, "one", OnApproval::ForSession).await;
+    assert_eq!(
+        first
+            .iter()
+            .filter(|e| matches!(e, Event::ApprovalRequested { .. }))
+            .count(),
+        1
+    );
+    let second = submit(&mut run, "two", OnApproval::Deny).await;
+    assert_eq!(final_state(&second), TaskState::Completed);
+    assert!(
+        !second
+            .iter()
+            .any(|e| matches!(e, Event::ApprovalRequested { .. }))
+    );
+    assert_eq!(tool_results(&fake.requests()[3])[0].2, "ran");
+    assert_eq!(run.policy.grants()[0].2, harness_ports::GrantScope::Session);
+    assert_invariants(&fake);
+}
+
+#[tokio::test]
+async fn always_grants_are_remembered_with_their_scope() {
+    let fake = FakeProvider::new()
+        .with_tool_call_turn("c1", "exec", &json!({"command": "make"}))
+        .with_text_turn("done");
+    let mut run = start(Arc::new(fake), ApprovalMode::Ask, 10);
+    let events = submit(&mut run, "go", OnApproval::AlwaysUser).await;
+    assert_eq!(final_state(&events), TaskState::Completed);
+    assert_eq!(run.policy.grants()[0].2, harness_ports::GrantScope::User);
+}
+
+// ---------- parallel read-only calls (P2-T7) ----------
+
+#[tokio::test]
+async fn parallel_safe_calls_run_together_within_the_limit_and_keep_call_order() {
+    let calls = [
+        ("c1", "slow_read", json!({"text": "r1"})),
+        ("c2", "slow_read", json!({"text": "r2"})),
+        ("c3", "slow_read", json!({"text": "r3"})),
+        ("c4", "slow_read", json!({"text": "r4"})),
+    ];
+    let fake = FakeProvider::new()
+        .with_tool_calls_turn(&calls)
+        .with_text_turn("done");
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let started = std::time::Instant::now();
+    submit(&mut run, "go", OnApproval::Deny).await;
+    let elapsed = started.elapsed();
+    // Four 150 ms reads, two at a time: about 300 ms, far below 600 ms sequential.
+    assert!(elapsed < Duration::from_millis(550), "{elapsed:?}");
+    assert_eq!(run.peak.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let results = tool_results(&fake.requests()[1]);
+    let order: Vec<(&str, &str)> = results
+        .iter()
+        .map(|(id, _, t)| (id.as_str(), t.as_str()))
+        .collect();
+    assert_eq!(
+        order,
+        [("c1", "r1"), ("c2", "r2"), ("c3", "r3"), ("c4", "r4")]
+    );
+    assert_invariants(&fake);
+}
+
+#[tokio::test]
+async fn a_call_needing_approval_splits_parallel_batches_in_order() {
+    let calls = [
+        ("c1", "slow_read", json!({"text": "a"})),
+        ("c2", "exec", json!({"command": "ls"})),
+        ("c3", "slow_read", json!({"text": "b"})),
+    ];
+    let fake = FakeProvider::new()
+        .with_tool_calls_turn(&calls)
+        .with_text_turn("done");
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let events = submit(&mut run, "go", OnApproval::Approve).await;
+    let started: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::ToolStarted { call_id } => Some(call_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started, ["c1", "c2", "c3"]);
+    let ids: Vec<String> = tool_results(&fake.requests()[1])
+        .into_iter()
+        .map(|r| r.0)
+        .collect();
+    assert_eq!(ids, ["c1", "c2", "c3"]);
+    assert_invariants(&fake);
 }

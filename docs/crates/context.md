@@ -1,6 +1,6 @@
 # harness-context
 
-The context engine (Phase 1 subset). Builds every model request and guards the
+The context engine (Phases 1–2 subset). Builds every model request and guards the
 transcript invariants. Depends only on types and ports.
 
 ## Public API
@@ -14,6 +14,7 @@ transcript invariants. Depends only on types and ports.
 | `Environment` | The environment block in the segment opener (cwd, OS, date, git branch and status, session notes) |
 | `BASE_PROMPT`, `BASE_PROMPT_VERSION`, `DEFAULT_SOUL` | System slots 1 and 2 |
 | `civil_date` | UTC `YYYY-MM-DD` from Unix milliseconds |
+| `cap_output`, `estimate_tokens` | The capped form of a tool result, decided once when recorded: head 60% + tail 40% of the cap + `[output trimmed: N tokens total · full: recall {"seq_from":S,"seq_to":S}]` (FR-TOOL-04) |
 
 ## Request layout
 

@@ -62,3 +62,8 @@ A plain key in a config file is rejected with an error that does not repeat the 
 
 See Building Harness, Tech spec 3.17, for every key and its default. The
 defaults are defined in `crates/config/src/schema.rs`.
+
+## Permissions
+
+`[policy] profile` and `default_deny_paths` control what runs without asking; rules
+go in separate `rules.toml` files. See the [permissions guide](permissions.md).

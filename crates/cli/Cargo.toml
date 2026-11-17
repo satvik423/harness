@@ -16,6 +16,7 @@ anyhow.workspace = true
 clap.workspace = true
 harness-config.workspace = true
 harness-context.workspace = true
+harness-policy.workspace = true
 harness-ports.workspace = true
 harness-protocol.workspace = true
 harness-provider-anthropic.workspace = true

@@ -10,7 +10,7 @@ L1 front-ends   harness-cli (binary: harness run)        [tui: Phase 4, server: 
 L2 protocol     harness-protocol   Op in → Event out, wrapped in Envelope{seq, ts, session}
 L3 runtime      harness-runtime (session actor, turn engine), harness-context (requests, transcript rules)
 L4 ports        harness-ports      Provider, Tool, ToolRegistry, EventLog, BlobStore, Sandbox, ReadLedger, EventSink, Clock
-L5 adapters     harness-provider-anthropic, harness-provider-openai, harness-tools   [store-sqlite: Phase 3, …]
+L5 adapters     harness-provider-anthropic, harness-provider-openai, harness-tools, harness-policy   [store-sqlite: Phase 3, …]
 
 shared          harness-types (ids, messages, usage, risk), harness-config (layered config)
 dev only        harness-testkit (FakeProvider, TempProject, FixedClock, layering checks)
@@ -32,21 +32,23 @@ forces a decision about its layer.
 | `harness-config` | types |
 | `harness-context` | types, protocol, ports |
 | `harness-runtime` | types, protocol, ports, context |
-| `harness-tools`, `harness-provider-anthropic`, `harness-provider-openai` | anything except runtime, context, front-ends, testkit (`arch::adapter`) |
+| `harness-tools`, `harness-provider-anthropic`, `harness-provider-openai`, `harness-policy` | anything except runtime, context, front-ends, testkit (`arch::adapter`) |
 | `harness-testkit` | types, protocol, ports |
 | `harness-cli` | anything except testkit |
 | adapters *(later)* | anything except runtime, context, front-ends, testkit (`arch::adapter`) |
 
-## Data flow (Phase 1)
+## Data flow (Phase 2)
 
 1. `harness run` picks the provider from the model (`--model` or `default_model`),
-   builds `RuntimeDeps` (provider, built-in tools, in-memory stores) and calls
-   `spawn_session`.
+   builds the policy engine (`[policy]`, rules files, flags), builds `RuntimeDeps`
+   (provider, built-in tools, in-memory stores, policy) and calls `spawn_session`.
 2. It sends `Op::Submit`. The session actor opens segment 0 (environment block,
    AGENTS.md chain) and starts a task on its own tokio task.
-3. The turn engine streams replies through `dyn Provider`, runs tool calls
-   through `dyn Tool` (asking approval via `ApprovalRequested` / `Op::Approve`),
-   and appends every message through `SegmentContext`, which enforces I1 and I2.
+3. The turn engine streams replies through `dyn Provider`, judges each tool call
+   with `dyn Policy` (asking via `ApprovalRequested` / `Op::Approve` when told to),
+   runs it through `dyn Tool` (parallel-safe reads together), caps each result once
+   when recording it, and appends every message through `SegmentContext`, which
+   enforces I1 and I2. `ask_user` reaches the user via `QuestionAsked` / `Op::Answer`.
 4. Every event is broadcast as an `Envelope`; the CLI renders it.
 5. From Phase 3, persisted events are also written to the `EventLog` first.
 

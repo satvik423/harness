@@ -30,3 +30,7 @@ Each record states the context, the decision and its consequences. Records 0001â
 | [ADR-024](0024-consecutive-user-messages.md) | A user message may follow an unanswered user message | Accepted |
 | [ADR-025](0025-pause-turn.md) | `pause_turn` ends the task until server-side tools exist | Accepted |
 | [ADR-026](0026-no-delegate-backends.md) | No delegate backends | Accepted |
+| [ADR-027](0027-pty-process.md) | PTY tools on `pty-process` (user-approved change from the spec) | Accepted |
+| [ADR-028](0028-ask-user-protocol.md) | `ask_user` events and the `UserChannel` port | Accepted |
+| [ADR-029](0029-policy-port-and-rule-semantics.md) | The policy port and rule semantics | Accepted |
+| [ADR-030](0030-event-sink-emit-with.md) | `EventSink::emit_with` for self-referencing events | Accepted |

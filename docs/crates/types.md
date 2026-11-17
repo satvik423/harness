@@ -6,7 +6,7 @@ Shared domain types. Depends on no other harness crate.
 
 | Item | Purpose |
 |---|---|
-| `SessionId`, `TaskId`, `ApprovalId` | ULID newtypes; time-ordered, `Display`/`FromStr`, serialised as strings |
+| `SessionId`, `TaskId`, `ApprovalId`, `QuestionId` | ULID newtypes; time-ordered, `Display`/`FromStr`, serialised as strings |
 | `Seq` | Per-session, gapless event number; `Seq::FIRST == Seq(1)`, displayed as `#812` |
 | `BlobRef` | 32-byte BLAKE3 content address; serialised as 64 lowercase hex characters |
 | `ModelRef` | `provider/model`, for example `anthropic/claude-opus-5-5` |

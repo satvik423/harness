@@ -54,7 +54,7 @@ retryable (waiting does not refill a quota); 5xx → `Server`; other 4xx →
 - `tests/http.rs`: wiremock (Bearer auth, retries, quota, cut streams, cancellation, model lookup).
 - `tests/replay.rs`: real `gpt-6-luna` recordings from `fixtures/streams/openai/`, including
   sending a recorded tool turn back with its result.
-- `examples/record_fixtures.rs`: re-records them (see `fixtures/README.md`).
+- `examples/record_openai_fixtures.rs`: re-records them (see `fixtures/README.md`).
 
 ## Known limits
 

@@ -35,14 +35,18 @@ harness run "How many .rs files are here, and which is the largest?"
 ```
 
 - The answer streams to **stdout**; tool activity (`▸ shell: …`, `✓ …`) goes to **stderr**.
-- Reading files runs without asking. Every shell command asks first:
+- Reading, searching and editing inside the project run without asking (profile
+  `auto`). Shell commands ask first, until the sandbox arrives:
 
   ```
   ▸ shell: find . -name '*.rs' | wc -l
-  Allow: run `find . -name '*.rs' | wc -l`? [y/N]
+  Allow run `find . -name '*.rs' | wc -l` (commands run without a sandbox)? [y]es once / [s]ession / [a]lways / [p]roject always / [n]o (n <why>):
   ```
 
-  Type `y` to allow it; anything else (or closed input) denies it, and the model is told.
+  `y` allows it once, `s` for the session, `a` always; `n` (optionally with a reason
+  for the model) or closed input denies it. See the [permissions guide](permissions.md).
+- When the model asks you a question (`ask_user`), type an option number or your own words.
+- Secrets files (`.env`, `*.pem`, `~/.ssh`) are denied to every tool.
 - **Ctrl-C** interrupts the task; press it again to exit immediately.
 
 ## Options
@@ -51,7 +55,8 @@ harness run "How many .rs files are here, and which is the largest?"
 |---|---|---|
 | `--model provider/model` | `default_model` from config | `anthropic/…` or `openai/…` |
 | `--max-turns N` | 50 | Maximum model calls |
-| `--approval on-request\|never` | `on-request` | `never` denies every action that needs approval, without asking |
+| `--approval on-request\|never` | from `policy.profile` | `never` denies every action that needs approval, without asking |
+| `--dangerously-full-access` | off | The `full` profile: no approvals, no protections except deny rules |
 | `--json` | off | Print every event as one JSON line on stdout (approval answers are still read from stdin) |
 
 ## Exit codes
@@ -76,9 +81,11 @@ system prompt.
 Logs go to `~/.local/share/harness/logs/harness.YYYY-MM-DD.log`. Use
 `HARNESS_LOG=harness=debug,info` for more detail.
 
-## Current limits (Phase 1)
+## Current limits (Phase 2)
 
-- Tools: `read_file` and `shell` only. Editing tools arrive in Phase 2.
-- No sandbox yet: commands run as you, which is why each one needs approval.
+- Tools: files (`read_file`, `write_file`, `edit_file`, `apply_patch`), search (`glob`,
+  `grep`), `shell`, PTY programs (`pty_start`, `pty_write`, `pty_read`, `pty_kill`),
+  `todo` and `ask_user`. Web tools arrive later.
+- No sandbox yet: commands run as you, which is why they need approval.
 - Sessions are not saved; resume and pause arrive in Phase 3.
 - Text input only; attachments arrive in Phase 11.

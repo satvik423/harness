@@ -19,8 +19,9 @@ use tokio::sync::mpsc;
 pub const DEFAULT_TIMEOUT_S: u64 = 120;
 /// Maximum timeout in seconds.
 pub const MAX_TIMEOUT_S: u64 = 600;
-/// Output beyond this many characters keeps only its head and tail.
-pub const MAX_OUTPUT_CHARS: usize = 30_000;
+/// Memory safety limit: output beyond this many bytes keeps only its head and
+/// tail. The model-facing cap is applied later by the runtime (FR-TOOL-04).
+pub const MAX_KEPT_BYTES: usize = 8 * 1024 * 1024;
 /// After the command exits, how long to wait for its pipes to close before
 /// killing anything left in its process group (for example a stray background job).
 const PIPE_GRACE: Duration = Duration::from_millis(200);
@@ -43,19 +44,72 @@ struct Input {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Shell;
 
-/// Keeps the head and tail of `text` when it exceeds `max` characters.
-fn cap_middle(text: &str, max: usize) -> String {
-    let total = text.chars().count();
-    if total <= max {
-        return text.to_owned();
+/// Collects command output in bounded memory: the first half of the limit, and
+/// a rolling tail of about the other half. A command that prints gigabytes
+/// cannot exhaust memory, while ordinary output is kept whole.
+#[derive(Debug)]
+struct Collected {
+    half: usize,
+    head: String,
+    tail: String,
+    omitted: u64,
+}
+
+impl Collected {
+    fn new(limit: usize) -> Self {
+        Self {
+            half: limit / 2,
+            head: String::new(),
+            tail: String::new(),
+            omitted: 0,
+        }
     }
-    let half = max / 2;
-    let head: String = text.chars().take(half).collect();
-    let tail: String = text.chars().skip(total - half).collect();
-    format!(
-        "{head}\n… [{} characters omitted] …\n{tail}",
-        total - 2 * half
-    )
+
+    fn push_str(&mut self, mut chunk: &str) {
+        if self.head.len() < self.half {
+            let room = floor_char_boundary(chunk, self.half - self.head.len());
+            self.head.push_str(&chunk[..room]);
+            chunk = &chunk[room..];
+        }
+        self.tail.push_str(chunk);
+        // Trim only once the tail is twice its share, so trimming stays rare.
+        if self.tail.len() > 2 * self.half {
+            let drop = ceil_char_boundary(&self.tail, self.tail.len() - self.half);
+            self.omitted += drop as u64;
+            self.tail.drain(..drop);
+        }
+    }
+
+    #[cfg(test)]
+    fn held_bytes(&self) -> usize {
+        self.head.len() + self.tail.len()
+    }
+
+    fn finish(self) -> String {
+        if self.omitted == 0 {
+            self.head + &self.tail
+        } else {
+            format!(
+                "{}\n… [{} bytes omitted by the shell tool] …\n{}",
+                self.head, self.omitted, self.tail
+            )
+        }
+    }
+}
+
+/// Largest char boundary in `s` that is at most `at`.
+fn floor_char_boundary(s: &str, at: usize) -> usize {
+    (0..=at.min(s.len()))
+        .rev()
+        .find(|&i| s.is_char_boundary(i))
+        .unwrap_or(0)
+}
+
+/// Smallest char boundary in `s` that is at least `at`.
+fn ceil_char_boundary(s: &str, at: usize) -> usize {
+    (at..=s.len())
+        .find(|&i| s.is_char_boundary(i))
+        .unwrap_or(s.len())
 }
 
 /// Kills every process in the group led by `pid` (the shell started with `process_group(0)`).
@@ -179,7 +233,7 @@ impl Tool for Shell {
                 chunk: chunk.to_owned(),
             });
         };
-        let mut output = String::new();
+        let mut output = Collected::new(MAX_KEPT_BYTES);
         let deadline = tokio::time::sleep(Duration::from_secs(timeout_s));
         tokio::pin!(deadline);
         let finished = loop {
@@ -220,7 +274,7 @@ impl Tool for Shell {
             }
         }
 
-        let mut text = cap_middle(&output, MAX_OUTPUT_CHARS);
+        let mut text = output.finish();
         if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');
         }
@@ -261,22 +315,34 @@ mod tests {
     }
 
     #[test]
-    fn cap_middle_keeps_head_and_tail() {
-        let s = format!("{}{}", "a".repeat(60), "b".repeat(60));
-        let capped = cap_middle(&s, 40);
-        assert!(
-            capped.starts_with(&"a".repeat(20)) && capped.ends_with(&"b".repeat(20)),
-            "{capped}"
-        );
-        assert!(capped.contains("[80 characters omitted]"), "{capped}");
-        assert_eq!(cap_middle("short", 40), "short");
+    fn collected_output_under_the_limit_is_kept_whole() {
+        let mut c = Collected::new(100);
+        c.push_str("hello ");
+        c.push_str("world");
+        assert_eq!(c.finish(), "hello world");
     }
 
     #[test]
-    fn cap_middle_respects_char_boundaries() {
-        let s = "é".repeat(100);
-        let capped = cap_middle(&s, 10);
-        assert!(capped.starts_with("ééééé"));
+    fn collected_output_over_the_limit_keeps_head_and_tail_in_bounded_memory() {
+        let mut c = Collected::new(100);
+        for i in 0..10_000 {
+            c.push_str(&format!("{i:04}\n"));
+            assert!(c.held_bytes() <= 300, "{}", c.held_bytes());
+        }
+        let out = c.finish();
+        assert!(out.starts_with("0000\n0001\n"), "{out}");
+        assert!(out.ends_with("9998\n9999\n"), "{out}");
+        assert!(out.contains("bytes omitted by the shell tool"), "{out}");
+    }
+
+    #[test]
+    fn collected_output_respects_char_boundaries() {
+        let mut c = Collected::new(10);
+        for _ in 0..100 {
+            c.push_str("ééé");
+        }
+        let out = c.finish();
+        assert!(out.starts_with('é') && out.ends_with('é'), "{out}");
     }
 
     #[tokio::test]
@@ -351,12 +417,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn huge_output_is_capped() {
+    async fn large_output_is_returned_whole_for_the_runtime_to_cap() {
         let dir = tempfile::tempdir().unwrap();
         let (out, _) = run(dir.path(), json!({"command": "yes x | head -c 100000"})).await;
         let t = text(&out.unwrap());
-        assert!(t.chars().count() < MAX_OUTPUT_CHARS + 200, "{}", t.len());
-        assert!(t.contains("characters omitted"));
+        assert!(t.len() > 100_000, "{}", t.len());
+        assert!(!t.contains("omitted"));
     }
 
     #[tokio::test]

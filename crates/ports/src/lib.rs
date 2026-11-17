@@ -14,9 +14,10 @@
 //! | [`Sandbox`] | wraps process execution | `sandbox` (Phase 13) |
 //! | [`ReadLedger`] | read-before-edit guard | `tools` (Phase 2) |
 //! | [`EventSink`], [`Clock`] | live events, injectable time | `runtime`, `testkit` |
+//! | [`UserChannel`] | a tool asks the user a question | `runtime` (Phase 2) |
+//! | [`Policy`] | allow, ask or deny each tool call | `policy` (Phase 2) |
 //!
-//! Ports for policy, hooks and memory are added in the phases that need them
-//! (2, 7 and 14).
+//! Ports for hooks and memory are added in the phases that need them (7 and 14).
 //!
 //! # Example
 //! ```
@@ -29,6 +30,7 @@
 
 mod credentials;
 mod ledger;
+mod policy;
 mod provider;
 mod registry;
 mod retry;
@@ -36,9 +38,12 @@ mod runtime;
 mod sandbox;
 mod store;
 mod tool;
+mod untrusted;
+mod user;
 
 pub use credentials::ApiKey;
 pub use ledger::{FileStamp, LedgerCheck, ReadLedger};
+pub use policy::{GrantScope, Policy, PolicyCall, PolicyError, Verdict};
 pub use provider::{
     CachePlan, CacheStyle, Capabilities, Effort, ModelRequest, Provider, ProviderError,
     ProviderEvent, ProviderStream, SystemPart, SystemSlot,
@@ -51,6 +56,8 @@ pub use store::{AppendRequest, BlobMeta, BlobStore, EventLog, LoggedEvent, Searc
 pub use tool::{
     InvalidToolName, RiskCtx, Tool, ToolCtx, ToolError, ToolName, ToolOutput, ToolSpec,
 };
+pub use untrusted::wrap_untrusted;
+pub use user::{AskError, NoUser, UserChannel, UserQuestion};
 
 #[cfg(test)]
 mod object_safety {
@@ -70,5 +77,7 @@ mod object_safety {
         assert_dyn_compatible::<dyn ReadLedger>();
         assert_dyn_compatible::<dyn EventSink>();
         assert_dyn_compatible::<dyn Clock>();
+        assert_dyn_compatible::<dyn UserChannel>();
+        assert_dyn_compatible::<dyn Policy>();
     }
 }

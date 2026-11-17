@@ -3,7 +3,7 @@
 //! Every other crate depends on this one, and this crate depends on no other
 //! harness crate. It holds only data types and small, pure helpers:
 //!
-//! - identifiers: [`SessionId`], [`TaskId`], [`ApprovalId`], [`Seq`], [`BlobRef`]
+//! - identifiers: [`SessionId`], [`TaskId`], [`ApprovalId`], [`QuestionId`], [`Seq`], [`BlobRef`]
 //! - model naming: [`ModelRef`]
 //! - conversation content: [`Role`], [`ContentBlock`], [`Message`]
 //! - accounting: [`Usage`], [`StopReason`]
@@ -24,7 +24,9 @@ mod model_ref;
 mod risk;
 mod usage;
 
-pub use ids::{ApprovalId, BlobRef, ParseBlobRefError, ParseIdError, Seq, SessionId, TaskId};
+pub use ids::{
+    ApprovalId, BlobRef, ParseBlobRefError, ParseIdError, QuestionId, Seq, SessionId, TaskId,
+};
 pub use message::{ContentBlock, Message, Role};
 pub use model_ref::{ModelRef, ParseModelRefError};
 pub use risk::Risk;

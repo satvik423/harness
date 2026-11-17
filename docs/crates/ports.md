@@ -12,10 +12,12 @@ Port traits (SDD layer L4). The runtime depends only on these; adapters implemen
 | `BlobStore` | Content-addressed bytes | `store-sqlite` (Phase 3) |
 | `Sandbox` | Rewrites a `CommandSpec` to run sandboxed | `sandbox` (Phase 13) |
 | `ReadLedger` | Read-before-edit guard records | `tools` (Phase 2) |
-| `EventSink` | Non-blocking live events | `runtime` |
+| `EventSink` | Non-blocking live events; `emit_with` builds an event from its own sequence number (ADR-030) | `runtime`, `testkit::RecordingSink` |
 | `Clock` | Injectable time; `SystemClock` provided | `testkit::FixedClock` for tests |
+| `Policy` | `evaluate` a call → `Verdict` (allow, ask, deny); `remember` approvals (ADR-029) | `policy`, `testkit::AskForChanges` |
+| `UserChannel` | A tool asks the user a question (`ask_user`); `NoUser` for headless (ADR-028) | `runtime` |
 
-Ports for policy, hooks and memory are added in Phases 2, 7 and 14.
+Ports for hooks and memory are added in Phases 7 and 14.
 
 ## Supporting types
 
@@ -30,6 +32,9 @@ Ports for policy, hooks and memory are added in Phases 2, 7 and 14.
   these; deltas and `ToolCallStart`/`ToolCallInputDelta` are for live display.
 - Storage: `AppendRequest`, `LoggedEvent`, `SearchHit`, `BlobMeta`, `StoreError`.
 - Ledger: `FileStamp`, `LedgerCheck::compare` (content hash decides, mtime alone does not).
+- Policy: `PolicyCall`, `Verdict`, `GrantScope` (session, user, project), `PolicyError`.
+- `wrap_untrusted(source, text)`: wraps file, web and MCP content in
+  `<untrusted source="…">` and defuses any tag inside it (guardrail 12).
 
 ## Design notes
 

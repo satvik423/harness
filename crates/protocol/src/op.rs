@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use harness_types::{ApprovalId, BlobRef, Seq, SessionId, TaskId};
+use harness_types::{ApprovalId, BlobRef, QuestionId, Seq, SessionId, TaskId};
 use serde::{Deserialize, Serialize};
 
 /// A request sent into the core by a front-end (TUI, CLI, JSON-RPC server, tests).
@@ -56,6 +56,13 @@ pub enum Op {
         request: ApprovalId,
         /// The user's decision.
         decision: Decision,
+    },
+    /// Answer a pending question from the `ask_user` tool.
+    Answer {
+        /// The question being answered.
+        request: QuestionId,
+        /// The user's answer in their own words (or the chosen options).
+        answer: String,
     },
     /// Compact the session's current segment now.
     Compact {
@@ -167,6 +174,10 @@ mod tests {
             Op::Approve {
                 request: ApprovalId::new(),
                 decision: Decision::Once,
+            },
+            Op::Answer {
+                request: QuestionId::new(),
+                answer: "the second one".into(),
             },
             Op::Approve {
                 request: ApprovalId::new(),

@@ -14,6 +14,7 @@ use harness_types::TaskId;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 use tokio::sync::{Notify, broadcast};
 
+use crate::prompt::{APPROVAL_CHOICES, parse_answer, parse_decision};
 use crate::render::{Outcome, Renderer};
 
 /// Approval policy flag of `harness run`.
@@ -34,7 +35,11 @@ pub struct RunOptions {
     pub json: bool,
     /// Maximum model calls.
     pub max_turns: u32,
-    /// Approval policy.
+    /// Tool output cap in estimated tokens (`context.output_cap_tokens`).
+    pub output_cap_tokens: u64,
+    /// Parallel-safe tool calls run at once, at most (`runtime.max_parallel_tools`).
+    pub max_parallel_tools: usize,
+    /// The effective approval policy (from the profile or `--approval`).
     pub approval: ApprovalArg,
     /// Working directory.
     pub cwd: PathBuf,
@@ -48,6 +53,9 @@ pub struct Io {
     pub err: Box<dyn Write + Send>,
     /// Where approval answers are read from.
     pub input: Box<dyn AsyncBufRead + Unpin + Send>,
+    /// Repeat each answer on `err` after reading it. Set when the input is not
+    /// a terminal (piped answers are not echoed by the terminal).
+    pub echo_input: bool,
 }
 
 /// Maps the config's Anthropic section to adapter settings.
@@ -97,6 +105,8 @@ pub async fn run_session(
         persona,
         approval,
         max_turns: options.max_turns,
+        output_cap_tokens: options.output_cap_tokens,
+        max_parallel_tools: options.max_parallel_tools,
     };
     let (handle, mut events) = spawn_session(deps, config);
     let mut renderer = Renderer::new(options.json);
@@ -147,8 +157,19 @@ pub async fn run_session(
                 }
             }
             Event::ApprovalRequested { id, reason, .. } => {
-                match ask(&mut *io.err, &mut answers, reason, options.json, &interrupt).await? {
-                    Some(decision) => {
+                let prompt =
+                    (!options.json).then(|| format!("Allow {reason}? {APPROVAL_CHOICES}: "));
+                match read_answer(
+                    &mut *io.err,
+                    &mut answers,
+                    prompt,
+                    io.echo_input,
+                    &interrupt,
+                )
+                .await?
+                {
+                    Answer::Line(line) => {
+                        let decision = parse_decision(&line);
                         let _ = handle
                             .send(Op::Approve {
                                 request: *id,
@@ -156,13 +177,68 @@ pub async fn run_session(
                             })
                             .await;
                     }
-                    None => {
+                    Answer::Closed => {
+                        let _ = handle
+                            .send(Op::Approve {
+                                request: *id,
+                                decision: Decision::Deny {
+                                    reason: Some("no answer (input closed)".into()),
+                                },
+                            })
+                            .await;
+                    }
+                    Answer::Interrupted => {
                         interrupted = true;
                         if let Some(task) = task {
                             let _ = handle.send(Op::Interrupt { task }).await;
                         }
                     }
                 }
+            }
+            Event::QuestionAsked {
+                id,
+                question,
+                options: choices,
+                multi,
+                ..
+            } => {
+                let prompt = (!options.json).then(|| {
+                    let mut text = format!("? {question}\n");
+                    for (i, choice) in choices.iter().enumerate() {
+                        text.push_str(&format!("  {}. {choice}\n", i + 1));
+                    }
+                    text.push_str(match (choices.is_empty(), multi) {
+                        (true, _) => "answer: ",
+                        (false, false) => "answer (a number, or your own words): ",
+                        (false, true) => "answer (numbers like 1,3, or your own words): ",
+                    });
+                    text
+                });
+                let answer = match read_answer(
+                    &mut *io.err,
+                    &mut answers,
+                    prompt,
+                    io.echo_input,
+                    &interrupt,
+                )
+                .await?
+                {
+                    Answer::Line(line) => parse_answer(&line, choices, *multi),
+                    Answer::Closed => "(no answer: the input was closed)".into(),
+                    Answer::Interrupted => {
+                        interrupted = true;
+                        if let Some(task) = task {
+                            let _ = handle.send(Op::Interrupt { task }).await;
+                        }
+                        continue;
+                    }
+                };
+                let _ = handle
+                    .send(Op::Answer {
+                        request: *id,
+                        answer,
+                    })
+                    .await;
             }
             _ => {}
         }
@@ -174,36 +250,49 @@ pub async fn run_session(
     Ok(outcome.exit_code())
 }
 
-/// Asks the user to approve an action. Returns `None` if interrupted while waiting.
-async fn ask<R: AsyncBufRead + Unpin>(
+/// What came back from a prompt.
+enum Answer {
+    /// A line of input.
+    Line(String),
+    /// The input was closed (end of a pipe).
+    Closed,
+    /// Ctrl-C while waiting.
+    Interrupted,
+}
+
+/// Shows `prompt` (if any) and reads one line, echoing it when `echo` is set.
+async fn read_answer<R: AsyncBufRead + Unpin>(
     err: &mut dyn Write,
     answers: &mut tokio::io::Lines<R>,
-    reason: &str,
-    json: bool,
+    prompt: Option<String>,
+    echo: bool,
     interrupt: &Notify,
-) -> std::io::Result<Option<Decision>> {
-    if !json {
-        write!(err, "Allow: {reason}? [y/N] ")?;
+) -> std::io::Result<Answer> {
+    let shown = prompt.is_some();
+    if let Some(prompt) = prompt {
+        write!(err, "{prompt}")?;
         err.flush()?;
     }
     let line = tokio::select! {
         line = answers.next_line() => line?,
-        () = interrupt.notified() => return Ok(None),
+        () = interrupt.notified() => return Ok(Answer::Interrupted),
     };
-    let Some(answer) = line else {
-        if !json {
-            writeln!(err)?;
+    match line {
+        Some(line) => {
+            // A terminal echoes what the user typed, including the newline;
+            // piped input does not, so print it to keep the output readable.
+            if shown && echo {
+                writeln!(err, "{line}")?;
+            }
+            Ok(Answer::Line(line))
         }
-        return Ok(Some(Decision::Deny {
-            reason: Some("no answer (input closed)".into()),
-        }));
-    };
-    let yes = matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes");
-    Ok(Some(if yes {
-        Decision::Once
-    } else {
-        Decision::Deny { reason: None }
-    }))
+        None => {
+            if shown {
+                writeln!(err)?;
+            }
+            Ok(Answer::Closed)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -241,6 +330,29 @@ mod tests {
         err: Buffer,
     }
 
+    /// The real policy engine with the default config, rooted in a temp dir.
+    fn test_policy(dir: &std::path::Path, approval: ApprovalArg) -> Arc<dyn harness_ports::Policy> {
+        let paths = harness_config::Paths {
+            user_config_dir: dir.join(".test-config"),
+            user_data_dir: dir.join(".test-data"),
+        };
+        let config = harness_config::PolicyConfig::default();
+        crate::wiring::build_policy(&crate::wiring::PolicyInputs {
+            config: &config,
+            paths: &paths,
+            project: dir,
+            trusted: false,
+            approval: Some(match approval {
+                ApprovalArg::OnRequest => harness_policy::ApprovalPolicy::OnRequest,
+                ApprovalArg::Never => harness_policy::ApprovalPolicy::Never,
+            }),
+            full_access: false,
+            sandboxed: false,
+            home: None,
+        })
+        .unwrap()
+    }
+
     async fn run(
         fake: FakeProvider,
         approval: ApprovalArg,
@@ -255,17 +367,21 @@ mod tests {
             sandbox: Arc::new(Unsandboxed),
             blobs: Arc::new(MemoryBlobStore::default()),
             ledger: Arc::new(MemoryReadLedger::default()),
+            policy: test_policy(dir, approval),
         };
         let (out, err) = (Buffer::default(), Buffer::default());
         let mut io = Io {
             out: Box::new(out.clone()),
             err: Box::new(err.clone()),
             input: Box::new(std::io::Cursor::new(answers.as_bytes().to_vec())),
+            echo_input: true,
         };
         let options = RunOptions {
             prompt: "go".into(),
             json,
             max_turns: 10,
+            output_cap_tokens: 2_000,
+            max_parallel_tools: 4,
             approval,
             cwd: dir.to_path_buf(),
         };
@@ -329,12 +445,14 @@ mod tests {
         .await;
         assert_eq!(code, exit::OK);
         assert!(
-            o.err
-                .text()
-                .contains("Allow: run `echo approved-run`? [y/N]"),
+            o.err.text().contains(
+                "Allow run `echo approved-run` (commands run without a sandbox)? [y]es once"
+            ),
             "{}",
             o.err.text()
         );
+        // Piped answers are echoed, so the result line starts on its own line.
+        assert!(o.err.text().contains("(n <why>): y\n"), "{}", o.err.text());
         let second = &fake.requests()[1];
         assert!(
             serde_json::to_string(second)
@@ -401,6 +519,174 @@ mod tests {
             events.last().map(|e| &e.event),
             Some(Event::TaskState { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn questions_are_answered_from_the_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeProvider::new()
+            .with_tool_call_turn(
+                "q1",
+                "ask_user",
+                &json!({"question": "Which colour?", "options": ["red", "blue"]}),
+            )
+            .with_text_turn("Blue.");
+        let (code, o) = run(
+            fake.clone(),
+            ApprovalArg::OnRequest,
+            false,
+            "2\n",
+            dir.path(),
+        )
+        .await;
+        assert_eq!(code, exit::OK);
+        let err = o.err.text();
+        assert!(
+            err.contains("? Which colour?\n  1. red\n  2. blue\n"),
+            "{err}"
+        );
+        assert!(
+            serde_json::to_string(&fake.requests()[1])
+                .unwrap()
+                .contains("The user answered: blue")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denial_reason_reaches_the_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeProvider::new()
+            .with_tool_call_turn("c1", "shell", &json!({"command": "make all"}))
+            .with_text_turn("ok");
+        run(
+            fake.clone(),
+            ApprovalArg::OnRequest,
+            false,
+            "n use make test\n",
+            dir.path(),
+        )
+        .await;
+        assert!(
+            serde_json::to_string(&fake.requests()[1])
+                .unwrap()
+                .contains("The user denied this action: use make test")
+        );
+    }
+
+    #[tokio::test]
+    async fn approving_for_the_session_is_not_asked_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeProvider::new()
+            .with_tool_call_turn("c1", "shell", &json!({"command": "echo once"}))
+            .with_tool_call_turn("c2", "shell", &json!({"command": "echo once"}))
+            .with_text_turn("ok");
+        let (code, o) = run(
+            fake.clone(),
+            ApprovalArg::OnRequest,
+            false,
+            "s\n",
+            dir.path(),
+        )
+        .await;
+        assert_eq!(code, exit::OK);
+        assert_eq!(
+            o.err.text().matches("Allow run").count(),
+            1,
+            "{}",
+            o.err.text()
+        );
+        assert!(
+            serde_json::to_string(&fake.requests()[2])
+                .unwrap()
+                .contains("[exit code 0]")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_default_deny_rule_on_env_files_is_respected() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), "SECRET=hunter2").unwrap();
+        let fake = FakeProvider::new()
+            .with_tool_call_turn("c1", "read_file", &json!({"path": ".env"}))
+            .with_tool_call_turn(
+                "c2",
+                "write_file",
+                &json!({"path": ".env.local", "content": "X=1"}),
+            )
+            .with_tool_call_turn("c3", "shell", &json!({"command": "cat .env"}))
+            .with_text_turn("I could not read it.");
+        let (code, o) = run(fake.clone(), ApprovalArg::OnRequest, false, "", dir.path()).await;
+        assert_eq!(code, exit::OK);
+        assert!(
+            !o.err.text().contains("Allow"),
+            "never asked: {}",
+            o.err.text()
+        );
+        let all = serde_json::to_string(&fake.requests()).unwrap();
+        assert!(!all.contains("hunter2"), "the secret leaked into a request");
+        // Each request repeats the conversation; the last one holds all three results.
+        let last = serde_json::to_string(fake.requests().last().unwrap()).unwrap();
+        assert_eq!(last.matches("Denied by policy").count(), 3, "{last}");
+        assert!(!dir.path().join(".env.local").exists());
+    }
+
+    /// Copies `fixtures/projects/<name>` into `dest`.
+    fn copy_fixture(name: &str, dest: &std::path::Path) {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/projects")
+            .join(name);
+        for entry in std::fs::read_dir(&src).unwrap() {
+            let entry = entry.unwrap();
+            let to = dest.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                std::fs::create_dir_all(&to).unwrap();
+                for inner in std::fs::read_dir(entry.path()).unwrap() {
+                    let inner = inner.unwrap();
+                    std::fs::copy(inner.path(), to.join(inner.file_name())).unwrap();
+                }
+            } else {
+                std::fs::copy(entry.path(), to).unwrap();
+            }
+        }
+    }
+
+    /// Phase 2 exit criterion, scripted: the model runs the tests, reads the
+    /// code, edits it and re-runs the tests, with fewer than 3 approvals.
+    #[tokio::test]
+    async fn fixes_the_seeded_bug_with_fewer_than_three_approvals() {
+        let dir = tempfile::tempdir().unwrap();
+        copy_fixture("seeded-bug", dir.path());
+        let fake = FakeProvider::new()
+            .with_tool_call_turn("c1", "shell", &json!({"command": "sh test.sh"}))
+            .with_tool_call_turn("c2", "grep", &json!({"pattern": "average", "mode": "content"}))
+            .with_tool_call_turn("c3", "read_file", &json!({"path": "lib/stats.sh"}))
+            .with_tool_call_turn(
+                "c4",
+                "edit_file",
+                &json!({"path": "lib/stats.sh", "old": "total / (count + 1)", "new": "total / count"}),
+            )
+            .with_tool_call_turn("c5", "shell", &json!({"command": "sh test.sh"}))
+            .with_text_turn("Fixed the off-by-one in average().");
+        let (code, o) = run(
+            fake.clone(),
+            ApprovalArg::OnRequest,
+            false,
+            "s\n",
+            dir.path(),
+        )
+        .await;
+        assert_eq!(code, exit::OK);
+        let approvals = o.err.text().matches("Allow ").count();
+        assert!(approvals < 3, "{approvals} approvals:\n{}", o.err.text());
+        assert_eq!(approvals, 1, "{}", o.err.text());
+        let last = serde_json::to_string(fake.requests().last().unwrap()).unwrap();
+        assert!(last.contains("ok:   average of 2 4 6"), "{last}");
+        let status = std::process::Command::new("sh")
+            .arg("test.sh")
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "the fixture's tests pass after the fix");
     }
 
     #[test]

@@ -4,9 +4,10 @@
 //! hosts the CLI commands:
 //!
 //! - [`run`]: `harness run PROMPT` (headless, approvals on the terminal)
+//! - [`prompt`]: parsing approval and question answers
 //! - [`render`]: human and JSON output, exit codes
 //! - [`secrets`]: API keys from the keyring or environment
-//! - [`wiring`]: the provider for the chosen model
+//! - [`wiring`]: the provider for the chosen model and the policy engine
 //! - [`telemetry`]: file logging filtered by `HARNESS_LOG`
 //!
 //! # Example
@@ -17,6 +18,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod prompt;
 pub mod render;
 pub mod run;
 pub mod secrets;

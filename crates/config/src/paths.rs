@@ -44,6 +44,19 @@ impl Paths {
         self.user_data_dir.join("logs")
     }
 
+    /// `~/.config/harness/rules.toml`: the user's policy rules (Tech spec 3.6).
+    #[must_use]
+    pub fn user_rules_file(&self) -> PathBuf {
+        self.user_config_dir.join("rules.toml")
+    }
+
+    /// `<project>/.harness/rules.toml`: the project's policy rules (used only
+    /// when the project is trusted).
+    #[must_use]
+    pub fn project_rules_file(project: &Path) -> PathBuf {
+        project.join(".harness").join("rules.toml")
+    }
+
     /// `<project>/.harness/config.toml`.
     #[must_use]
     pub fn project_config_file(project: &Path) -> PathBuf {
@@ -67,6 +80,11 @@ mod tests {
         );
         assert_eq!(p.trust_file(), PathBuf::from("/d/harness/trust.toml"));
         assert_eq!(p.log_dir(), PathBuf::from("/d/harness/logs"));
+        assert_eq!(p.user_rules_file(), PathBuf::from("/c/harness/rules.toml"));
+        assert_eq!(
+            Paths::project_rules_file(Path::new("/p")),
+            PathBuf::from("/p/.harness/rules.toml")
+        );
         assert_eq!(
             Paths::project_config_file(Path::new("/p")),
             PathBuf::from("/p/.harness/config.toml")

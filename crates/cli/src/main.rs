@@ -5,7 +5,7 @@
 //!   Tech spec 3.16 (0 done, 1 error, 2 budget, 3 refused, 4 approval needed, 130 interrupted).
 #![forbid(unsafe_code)]
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,8 +16,9 @@ use harness_cli::render::exit;
 use harness_cli::run::{ApprovalArg, Io, RunOptions, run_session};
 use harness_cli::secrets::SystemSecrets;
 use harness_cli::telemetry::{self, LOG_ENV};
-use harness_cli::wiring::build_provider;
+use harness_cli::wiring::{PolicyInputs, build_policy, build_provider};
 use harness_config::{ConfigLoader, Paths};
+use harness_policy::ApprovalPolicy;
 use harness_ports::SystemClock;
 use harness_runtime::RuntimeDeps;
 use harness_tools::{MemoryBlobStore, MemoryReadLedger, Unsandboxed};
@@ -51,9 +52,13 @@ struct RunArgs {
     /// Maximum model calls for the task.
     #[arg(long, default_value_t = 50)]
     max_turns: u32,
-    /// What to do with actions that need approval.
-    #[arg(long, value_enum, default_value_t = ApprovalArg::OnRequest)]
-    approval: ApprovalArg,
+    /// What to do with actions that need approval (default: from `policy.profile`).
+    #[arg(long, value_enum)]
+    approval: Option<ApprovalArg>,
+    /// Run with the `full` profile: no approvals and no protections except deny
+    /// rules. Only for throwaway environments.
+    #[arg(long)]
+    dangerously_full_access: bool,
 }
 
 fn main() -> ExitCode {
@@ -79,7 +84,7 @@ fn real_main() -> anyhow::Result<ExitCode> {
     };
 
     let cwd = std::env::current_dir().context("reading the current directory")?;
-    let loaded = ConfigLoader::new(paths)
+    let loaded = ConfigLoader::new(paths.clone())
         .project_dir(&cwd)
         .env(std::env::vars())
         .load()?;
@@ -90,6 +95,30 @@ fn real_main() -> anyhow::Result<ExitCode> {
 
     // Read the keyring before the async runtime starts: the keyring client blocks.
     let provider = build_provider(&persona.model, &loaded.config, &SystemSecrets)?;
+    let home = std::env::home_dir();
+    let policy = build_policy(&PolicyInputs {
+        config: &loaded.config.policy,
+        paths: &paths,
+        project: &cwd,
+        trusted: loaded.project_trusted,
+        approval: args.approval.map(|a| match a {
+            ApprovalArg::OnRequest => ApprovalPolicy::OnRequest,
+            ApprovalArg::Never => ApprovalPolicy::Never,
+        }),
+        full_access: args.dangerously_full_access,
+        sandboxed: false,
+        home: home.as_deref(),
+    })?;
+    if args.dangerously_full_access {
+        writeln!(
+            std::io::stderr(),
+            "warning: --dangerously-full-access: commands and edits run without approval or sandbox"
+        )?;
+    }
+    let approval = match policy.settings().approval {
+        ApprovalPolicy::OnRequest => ApprovalArg::OnRequest,
+        ApprovalPolicy::Never => ApprovalArg::Never,
+    };
     let deps = RuntimeDeps {
         provider,
         tools: harness_tools::builtin_registry()?,
@@ -97,12 +126,15 @@ fn real_main() -> anyhow::Result<ExitCode> {
         sandbox: Arc::new(Unsandboxed),
         blobs: Arc::new(MemoryBlobStore::default()),
         ledger: Arc::new(MemoryReadLedger::default()),
+        policy,
     };
     let options = RunOptions {
         prompt: args.prompt,
         json: args.json,
         max_turns: args.max_turns,
-        approval: args.approval,
+        output_cap_tokens: loaded.config.context.output_cap_tokens,
+        max_parallel_tools: usize::try_from(loaded.config.runtime.max_parallel_tools).unwrap_or(1),
+        approval,
         cwd,
     };
     tracing::info!(model = %persona.model, "running prompt");
@@ -128,6 +160,7 @@ fn real_main() -> anyhow::Result<ExitCode> {
             out: Box::new(std::io::stdout()),
             err: Box::new(std::io::stderr()),
             input: Box::new(tokio::io::BufReader::new(tokio::io::stdin())),
+            echo_input: !std::io::stdin().is_terminal(),
         };
         run_session(options, deps, persona, &mut io, interrupt).await
     })?;

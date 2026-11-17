@@ -16,6 +16,7 @@ mod approval;
 mod session;
 mod sink;
 mod turn;
+mod user;
 
 pub use approval::ApprovalMode;
 pub use session::{RuntimeDeps, RuntimeError, SessionConfig, SessionHandle, spawn_session};

@@ -81,6 +81,10 @@ ulid_id!(
     /// Identifies one pending approval request shown to the user.
     ApprovalId
 );
+ulid_id!(
+    /// Identifies one pending question to the user (the `ask_user` tool).
+    QuestionId
+);
 
 /// Per-session, gapless event sequence number. The first event of a session is [`Seq::FIRST`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -236,6 +240,7 @@ mod tests {
     #[test]
     fn approval_ids_are_unique() {
         assert_ne!(ApprovalId::new(), ApprovalId::new());
+        assert_ne!(QuestionId::new(), QuestionId::new());
     }
 
     #[test]

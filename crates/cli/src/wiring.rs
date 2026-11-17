@@ -1,8 +1,11 @@
-//! Builds the adapters for a run: the provider for the chosen model.
+//! Builds the adapters for a run: the provider for the chosen model and the
+//! policy engine.
 
+use std::path::Path;
 use std::sync::Arc;
 
-use harness_config::Config;
+use harness_config::{Config, Paths, PolicyConfig, PolicyProfile};
+use harness_policy::{ApprovalPolicy, PolicyEngine, PolicySettings, Profile, RuleError};
 use harness_ports::Provider;
 use harness_types::ModelRef;
 use thiserror::Error;
@@ -30,6 +33,62 @@ pub enum WiringError {
         /// What went wrong.
         message: String,
     },
+    /// The `full` profile was configured without `--dangerously-full-access`.
+    #[error(
+        "policy.profile is \"full\", which removes every safeguard; pass --dangerously-full-access to confirm, or choose another profile"
+    )]
+    FullAccessNotConfirmed,
+    /// A rules file or default deny path is invalid.
+    #[error("invalid policy rules: {0}")]
+    Rules(#[from] RuleError),
+}
+
+/// What the policy engine is built from.
+#[derive(Debug, Clone)]
+pub struct PolicyInputs<'a> {
+    /// The `[policy]` config section.
+    pub config: &'a PolicyConfig,
+    /// User-level directories (for the user's `rules.toml`).
+    pub paths: &'a Paths,
+    /// The project directory.
+    pub project: &'a Path,
+    /// Whether the project is trusted (its `rules.toml` is used only then).
+    pub trusted: bool,
+    /// `--approval`, overriding the profile's approval policy.
+    pub approval: Option<ApprovalPolicy>,
+    /// `--dangerously-full-access`: run with the `full` profile.
+    pub full_access: bool,
+    /// Whether commands run in an isolating sandbox.
+    pub sandboxed: bool,
+    /// The home directory, for `~/` in rules.
+    pub home: Option<&'a Path>,
+}
+
+/// Builds the policy engine for a run.
+///
+/// # Errors
+/// [`WiringError::FullAccessNotConfirmed`] if the config selects the `full`
+/// profile without the flag; [`WiringError::Rules`] for invalid rules.
+pub fn build_policy(inputs: &PolicyInputs<'_>) -> Result<Arc<PolicyEngine>, WiringError> {
+    let profile = match (inputs.full_access, inputs.config.profile) {
+        (true, _) => Profile::Full,
+        (false, PolicyProfile::Full) => return Err(WiringError::FullAccessNotConfirmed),
+        (false, PolicyProfile::ReadOnly) => Profile::ReadOnly,
+        (false, PolicyProfile::Auto) => Profile::Auto,
+        (false, PolicyProfile::Ci) => Profile::Ci,
+    };
+    let engine = PolicyEngine::new(PolicySettings {
+        profile,
+        approval: inputs.approval.unwrap_or(profile.default_approval()),
+        sandboxed: inputs.sandboxed,
+        default_deny_paths: inputs.config.default_deny_paths.clone(),
+        home: inputs.home.map(Path::to_path_buf),
+        user_rules: Some(inputs.paths.user_rules_file()),
+        project_rules: inputs
+            .trusted
+            .then(|| Paths::project_rules_file(inputs.project)),
+    })?;
+    Ok(Arc::new(engine))
 }
 
 /// Creates the provider for `model`, resolving its API key from `secrets`.
@@ -70,6 +129,119 @@ pub fn build_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use harness_ports::{Policy, PolicyCall, Verdict};
+    use harness_types::Risk;
+
+    struct PolicyFixture {
+        dir: tempfile::TempDir,
+        paths: Paths,
+        config: PolicyConfig,
+    }
+
+    impl PolicyFixture {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = Paths {
+                user_config_dir: dir.path().join("config"),
+                user_data_dir: dir.path().join("data"),
+            };
+            std::fs::create_dir_all(dir.path().join("proj/.harness")).unwrap();
+            Self {
+                dir,
+                paths,
+                config: PolicyConfig::default(),
+            }
+        }
+
+        fn project(&self) -> std::path::PathBuf {
+            self.dir.path().join("proj")
+        }
+
+        fn inputs(&self, trusted: bool) -> PolicyInputs<'_> {
+            PolicyInputs {
+                config: &self.config,
+                paths: &self.paths,
+                project: self.dir.path().join("proj").leak(),
+                trusted,
+                approval: None,
+                full_access: false,
+                sandboxed: false,
+                home: None,
+            }
+        }
+
+        fn shell(&self, command: &str) -> PolicyCall {
+            PolicyCall {
+                tool: "shell".into(),
+                input: serde_json::json!({}),
+                risk: Risk::Exec {
+                    command: command.into(),
+                },
+                cwd: self.project(),
+                writable_roots: vec![self.project()],
+            }
+        }
+    }
+
+    #[test]
+    fn full_profile_needs_the_flag() {
+        let mut f = PolicyFixture::new();
+        f.config.profile = PolicyProfile::Full;
+        assert!(matches!(
+            build_policy(&f.inputs(false)),
+            Err(WiringError::FullAccessNotConfirmed)
+        ));
+        let mut inputs = f.inputs(false);
+        inputs.full_access = true;
+        let engine = build_policy(&inputs).unwrap();
+        assert_eq!(engine.settings().profile, Profile::Full);
+    }
+
+    #[test]
+    fn the_approval_flag_overrides_the_profile() {
+        let f = PolicyFixture::new();
+        let engine = build_policy(&f.inputs(false)).unwrap();
+        assert_eq!(engine.settings().approval, ApprovalPolicy::OnRequest);
+        let mut inputs = f.inputs(false);
+        inputs.approval = Some(ApprovalPolicy::Never);
+        assert_eq!(
+            build_policy(&inputs).unwrap().settings().approval,
+            ApprovalPolicy::Never
+        );
+    }
+
+    #[test]
+    fn project_rules_apply_only_to_trusted_projects() {
+        let f = PolicyFixture::new();
+        std::fs::write(
+            f.project().join(".harness/rules.toml"),
+            "[[rule]]\ntool = \"shell\"\nmatch = \"prefix:make\"\ndecision = \"allow\"",
+        )
+        .unwrap();
+        let untrusted = build_policy(&f.inputs(false)).unwrap();
+        assert!(matches!(
+            untrusted.evaluate(&f.shell("make")),
+            Verdict::Ask { .. }
+        ));
+        let trusted = build_policy(&f.inputs(true)).unwrap();
+        assert!(matches!(
+            trusted.evaluate(&f.shell("make")),
+            Verdict::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn user_rules_are_loaded_and_invalid_ones_are_reported() {
+        let f = PolicyFixture::new();
+        std::fs::create_dir_all(&f.paths.user_config_dir).unwrap();
+        std::fs::write(
+            f.paths.user_rules_file(),
+            "[[rule]]\ntool = \"shell\"\ndecision = \"sometimes\"",
+        )
+        .unwrap();
+        let err = build_policy(&f.inputs(false)).unwrap_err();
+        assert!(err.to_string().contains("rules.toml"), "{err}");
+    }
     use crate::secrets::tests::Fake;
     use std::collections::HashMap;
 

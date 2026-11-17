@@ -3,7 +3,9 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use harness_ports::{RiskCtx, Tool, ToolCtx, ToolError, ToolName, ToolOutput, ToolSpec};
+use harness_ports::{
+    RiskCtx, Tool, ToolCtx, ToolError, ToolName, ToolOutput, ToolSpec, wrap_untrusted,
+};
 use harness_types::{ContentBlock, Risk};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -158,7 +160,11 @@ impl Tool for ReadFile {
         ctx.ledger.record(&path, stamp_of(&bytes, &meta));
         Ok(ToolOutput {
             summary: format!("read {} ({} lines)", input.path, text.lines().count()),
-            content: vec![ContentBlock::text(body)],
+            // File contents are data, never instructions (guardrail 12).
+            content: vec![ContentBlock::text(wrap_untrusted(
+                &format!("file:{}", input.path),
+                &body,
+            ))],
             touched: Vec::new(),
         })
     }
@@ -228,7 +234,9 @@ mod tests {
         let out = ReadFile.run(json!({"path": "a.txt"}), ctx).await.unwrap();
         assert_eq!(
             out.content,
-            vec![ContentBlock::text("     1\thello\n     2\tworld")]
+            vec![ContentBlock::text(
+                "<untrusted source=\"file:a.txt\">\n     1\thello\n     2\tworld\n</untrusted>"
+            )]
         );
         let meta = std::fs::metadata(dir.path().join("a.txt")).unwrap();
         let stamp: FileStamp = stamp_of(b"hello\nworld\n", &meta);

@@ -322,7 +322,7 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
   <h1>Building Harness</h1>
   <p class="sub">The complete plan for a general-purpose, persona-driven agent harness written in Rust. It combines the best ideas from Claude Code, Codex CLI and Hermes, and adds a context engine that never loses details. This one document is enough to build the whole project.</p>
   <div class="docctl">
-    <div><span>Version</span>1.1 · updated after Phases 0–1</div>
+    <div><span>Version</span>1.2 · updated after Phases 0–2</div>
     <div><span>Date</span>17 Nov 2026</div>
     <div><span>Status</span>Approved for build</div>
     <div><span>Working name</span><code>harness</code> (rename freely)</div>
@@ -390,6 +390,10 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
     <tr><td class="id">1.1</td><td>A user message may follow a user message whose turn produced no reply</td><td>3.13</td><td>ADR-024</td></tr>
     <tr><td class="id">1.1</td><td><code>pause_turn</code> ends the task with a warning until server-side tools exist</td><td>3.4</td><td>ADR-025</td></tr>
     <tr><td class="id">1.1</td><td>No delegate backends: FR-PRV-08 and <code>provider-delegate</code> removed, delegate config dropped</td><td>0.2, 1.6, 1.10, 2.1, 2.4, 3.4, 3.11, 3.17, 5, Ph 12</td><td>ADR-026</td></tr>
+    <tr><td class="id">1.2</td><td>PTY tools use <code>pty-process</code> instead of <code>portable-pty</code> (unmaintained since Feb 2025); <code>pty_read</code> and <code>pty_kill</code> are read-only</td><td>3.1, 3.5, Ph 2</td><td>ADR-027</td></tr>
+    <tr><td class="id">1.2</td><td><code>ask_user</code> reaches the user through <code>QuestionAsked</code> / <code>QuestionAnswered</code> events, <code>Op::Answer</code> and a <code>UserChannel</code> port in <code>ToolCtx</code></td><td>3.3, 3.5</td><td>ADR-028</td></tr>
+    <tr><td class="id">1.2</td><td>The <code>Policy</code> port (<code>evaluate</code>, <code>remember</code>) and rule details: remembered commands match exactly, an <code>allow</code> rule with a <code>path</code> must cover every path, built-in deny paths apply to all tools</td><td>2.4, 3.6</td><td>ADR-029</td></tr>
+    <tr><td class="id">1.2</td><td><code>EventSink::emit_with</code>: an event can name its own sequence number (the capped output's recall footer)</td><td>3.5</td><td>ADR-030</td></tr>
   </tbody></table></div>
 </section>
 
@@ -1103,7 +1107,7 @@ stateDiagram-v2
     <tr><td>Errors / logs</td><td><code>thiserror</code>, <code>anyhow</code>, <code>tracing</code>, <code>tracing-subscriber</code>, <code>tracing-appender</code></td><td></td><td><code>println!</code> in libraries</td></tr>
     <tr><td>File search</td><td><code>ignore</code>, <code>globset</code>, <code>grep-searcher</code>, <code>grep-regex</code></td><td>ripgrep's own libraries, gitignore-aware</td><td>Shelling out to rg as the only option</td></tr>
     <tr><td>Diffs</td><td><code>similar</code></td><td>Approval previews, <code>/diff</code></td><td></td></tr>
-    <tr><td>Processes / PTY</td><td><code>tokio::process</code>, <code>portable-pty</code>, <code>nix</code></td><td>Process groups for clean kills</td><td></td></tr>
+    <tr><td>Processes / PTY</td><td><code>tokio::process</code>, <code>pty-process</code> (ADR-027), <code>nix</code></td><td>Process groups for clean kills; async pty reads</td><td><code>portable-pty</code> (no release since Feb 2025)</td></tr>
     <tr><td>Shell analysis</td><td><code>tree-sitter</code> + <code>tree-sitter-bash</code></td><td>Split compound commands for rules</td><td>Regex-only parsing</td></tr>
     <tr><td>Sandbox</td><td><code>bwrap</code> binary, <code>landlock</code> crate</td><td>Landlock is the fallback when user namespaces are off</td><td></td></tr>
     <tr><td>MCP</td><td><code>rmcp</code> (official Rust SDK)</td><td>Client feature with stdio and streamable HTTP transports</td><td>A hand-rolled JSON-RPC client</td></tr>
@@ -1214,6 +1218,7 @@ pub enum Risk { ReadOnly { paths: Vec<PathBuf> }, Write { paths: Vec<PathBuf> },
     Resume   { task: TaskId },
     Cancel   { task: TaskId },
     Approve  { request: ApprovalId, decision: Decision },
+    Answer   { request: QuestionId, answer: String },             // ask_user (ADR-028)
     Compact  { session: SessionId, focus: Option<String> },
     SwitchPersona { session: SessionId, persona: String },
     Fork     { session: SessionId, at: Seq },
@@ -1237,6 +1242,9 @@ pub enum Event {
     ToolCall   { task: TaskId, id: String, name: String, input: Value, risk: Risk },
     ApprovalRequested { id: ApprovalId, task: TaskId, call_id: String, reason: String },
     ApprovalResolved  { id: ApprovalId, decision: Decision },   // ADR-015
+    QuestionAsked { id: QuestionId, task: TaskId, call_id: String,   // ADR-028
+                    question: String, options: Vec<String>, multi: bool },
+    QuestionAnswered { id: QuestionId, answer: String },          // ADR-028
     ToolStarted  { call_id: String },
     ToolOutput   { call_id: String, chunk: String },          // live stream
     ToolFinished { call_id: String, ok: bool, full: BlobOrText, sent: Vec<ContentBlock> },
@@ -1399,6 +1407,7 @@ pub struct ToolCtx {
     pub cancel: CancellationToken, pub sandbox: Arc<dyn Sandbox>,
     pub blobs: Arc<dyn BlobStore>, pub ledger: Arc<dyn ReadLedger>,
     pub events: Arc<dyn EventSink>, pub writable_roots: Vec<PathBuf>,
+    pub user: Arc<dyn UserChannel>,                   // ask_user (ADR-028)
 }
 
 pub struct ToolRegistry { /* tools by name; specs() sorted by name */ }   // in ports (ADR-022)
@@ -1413,7 +1422,7 @@ pub struct ToolOutput { pub content: Vec<ContentBlock>, pub summary: String,
     <tr><td class="id">glob</td><td><code>pattern</code>, <code>path?</code></td><td>ReadOnly</td><td>gitignore-aware, sorted by mtime, max 500 results.</td><td><span class="src cc">CC</span></td></tr>
     <tr><td class="id">grep</td><td><code>pattern</code>, <code>path?</code>, <code>glob?</code>, <code>context?</code>, <code>mode</code></td><td>ReadOnly</td><td>ripgrep libraries. Modes: content, files, count.</td><td><span class="src cc">CC</span></td></tr>
     <tr><td class="id">shell</td><td><code>command</code>, <code>timeout_s?</code>, <code>escalate?</code>, <code>justification?</code></td><td>Exec</td><td>Runs in the sandbox, in its own process group. Default timeout 120 s, max 600 s.</td><td><span class="src cx">Codex</span></td></tr>
-    <tr><td class="id">pty_start / pty_write / pty_read / pty_kill</td><td><code>command</code> · <code>id</code>, <code>input</code> · <code>id</code>, <code>wait_ms</code></td><td>Exec</td><td>For REPLs, dev servers and interactive CLIs. Output is buffered between calls.</td><td><span class="src cx">Codex</span></td></tr>
+    <tr><td class="id">pty_start / pty_write / pty_read / pty_kill</td><td><code>command</code> · <code>id</code>, <code>input</code> · <code>id</code>, <code>wait_ms</code></td><td>Exec (start, write) · ReadOnly (read, kill; ADR-027)</td><td>For REPLs, dev servers and interactive CLIs. Output is buffered between calls. Each program is a session leader, so a kill stops its whole process group.</td><td><span class="src cx">Codex</span></td></tr>
     <tr><td class="id">web_fetch</td><td><code>url</code>, <code>max_tokens?</code></td><td>Network</td><td>HTML to Markdown. Output is wrapped as untrusted.</td><td><span class="src cc">CC</span></td></tr>
     <tr><td class="id">web_search</td><td><code>query</code></td><td>Network</td><td>A configurable backend (a search API key), or a provider's server-side search where available.</td><td><span class="src cc">CC</span></td></tr>
     <tr><td class="id">todo</td><td><code>items[{text,status}]</code></td><td>ReadOnly</td><td>The model sends the full list each time. The UI renders a checklist.</td><td><span class="src cc">CC</span> <span class="src cx">Codex</span></td></tr>
@@ -1473,7 +1482,7 @@ decision = "allow"</script></div>
       <li>Combine all decisions: <b>deny &gt; ask &gt; allow</b>.</li>
       <li>No match: ReadOnly is allowed. Write inside the workspace follows the approval policy. Exec is allowed when sandboxed and the policy is <code>on-request</code>, otherwise ask. Network and External ask.</li>
       <li>With policy <code>never</code>, ask becomes deny (headless), and the model receives the reason.</li>
-    </ol></div>
+    </ol><p>Details (ADR-029): every call is evaluated, reads included. Remembered approvals match the exact command. An <code>allow</code> rule with a <code>path</code> must cover every path the call touches. Grants never override <code>ask</code> rules.</p></div>
   </div>
   <div class="tw"><table><thead><tr><th>Profile</th><th>Sandbox mode</th><th>Approval policy</th><th>Behaviour</th></tr></thead><tbody>
     <tr><td class="id">read-only</td><td>read-only</td><td>on-request</td><td>Explores freely. Writes and commands that change anything need approval.</td></tr>
@@ -2117,6 +2126,10 @@ theme = "auto"</script></div>
     <div><div class="h"><code>ADR-024</code><b>A user message may follow an unanswered user message</b><span class="st">accepted</span></div><p><b>Context:</b> after a refusal or empty reply no assistant message exists, which would block further input. <b>Decision:</b> allow it; both providers merge consecutive user turns. Tool pairing (I2) is unchanged. <b>Consequences:</b> a refusal never leaves a session stuck.</p></div>
     <div><div class="h"><code>ADR-025</code><b><code>pause_turn</code> ends the task until server-side tools exist</b><span class="st">accepted</span></div><p><b>Context:</b> only server-side tools pause a turn, and continuing means sending an assistant-final request. <b>Decision:</b> end the task with a warning for now. <b>Consequences:</b> revisit when server-side tools are added.</p></div>
     <div><div class="h"><code>ADR-026</code><b>No delegate backends</b><span class="st">accepted</span></div><p><b>Context:</b> delegating a task to the <code>claude</code> or <code>codex</code> CLI runs the vendor's agent loop instead of harness's, which defeats the purpose of the project. <b>Decision:</b> harness never hands tasks to external agent CLIs; FR-PRV-08 and <code>provider-delegate</code> are removed. <b>Consequences:</b> Claude needs an Anthropic API key; supersedes the delegate parts of ADR-008, ADR-009 and ADR-019.</p></div>
+    <div><div class="h"><code>ADR-027</code><b>PTY tools on pty-process</b><span class="st">accepted</span></div><p><b>Context:</b> <code>portable-pty</code> had no release since Feb 2025, drags in an old <code>nix</code> and four more crates, and needs a blocking thread per program. <b>Decision:</b> use <code>pty-process</code> (Oct 2026, one dependency, tokio-native); programs are session leaders so a kill stops the whole group; <code>pty_read</code> and <code>pty_kill</code> are read-only. <b>Consequences:</b> PTY tools are Unix-only, like <code>shell</code>; Windows (P2) needs ConPTY later. Approved by the user.</p></div>
+    <div><div class="h"><code>ADR-028</code><b>ask_user events and the UserChannel port</b><span class="st">accepted</span></div><p><b>Context:</b> <code>ask_user</code> must block like an approval, but the protocol had no question event. <b>Decision:</b> <code>QuestionId</code>, <code>Event::QuestionAsked</code> / <code>QuestionAnswered</code>, <code>Op::Answer</code>, and a <code>UserChannel</code> in <code>ToolCtx</code>; headless sessions answer "no user available". <b>Consequences:</b> front-ends render questions and send answers.</p></div>
+    <div><div class="h"><code>ADR-029</code><b>The policy port and rule semantics</b><span class="st">accepted</span></div><p><b>Context:</b> the spec gives the rules format and order but not the port or the edge cases. <b>Decision:</b> <code>Policy::evaluate</code> → <code>Verdict</code> (allow, ask, deny with <code>approval_required</code>) and <code>Policy::remember</code>; every call is evaluated; remembered shell commands match exactly; an allow rule with a path must cover every path; built-in deny paths apply to all tools, shell arguments included. <b>Consequences:</b> the runtime holds no rule logic.</p></div>
+    <div><div class="h"><code>ADR-030</code><b>EventSink::emit_with</b><span class="st">accepted</span></div><p><b>Context:</b> the capped output's footer names the sequence number of the event that contains it. <b>Decision:</b> <code>emit_with(|seq| event)</code> assigns the number and builds the event under one lock. <b>Consequences:</b> events reach subscribers in sequence order; the Phase 3 event log keeps the same guarantee.</p></div>
   </div>
 </section>
 
@@ -2238,7 +2251,7 @@ theme = "auto"</script></div>
     exit:'harness run "how many .rs files are here and which is largest" works against the real API. The invariant test passes on 5 scripted sessions.',learn:'SSE streaming, async streams, the agent loop.'},
    {n:2,t:'Tools & policy',w:2,s:4,goal:'A useful coding agent that asks before it acts and can be trusted with edits.',
     reqs:'FR-TOOL-02..08, FR-SAFE-01/02/03/06',
-    tasks:['write_file and edit_file with the read ledger (hash + mtime) and refusal messages.','glob and grep on the ignore and grep-searcher crates.','Output capper at write time (head/tail + recall footer). Full output stored in the event.','apply_patch parser and applier (grammar in 3.5), all-or-nothing. proptest + fuzz target.','policy: rules.toml parsing, layer merge, deny > ask > allow. tree-sitter-bash splitting of compound commands.','Approval flow events with once, session, always (writes a rule) and deny with reason. Simple terminal prompt for now.','Parallel read-only tool calls with JoinSet + semaphore.','todo and ask_user tools. Untrusted-content wrapper for web, file and MCP output.','PTY tools (pty_start, write, read, kill) with portable-pty and process groups.'],
+    tasks:['write_file and edit_file with the read ledger (hash + mtime) and refusal messages.','glob and grep on the ignore and grep-searcher crates.','Output capper at write time (head/tail + recall footer). Full output stored in the event.','apply_patch parser and applier (grammar in 3.5), all-or-nothing. proptest + fuzz target.','policy: rules.toml parsing, layer merge, deny > ask > allow. tree-sitter-bash splitting of compound commands.','Approval flow events with once, session, always (writes a rule) and deny with reason. Simple terminal prompt for now.','Parallel read-only tool calls with JoinSet + semaphore.','todo and ask_user tools. Untrusted-content wrapper for web, file and MCP output.','PTY tools (pty_start, write, read, kill) with pty-process (ADR-027) and process groups.'],
     exit:'Fixes a seeded bug in a fixture project with fewer than 3 approvals. A deny rule on **/.env* is respected. Patch fuzzing runs 10 minutes clean.',learn:'Policy engines, safe parsing, process control.'},
    {n:3,t:'Store & sessions',w:2,s:6,goal:'Nothing is ever lost. Pause, resume, interrupt, crash recovery and undo all work.',
     reqs:'FR-SES-01..06, FR-CTX-01, FR-IN-03, NFR-03',
