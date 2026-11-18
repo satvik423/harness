@@ -52,6 +52,11 @@ impl Journal {
         }
     }
 
+    /// The segment new events currently belong to.
+    pub(crate) fn segment(&self) -> u32 {
+        self.segment.load(Ordering::SeqCst)
+    }
+
     /// The segment new events belong to.
     pub(crate) fn set_segment(&self, segment: u32) {
         self.segment.store(segment, Ordering::SeqCst);

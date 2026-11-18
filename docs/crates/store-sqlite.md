@@ -32,10 +32,17 @@ the CLI wires it into the runtime.
 - **Settings:** WAL, `synchronous = NORMAL` (survives a killed process; a power loss can
   lose the last commits), foreign keys on, 5 s busy timeout (several processes may
   share the file).
-- **Append rules:** the sequence number must be the session's last + 1; deltas are
+- **Append rules:** the sequence number must be the session's last + 1 (for a fork,
+  at least its fork point + 1); deltas are
   refused; unknown sessions are refused. Views are updated in the same transaction:
   `tasks` from `TaskState`, the session title from the first `UserInput`,
-  `segments` and `current_segment` from `SegmentOpened`, `usage` from `Usage`.
+  `segments` and `current_segment` from `SegmentOpened`, `usage` from `Usage`,
+  and (Phase 5, ADR-045) `anchors`, `pinned_facts` and the closed segment's row from
+  `Compacted` (migration 0003 adds `pin_id` and `superseded_by`).
+- **Forks (ADR-047):** a fork's events are read through its lineage: each ancestor's
+  events up to the point its child forked, then its own. This holds for `range`,
+  `last_seq` and `search`, through any depth. Its own numbering continues after the
+  fork point. Nothing is copied.
 - **Search:** FTS5 (`porter unicode61`) over prompts, replies, tool calls, tool output,
   notes and errors. Every query word is quoted, so FTS syntax cannot break a search.
 - **Undo:** restores files first and forgets the turn afterwards, so an interrupted

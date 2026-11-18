@@ -31,6 +31,7 @@
 #![deny(missing_docs)]
 
 mod credentials;
+mod history;
 mod ledger;
 mod mode;
 mod policy;
@@ -47,6 +48,7 @@ mod untrusted;
 mod user;
 
 pub use credentials::ApiKey;
+pub use history::{History, HistoryError, NoHistory, RecallSelector, Recollection};
 pub use ledger::{FileStamp, LedgerCheck, ReadLedger};
 pub use mode::{FixedMode, ModeControl, ModeError};
 pub use policy::{GrantScope, Policy, PolicyCall, PolicyError, Verdict};
@@ -93,5 +95,6 @@ mod object_safety {
         assert_dyn_compatible::<dyn SnapshotStore>();
         assert_dyn_compatible::<dyn FileSnapshots>();
         assert_dyn_compatible::<dyn ModeControl>();
+        assert_dyn_compatible::<dyn History>();
     }
 }

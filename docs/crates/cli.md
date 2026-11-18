@@ -13,9 +13,10 @@ The `harness` binary. Wires the adapters into the runtime and hosts the commands
 | `harness session resume ID [run flags]` | Continues the paused (or recovered) task |
 | `harness session export ID [--format md\|jsonl] [--output FILE]` | Writes the session (default `.harness/exports/ID.md`) |
 | `harness session undo ID` | Restores the files changed by the last turn |
+| `harness session fork ID [--at SEQ] [run flags]` | A new session sharing the history up to an event (default: the last), compacted into its own segment (ADR-047) |
 | `harness session delete ID [--yes]` | Deletes the session and everything stored for it, after a `[y/N]` (ADR-041) |
 | `harness task list [--session ID]` | Tasks with state and reason |
-| `harness debug last-request\|diff-requests [--session ID]` | The exact provider body of the last request (redacted), or the diff of the last two with an append-only verdict |
+| `harness debug last-request\|diff-requests [--session ID]` | The exact provider body of the last request (redacted), or the diff of the last two requests of the newest segment, with an append-only verdict |
 | `harness task pause\|resume\|cancel ID` | Leaves a request for the process running the session, or acts directly when none does (ADR-031) |
 
 Ids accept any unique prefix. See the [sessions guide](../guides/sessions.md).

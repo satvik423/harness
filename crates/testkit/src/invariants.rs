@@ -8,8 +8,15 @@
 //! - **No prefill:** a request never ends with an assistant message (current
 //!   Claude models reject assistant prefill).
 //!
-//! Feed them the requests recorded by [`crate::FakeProvider::requests`]; an
-//! empty result means the harness behaved.
+//! - **I4:** compaction never starts while a tool call waits for its result.
+//! - **I5:** every pinned fact is an exact substring of its source event.
+//! - **I6:** a compaction's anchors cover all of its segment's events, in
+//!   order, with no overlap.
+//!
+//! Feed the request checks the requests recorded by
+//! [`crate::FakeProvider::requests`] ([`check_segments`] splits a session that
+//! compacted into its segments), and [`check_events`] a session's logged
+//! events; an empty result means the harness behaved.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -69,6 +76,25 @@ pub enum Violation {
     EndsWithAssistant {
         /// Request index.
         request: usize,
+    },
+    /// I4: compaction started while a tool call had no result.
+    CompactedMidCall {
+        /// Sequence number of the `CompactionStarted` event.
+        seq: u64,
+        /// The unanswered call.
+        call_id: String,
+    },
+    /// I5: a pinned quote is not in its source event.
+    PinNotVerbatim {
+        /// The pin's id.
+        pin: u32,
+        /// Its claimed source event.
+        seq: u64,
+    },
+    /// I6: the anchors leave a gap, overlap, or leave the segment.
+    AnchorsBroken {
+        /// The compacted segment.
+        segment: u32,
     },
 }
 
@@ -160,6 +186,168 @@ pub fn check_all(requests: &[ModelRequest]) -> Vec<Violation> {
         v.extend(check_tool_pairing(i, r));
     }
     v
+}
+
+/// Runs [`check_all`] on each segment of a session that may have compacted.
+///
+/// Compaction requests (those with an output schema) are checked on their
+/// own; agent requests are grouped into segments by their first message (the
+/// segment opener). Request indexes in violations are global.
+#[must_use]
+pub fn check_segments(requests: &[ModelRequest]) -> Vec<Violation> {
+    let mut violations = Vec::new();
+    let mut group: Vec<(usize, &ModelRequest)> = Vec::new();
+    let flush = |group: &mut Vec<(usize, &ModelRequest)>, out: &mut Vec<Violation>| {
+        let owned: Vec<ModelRequest> = group.iter().map(|(_, r)| (*r).clone()).collect();
+        let offset = group.first().map_or(0, |(i, _)| *i);
+        out.extend(check_all(&owned).into_iter().map(|v| shift(v, offset)));
+        group.clear();
+    };
+    for (i, request) in requests.iter().enumerate() {
+        if request.output_schema.is_some() {
+            violations.extend(check_tool_pairing(i, request));
+            continue;
+        }
+        let new_segment = group
+            .last()
+            .is_some_and(|(_, prev)| prev.messages.first() != request.messages.first());
+        if new_segment {
+            flush(&mut group, &mut violations);
+        }
+        group.push((i, request));
+    }
+    flush(&mut group, &mut violations);
+    violations
+}
+
+fn shift(v: Violation, by: usize) -> Violation {
+    match v {
+        Violation::ModelChanged { request } => Violation::ModelChanged {
+            request: request + by,
+        },
+        Violation::SystemChanged { request } => Violation::SystemChanged {
+            request: request + by,
+        },
+        Violation::ToolsChanged { request } => Violation::ToolsChanged {
+            request: request + by,
+        },
+        Violation::MessagesShrunk { request } => Violation::MessagesShrunk {
+            request: request + by,
+        },
+        Violation::MessageRewritten { request, message } => Violation::MessageRewritten {
+            request: request + by,
+            message,
+        },
+        Violation::UnansweredToolCall {
+            request,
+            message,
+            call_id,
+        } => Violation::UnansweredToolCall {
+            request: request + by,
+            message,
+            call_id,
+        },
+        Violation::ResultWithoutCall {
+            request,
+            message,
+            call_id,
+        } => Violation::ResultWithoutCall {
+            request: request + by,
+            message,
+            call_id,
+        },
+        Violation::EndsWithAssistant { request } => Violation::EndsWithAssistant {
+            request: request + by,
+        },
+        other => other,
+    }
+}
+
+/// The text a pinned quote may be copied from, per event (an independent
+/// reading of the log, not the runtime's renderer).
+fn event_text(event: &harness_protocol::Event) -> Option<String> {
+    use harness_protocol::Event;
+    use harness_types::ContentBlock;
+    let texts = |blocks: &[ContentBlock]| {
+        blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    match event {
+        Event::UserInput { message, .. } | Event::AssistantMessage { message, .. } => {
+            Some(texts(&message.content))
+        }
+        Event::ToolFinished { sent, .. } => Some(texts(sent)),
+        Event::SystemNote { text, .. } => Some(text.clone()),
+        Event::ModeChanged { note, .. } => Some(note.clone()),
+        _ => None,
+    }
+}
+
+/// Checks I4, I5 and I6 over a session's logged events, in order.
+#[must_use]
+pub fn check_events(events: &[(harness_types::Seq, harness_protocol::Event)]) -> Vec<Violation> {
+    use harness_protocol::Event;
+    use harness_types::ContentBlock;
+    let mut violations = Vec::new();
+    let mut pending: BTreeSet<String> = BTreeSet::new();
+    let texts: std::collections::BTreeMap<u64, String> = events
+        .iter()
+        .filter_map(|(seq, e)| event_text(e).map(|t| (seq.0, t)))
+        .collect();
+    for (seq, event) in events {
+        match event {
+            Event::AssistantMessage { message, .. } => {
+                for block in &message.content {
+                    if let ContentBlock::ToolCall { id, .. } = block {
+                        pending.insert(id.clone());
+                    }
+                }
+            }
+            Event::ToolFinished { call_id, .. } => {
+                pending.remove(call_id);
+            }
+            Event::CompactionStarted { .. } => {
+                if let Some(call_id) = pending.iter().next() {
+                    violations.push(Violation::CompactedMidCall {
+                        seq: seq.0,
+                        call_id: call_id.clone(),
+                    });
+                }
+            }
+            Event::Compacted { record, .. } => {
+                for pin in record.pins.iter().filter(|p| p.superseded_by.is_none()) {
+                    if !texts
+                        .get(&pin.seq.0)
+                        .is_some_and(|t| t.contains(&pin.quote))
+                    {
+                        violations.push(Violation::PinNotVerbatim {
+                            pin: pin.id,
+                            seq: pin.seq.0,
+                        });
+                    }
+                }
+                let mut next = record.from.0;
+                let mut ok = true;
+                for anchor in &record.anchors {
+                    ok &= anchor.from.0 == next && anchor.to.0 >= anchor.from.0;
+                    next = anchor.to.0 + 1;
+                }
+                if !ok || next != record.to.0 + 1 {
+                    violations.push(Violation::AnchorsBroken {
+                        segment: record.segment,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    violations
 }
 
 #[cfg(test)]

@@ -30,7 +30,9 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod budget;
 mod capper;
+pub mod compaction;
 mod date;
 mod environment;
 mod error;
@@ -39,6 +41,7 @@ mod persona;
 mod prompt;
 mod segment;
 
+pub use budget::{Budget, NEAR_SHARE, Pressure};
 pub use capper::{CHARS_PER_TOKEN, cap_output, estimate_tokens};
 pub use date::civil_date;
 pub use environment::{Environment, GitInfo};

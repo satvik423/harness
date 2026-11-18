@@ -1,0 +1,4 @@
+date	eval	variant	model	seed	turns	compactions	items	correct	score_pct	cost_usd	notes
+2026-11-18	needle	anchored	offline/model	1	200	3	10	10	100.0	0.0000	0 failed turns; 0 violations
+2026-11-18	needle	summary-only	offline/model	1	200	3	10	0	0.0	0.0000	0 failed turns; 0 violations
+2026-11-18	fidelity	anchored	offline/model	1		50	2500	2500	100.0	0.0000	50/50 requirements pinned; 0 problems

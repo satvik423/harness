@@ -20,6 +20,7 @@ An adapter crate: it may depend on ports, types and protocol, never on the runti
 | `pty_kill` | `id` | ReadOnly (ADR-027) | Kills the program's whole process group |
 | `todo` | `items[{text, status}]` | ReadOnly | Replaces the checklist; at most one item `in_progress`; the UI renders it from the call |
 | `ask_user` | `question`, `options?`, `multi?` | ReadOnly | Asks through `ToolCtx::user` (ADR-028); headless runs get "no user available" |
+| `recall` | `anchor` \| `seq_from`/`seq_to` \| `query` (+`limit`), `max_tokens?` (2,000, ≤ 8,000), `page?` | ReadOnly, parallel-safe | Earlier events through `ToolCtx::history`, paged with a "more: recall {…}" footer, wrapped as untrusted; records `Recalled` (FR-CTX-04) |
 | `propose_plan` | `plan` (Markdown) | ReadOnly | In plan mode, asks the user to approve the plan (`PLAN_CHOICES`); approval switches to `auto` or `read-only` through `ToolCtx::mode`, other answers go back as feedback; headless or outside plan mode it changes nothing (ADR-042) |
 
 `description` is the model's one-line explanation for the approval panel

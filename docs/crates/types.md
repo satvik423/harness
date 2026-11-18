@@ -10,6 +10,7 @@ Shared domain types. Depends on no other harness crate.
 | `Seq` | Per-session, gapless event number; `Seq::FIRST == Seq(1)`, displayed as `#812` |
 | `BlobRef` | 32-byte BLAKE3 content address; serialised as 64 lowercase hex characters |
 | `ModelRef` | `provider/model`, for example `anthropic/claude-opus-5-5` |
+| `Effort` | Reasoning effort, `low` … `max` (moved here in Phase 5 so the protocol can name it) |
 | `Role`, `ContentBlock`, `Message` | Provider-neutral conversation content |
 | `ContentBlock::Opaque` | Provider data that must round-trip byte for byte (signed thinking, encrypted reasoning) |
 | `Usage`, `StopReason` | Token accounting and why a reply ended |

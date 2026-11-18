@@ -1332,12 +1332,38 @@ name = "harness-context"
 version = "0.1.0"
 dependencies = [
  "harness-ports",
+ "harness-protocol",
  "harness-testkit",
  "harness-types",
+ "proptest",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "harness-evals"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "futures",
+ "harness-cli",
+ "harness-config",
+ "harness-context",
+ "harness-ports",
+ "harness-protocol",
+ "harness-runtime",
+ "harness-store-sqlite",
+ "harness-testkit",
+ "harness-tools",
+ "harness-types",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

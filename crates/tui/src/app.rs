@@ -6,8 +6,8 @@
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
-use harness_ports::Effort;
-use harness_protocol::{Decision, Envelope, Event, InputItem, Op, RuleScope, TaskState};
+use harness_ports::{Effort, RecallSelector, Recollection};
+use harness_protocol::{Anchor, Decision, Envelope, Event, InputItem, Op, RuleScope, TaskState};
 use harness_types::{
     ApprovalId, ContentBlock, Message, Mode, ModelRef, QuestionId, SessionId, TaskId,
 };
@@ -190,6 +190,10 @@ pub enum Action {
     },
     /// Switch to a stored session.
     OpenSession(SessionId),
+    /// Fetch earlier events and attach them to the next message (`/recall`).
+    Recall(RecallSelector),
+    /// Fork the session after an event (`/fork`; the last one when `None`).
+    Fork(Option<harness_types::Seq>),
     /// Leave harness.
     Quit,
 }
@@ -248,10 +252,19 @@ pub struct App {
     recalled: Option<usize>,
     /// What was typed before ↑ started recalling.
     draft: String,
+    /// Every anchor of the session so far (from `Compacted` events).
+    pub anchors: Vec<Anchor>,
+    /// Recalled events waiting to go with the next message: (label, text block).
+    pub recalls: Vec<(String, String)>,
+    /// The new segment's estimated size after a compaction, until the next
+    /// reply reports real usage.
+    context_after: Option<u64>,
 }
 
 /// Earlier prompts kept for ↑.
 pub const PROMPT_HISTORY: usize = 500;
+/// Most recalled tokens `/recall` attaches to one message.
+pub const RECALL_ATTACH_TOKENS: u64 = 8_000;
 /// Lines one notch of the mouse wheel scrolls.
 pub const WHEEL_LINES: u16 = 3;
 
@@ -279,10 +292,29 @@ fn user_parts(message: &Message) -> (String, Vec<String>) {
                 attachments.push(rest.split('"').next().unwrap_or("").to_owned());
                 continue;
             }
+            if let Some(rest) = t.strip_prefix("<recalled source=\"") {
+                attachments.push(format!("↺ {}", rest.split('"').next().unwrap_or("")));
+                continue;
+            }
             text.push(t.as_str());
         }
     }
     (text.join("\n"), attachments)
+}
+
+/// What a `recall` call asks for: an anchor, an event range or a search.
+fn recall_summary(input: &Value) -> String {
+    if let Some(anchor) = input["anchor"].as_str() {
+        return anchor.to_owned();
+    }
+    if let Some(query) = input["query"].as_str() {
+        return format!("search {query:?}");
+    }
+    match (input["seq_from"].as_u64(), input["seq_to"].as_u64()) {
+        (Some(a), Some(b)) if a != b => format!("events {a}-{b}"),
+        (Some(a), _) | (None, Some(a)) => format!("event {a}"),
+        (None, None) => "earlier events".into(),
+    }
 }
 
 /// One-line summary of a tool call's input.
@@ -295,6 +327,7 @@ pub fn summarize(name: &str, input: &Value) -> String {
         "ask_user" => input["question"].as_str().map(str::to_owned),
         // The plan itself is shown in full below the card.
         "propose_plan" => Some("a plan for your approval".to_owned()),
+        "recall" => Some(recall_summary(input)),
         "pty_write" => input["input"]
             .as_str()
             .map(|s| format!("{} ← {}", input["id"].as_str().unwrap_or("?"), s.trim_end())),
@@ -391,6 +424,9 @@ impl App {
             prompts: attached.prompts.clone(),
             recalled: None,
             draft: String::new(),
+            anchors: Vec::new(),
+            recalls: Vec::new(),
+            context_after: None,
         };
         for envelope in &attached.history {
             app.replay(envelope);
@@ -456,6 +492,46 @@ impl App {
             let extra = self.prompts.len() - PROMPT_HISTORY;
             self.prompts.drain(..extra);
         }
+    }
+
+    /// Input tokens the next request starts from: the last reply's, or the
+    /// new segment's estimate right after a compaction.
+    #[must_use]
+    pub fn context_used(&self) -> u64 {
+        self.context_after.unwrap_or_else(|| {
+            self.ledger
+                .last()
+                .map_or(0, |t| t.usage.total_input() + t.usage.output)
+        })
+    }
+
+    /// Queues recalled events for the next message, at most
+    /// [`RECALL_ATTACH_TOKENS`] of them.
+    pub fn attach_recall(&mut self, recollection: &Recollection) {
+        let mut body = Vec::new();
+        let mut size = 0u64;
+        let mut cut = false;
+        for line in &recollection.lines {
+            let t = (line.chars().count() as u64).div_ceil(4) + 1;
+            if size + t > RECALL_ATTACH_TOKENS {
+                cut = true;
+                break;
+            }
+            size += t;
+            body.push(line.as_str());
+        }
+        let more = if cut {
+            "\n[more was left out: use the recall tool for the rest]"
+        } else {
+            ""
+        };
+        let label = recollection.label.replace('"', "'");
+        let text = format!(
+            "<recalled source=\"{label}\">\n{}{more}\n</recalled>",
+            body.join("\n")
+        );
+        self.recalls
+            .push((format!("{label} ({})", crate::ledger::tokens(size)), text));
     }
 
     fn notice(&mut self, level: Level, text: impl Into<String>) {
@@ -721,7 +797,10 @@ impl App {
                 task,
                 usage,
                 cost_micros,
-            } => self.ledger.record(*task, *usage, *cost_micros),
+            } => {
+                self.ledger.record(*task, *usage, *cost_micros);
+                self.context_after = None;
+            }
             Event::Warning { message, .. } => self.notice(Level::Warning, message.clone()),
             Event::Error { message, hint, .. } => {
                 let text = match hint {
@@ -737,6 +816,43 @@ impl App {
             Event::SessionOpened {
                 mode: Some(mode), ..
             } => self.view.mode = *mode,
+            Event::ModelSwitched { model, effort } => {
+                self.view.model = model.clone();
+                self.view.effort = *effort;
+                self.next.model = model.clone();
+                self.next.effort = *effort;
+                let effort = effort.map_or("default effort".to_owned(), |e| {
+                    format!("effort {}", e.name())
+                });
+                self.notice(Level::Info, format!("now using {model} · {effort}"));
+            }
+            Event::CompactionStarted { segment } => {
+                self.notice(Level::Info, format!("compacting segment {segment}…"));
+            }
+            Event::Compacted {
+                from_segment,
+                to_segment,
+                anchors,
+                before,
+                after,
+                record,
+            } => {
+                self.anchors.extend(record.anchors.iter().cloned());
+                self.context_after = Some(*after);
+                let pins = record
+                    .pins
+                    .iter()
+                    .filter(|p| p.superseded_by.is_none())
+                    .count();
+                self.notice(
+                    Level::Info,
+                    format!(
+                        "◇ compacted segment {from_segment} → {to_segment} · {anchors} anchors · {pins} pinned facts · {} → {} tokens",
+                        crate::ledger::tokens(*before),
+                        crate::ledger::tokens(*after)
+                    ),
+                );
+            }
             Event::ModeChanged { to, .. } => {
                 self.view.mode = *to;
                 self.notice(Level::Info, format!("mode: {to} · {}", to.describe()));
@@ -915,6 +1031,7 @@ impl App {
             KeyCode::Esc if self.busy() => self.interrupt(),
             KeyCode::Esc => {
                 self.attachments.clear();
+                self.recalls.clear();
                 Vec::new()
             }
             KeyCode::PageUp => {
@@ -1131,7 +1248,7 @@ impl App {
     fn submit(&mut self) -> Vec<Action> {
         let text = self.input.lines().join("\n");
         let trimmed = text.trim();
-        if trimmed.is_empty() && self.attachments.is_empty() {
+        if trimmed.is_empty() && self.attachments.is_empty() && self.recalls.is_empty() {
             return Vec::new();
         }
         if let Some(parsed) = parse(trimmed) {
@@ -1153,7 +1270,11 @@ impl App {
             );
             return Vec::new();
         }
-        let mut input = Vec::new();
+        let mut input: Vec<InputItem> = self
+            .recalls
+            .drain(..)
+            .map(|(_, text)| InputItem::Text { text })
+            .collect();
         if !trimmed.is_empty() {
             input.push(InputItem::Text {
                 text: trimmed.to_owned(),
@@ -1215,15 +1336,23 @@ impl App {
             }
             Slash::Model(Some(name)) => match name.parse::<ModelRef>() {
                 Ok(model) => {
+                    if self.busy() {
+                        self.notice(
+                            Level::Warning,
+                            "wait for the task (or interrupt it) before switching models",
+                        );
+                        return Vec::new();
+                    }
                     self.next.model = model.clone();
                     self.prompt = Some(Prompt::Confirm {
                         question: format!(
-                            "Start a new session with {model} now? This one stays saved. [y/N]"
+                            "Continue this session with {model}? The conversation is compacted into a new segment; every detail stays recallable. [y/N]"
                         ),
-                        then: Box::new(Action::NewSession {
+                        then: Box::new(Action::Send(Op::SwitchModel {
+                            session: self.view.id,
                             model,
-                            effort: self.next.effort,
-                        }),
+                            effort: self.view.effort,
+                        })),
                     });
                     Vec::new()
                 }
@@ -1234,16 +1363,24 @@ impl App {
             },
             Slash::Effort(Some(name)) => match parse_effort(&name) {
                 Some(effort) => {
+                    if self.busy() {
+                        self.notice(
+                            Level::Warning,
+                            "wait for the task (or interrupt it) before changing the effort",
+                        );
+                        return Vec::new();
+                    }
                     self.next.effort = Some(effort);
                     self.prompt = Some(Prompt::Confirm {
                         question: format!(
-                            "Start a new session with effort {} now? This one stays saved. [y/N]",
-                            name.to_ascii_lowercase()
+                            "Continue this session at effort {}? The conversation is compacted into a new segment; every detail stays recallable. [y/N]",
+                            effort.name()
                         ),
-                        then: Box::new(Action::NewSession {
-                            model: self.next.model.clone(),
+                        then: Box::new(Action::Send(Op::SwitchModel {
+                            session: self.view.id,
+                            model: self.view.model.clone(),
                             effort: Some(effort),
-                        }),
+                        })),
                     });
                     Vec::new()
                 }
@@ -1255,6 +1392,60 @@ impl App {
                     Vec::new()
                 }
             },
+            Slash::Compact(focus) => {
+                if self.busy() {
+                    self.notice(
+                        Level::Warning,
+                        "wait for the task (or interrupt it) before compacting",
+                    );
+                    return Vec::new();
+                }
+                vec![Action::Send(Op::Compact {
+                    session: self.view.id,
+                    focus,
+                })]
+            }
+            Slash::Fork(at) => {
+                if self.busy() {
+                    self.notice(
+                        Level::Warning,
+                        "wait for the task (or interrupt it) before forking",
+                    );
+                    return Vec::new();
+                }
+                match at
+                    .as_deref()
+                    .map(|a| a.trim().trim_start_matches('#').parse::<u64>())
+                {
+                    None => vec![Action::Fork(None)],
+                    Some(Ok(n)) if n > 0 => vec![Action::Fork(Some(harness_types::Seq(n)))],
+                    Some(_) => {
+                        self.notice(
+                            Level::Warning,
+                            "/fork takes an event number, like /fork 42 (see harness session show)",
+                        );
+                        Vec::new()
+                    }
+                }
+            }
+            Slash::Recall(None) => {
+                self.overlay = Some(crate::view::anchors_overlay(self));
+                Vec::new()
+            }
+            Slash::Recall(Some(what)) => {
+                let what = what.trim().to_owned();
+                let is_anchor = what.len() > 1
+                    && what.starts_with('a')
+                    && what[1..].bytes().all(|b| b.is_ascii_digit());
+                vec![Action::Recall(if is_anchor {
+                    RecallSelector::Anchor(what)
+                } else {
+                    RecallSelector::Query {
+                        query: what,
+                        limit: 5,
+                    }
+                })]
+            }
             Slash::Mode(None) => {
                 self.overlay = Some(crate::view::modes_overlay(self));
                 Vec::new()
@@ -1717,18 +1908,20 @@ mod tests {
     }
 
     #[test]
-    fn model_and_effort_offer_a_new_session() {
+    fn model_and_effort_switch_inside_the_session_after_a_yes() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::new(&attached(dir.path()), false);
+        let session = app.view.id;
         app.command(Slash::Model(Some("anthropic/claude-opus-5-5".into())));
         assert!(matches!(app.prompt, Some(Prompt::Confirm { .. })));
         let model: ModelRef = "anthropic/claude-opus-5-5".parse().unwrap();
         assert_eq!(
             app.key(key(KeyCode::Char('y'))),
-            [Action::NewSession {
+            [Action::Send(Op::SwitchModel {
+                session,
                 model: model.clone(),
                 effort: Some(Effort::High)
-            }]
+            })]
         );
         app.command(Slash::Effort(Some("low".into())));
         assert!(
@@ -1738,10 +1931,24 @@ mod tests {
         assert_eq!(
             app.next,
             NextSession {
-                model,
+                model: model.clone(),
                 effort: Some(Effort::Low)
             }
         );
+        app.apply(&env(Event::ModelSwitched {
+            model: model.clone(),
+            effort: Some(Effort::Low),
+        }));
+        assert_eq!(
+            (app.view.model.clone(), app.view.effort),
+            (model, Some(Effort::Low))
+        );
+        assert!(
+            matches!(app.items.last(), Some(Item::Notice { text, .. }) if text == "now using anthropic/claude-opus-5-5 · effort low")
+        );
+        running(&mut app);
+        assert!(app.command(Slash::Effort(Some("max".into()))).is_empty());
+        assert!(app.prompt.is_none(), "not while busy");
     }
 
     #[test]
@@ -1960,6 +2167,181 @@ mod tests {
         assert_eq!(
             app.key(key(KeyCode::Char('1'))),
             [Action::Command(Slash::Mode(Some("read-only".into())))]
+        );
+    }
+
+    fn compacted(after: u64) -> Event {
+        Event::Compacted {
+            from_segment: 0,
+            to_segment: 1,
+            anchors: 1,
+            before: 182_000,
+            after,
+            record: Box::new(harness_protocol::CompactionRecord {
+                segment: 0,
+                from: Seq(1),
+                to: Seq(40),
+                goal: "g".into(),
+                state_of_work: "s".into(),
+                decisions: vec![],
+                pins: vec![],
+                files_touched: vec![],
+                open_questions: vec![],
+                next_steps: vec![],
+                anchors: vec![Anchor {
+                    id: "a1".into(),
+                    segment: 0,
+                    from: Seq(1),
+                    to: Seq(40),
+                    topic: "setup".into(),
+                    has: vec!["exact error".into()],
+                    tokens: 900,
+                }],
+            }),
+        }
+    }
+
+    #[test]
+    fn compaction_shows_a_notice_keeps_the_anchors_and_resets_the_context_meter() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(&attached(dir.path()), false);
+        let task = running(&mut app);
+        app.apply(&env(Event::Usage {
+            task,
+            usage: Usage {
+                input: 180_000,
+                ..Usage::default()
+            },
+            cost_micros: 0,
+        }));
+        assert_eq!(app.context_used(), 180_000);
+        app.apply(&env(Event::CompactionStarted { segment: 0 }));
+        app.apply(&env(compacted(6_100)));
+        assert_eq!(app.context_used(), 6_100);
+        assert_eq!(app.anchors.len(), 1);
+        let Some(Item::Notice { text, .. }) = app.items.last() else {
+            panic!()
+        };
+        assert!(
+            text.contains("compacted segment 0 → 1 · 1 anchors") && text.contains("182.0k → 6.1k"),
+            "{text}"
+        );
+        app.apply(&env(Event::Usage {
+            task,
+            usage: Usage {
+                input: 7_000,
+                ..Usage::default()
+            },
+            cost_micros: 0,
+        }));
+        assert_eq!(app.context_used(), 7_000);
+    }
+
+    #[test]
+    fn compact_and_recall_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(&attached(dir.path()), false);
+        let id = app.view.id;
+        assert_eq!(
+            app.command(Slash::Compact(Some("the API".into()))),
+            [Action::Send(Op::Compact {
+                session: id,
+                focus: Some("the API".into())
+            })]
+        );
+        assert_eq!(
+            app.command(Slash::Recall(Some("a12".into()))),
+            [Action::Recall(RecallSelector::Anchor("a12".into()))]
+        );
+        assert_eq!(
+            app.command(Slash::Recall(Some("tenant_id error".into()))),
+            [Action::Recall(RecallSelector::Query {
+                query: "tenant_id error".into(),
+                limit: 5
+            })]
+        );
+        assert!(app.command(Slash::Recall(None)).is_empty());
+        assert_eq!(
+            app.overlay.as_ref().unwrap().picks.len(),
+            0,
+            "no anchors yet"
+        );
+        app.apply(&env(compacted(10)));
+        app.command(Slash::Recall(None));
+        assert_eq!(
+            app.key(key(KeyCode::Enter)),
+            [Action::Command(Slash::Recall(Some("a1".into())))]
+        );
+        running(&mut app);
+        assert!(
+            app.command(Slash::Compact(None)).is_empty(),
+            "not while busy"
+        );
+    }
+
+    #[test]
+    fn recalled_events_go_first_in_the_next_message_and_show_as_attachments() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(&attached(dir.path()), false);
+        app.attach_recall(&Recollection {
+            label: "a1 · events 1-40".into(),
+            anchor: Some("a1".into()),
+            lines: vec!["#4 user: use port 8443".into()],
+        });
+        type_text(&mut app, "which port?");
+        let actions = app.key(key(KeyCode::Enter));
+        let [Action::Send(Op::Submit { input, .. })] = actions.as_slice() else {
+            panic!("{actions:?}")
+        };
+        let InputItem::Text { text } = &input[0] else {
+            panic!()
+        };
+        assert!(
+            text.starts_with("<recalled source=\"a1 · events 1-40\">\n#4 user: use port 8443"),
+            "{text}"
+        );
+        assert!(app.recalls.is_empty());
+        let message = Message::new(
+            harness_types::Role::User,
+            vec![
+                ContentBlock::text(text.clone()),
+                ContentBlock::text("which port?"),
+            ],
+        );
+        let (shown, attachments) = user_parts(&message);
+        assert_eq!(shown, "which port?");
+        assert_eq!(attachments, ["↺ a1 · events 1-40"]);
+    }
+
+    #[test]
+    fn fork_takes_an_optional_event_number() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(&attached(dir.path()), false);
+        assert_eq!(app.command(Slash::Fork(None)), [Action::Fork(None)]);
+        assert_eq!(
+            app.command(Slash::Fork(Some("#42".into()))),
+            [Action::Fork(Some(Seq(42)))]
+        );
+        assert!(app.command(Slash::Fork(Some("soon".into()))).is_empty());
+        running(&mut app);
+        assert!(app.command(Slash::Fork(None)).is_empty(), "not while busy");
+    }
+
+    #[test]
+    fn recall_cards_say_what_was_recalled() {
+        let s = |v: serde_json::Value| summarize("recall", &v);
+        assert_eq!(
+            s(serde_json::json!({"anchor": "a2", "max_tokens": 1000})),
+            "a2"
+        );
+        assert_eq!(
+            s(serde_json::json!({"seq_from": 5, "seq_to": 9})),
+            "events 5-9"
+        );
+        assert_eq!(s(serde_json::json!({"seq_from": 5})), "event 5");
+        assert_eq!(
+            s(serde_json::json!({"query": "tenant_id"})),
+            "search \"tenant_id\""
         );
     }
 

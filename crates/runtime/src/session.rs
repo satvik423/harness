@@ -14,12 +14,12 @@ use harness_context::{
     ActivePersona, Environment, SegmentContext, SegmentSpec, load_project_instructions,
 };
 use harness_ports::{
-    BlobStore, Clock, EventLog, ModeControl as _, Policy, Provider, ReadLedger, Sandbox,
-    SessionRecord, SessionStatus, SessionStore, SnapshotStore, StoreError, TaskControl,
+    BlobStore, Clock, EventLog, LoggedEvent, ModeControl as _, Policy, Provider, ReadLedger,
+    Sandbox, SessionRecord, SessionStatus, SessionStore, SnapshotStore, StoreError, TaskControl,
     ToolRegistry,
 };
 use harness_protocol::{Envelope, Event, InputItem, Op, TaskState};
-use harness_types::{ContentBlock, Message, Mode, SessionId, TaskId};
+use harness_types::{ContentBlock, Effort, Message, Mode, ModelRef, Seq, SessionId, TaskId};
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -27,7 +27,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::approval::{Approvals, Questions};
+use crate::compact::FrameChange;
 use crate::journal::Journal;
+use crate::memory::{ContextSettings, SessionMemory};
 use crate::mode::{SessionMode, environment_note};
 use crate::replay::{PausedTask, rebuild, recover};
 use crate::turn::{PauseFlag, Round, Start, StopKind, StopSlot, TaskCtx, TaskResult, run_task};
@@ -48,6 +50,37 @@ pub enum RuntimeError {
     /// The stored events do not form a valid session.
     #[error("the stored session is inconsistent: {0}")]
     Corrupt(String),
+    /// A request that cannot be carried out as given (for example a fork
+    /// point after the session's last event).
+    #[error("{0}")]
+    Invalid(String),
+}
+
+/// A new fork, started (see [`fork_session`]).
+#[derive(Debug)]
+pub struct Forked {
+    /// The fork's handle.
+    pub handle: SessionHandle,
+    /// Its events, subscribed before the first one.
+    pub events: broadcast::Receiver<Envelope>,
+    /// The parent event the fork continues after (moved back to before an
+    /// unanswered tool round if one was asked for).
+    pub at: Seq,
+    /// Whether the fork holds conversation to compact: send `Op::Compact`
+    /// next, so it starts its own segment (ADR-047).
+    pub needs_compaction: bool,
+}
+
+/// How a session gets a provider and price for another model, for `/model`
+/// inside a session (ADR-046). Implemented by the front-end, which knows the
+/// keys and the pricing table; it may block (keyring), so the runtime calls it
+/// off the async workers.
+pub trait ModelSource: Send + Sync {
+    /// A provider that serves `model`, and the model's price if known.
+    ///
+    /// # Errors
+    /// A message when the model cannot be used (unknown provider, no API key).
+    fn open(&self, model: &ModelRef) -> Result<(Arc<dyn Provider>, Option<ModelPrice>), String>;
 }
 
 /// The adapters a session uses, all behind ports.
@@ -73,6 +106,9 @@ pub struct RuntimeDeps {
     pub sessions: Arc<dyn SessionStore>,
     /// File snapshots for undo.
     pub snapshots: Arc<dyn SnapshotStore>,
+    /// Providers for other models (`None`: only models of the same provider,
+    /// at the session's price).
+    pub models: Option<Arc<dyn ModelSource>>,
 }
 
 /// Per-session settings.
@@ -89,6 +125,8 @@ pub struct SessionConfig {
     pub mode: Mode,
     /// Whether `full` mode may be chosen (`--dangerously-full-access`).
     pub full_access: bool,
+    /// Context-engine settings: when and how to compact (Phase 5).
+    pub context: ContextSettings,
     /// Maximum model calls per task run.
     pub max_turns: u32,
     /// Tool output cap in estimated tokens, unless a tool sets its own
@@ -199,7 +237,7 @@ pub async fn spawn_session(
         .await?;
     let mode = config.mode;
     let handle = start(
-        Actor::new(id, deps, config, journal, None, None, mode),
+        Actor::new(id, deps, config, journal, Restored::fresh(mode)),
         events_tx,
     );
     Ok((handle, events_rx))
@@ -239,7 +277,19 @@ pub async fn resume_session(
     };
     let mode = rebuilt.mode.unwrap_or(config.mode);
     let full_access = config.full_access;
-    let actor = Actor::new(id, deps, config, journal, rebuilt.segment, paused, mode);
+    let memory = std::mem::take(&mut rebuilt.memory);
+    let actor = Actor::new(
+        id,
+        deps,
+        config,
+        journal,
+        Restored {
+            segment: rebuilt.segment,
+            paused,
+            mode,
+            memory,
+        },
+    );
     // A session left in full mode does not keep it in a process started
     // without --dangerously-full-access.
     if mode == Mode::Full && !full_access {
@@ -254,6 +304,129 @@ pub async fn resume_session(
     Ok((start(actor, events_tx), events_rx, resumed))
 }
 
+/// Forks `parent` after its event `at` (FR-SES-06, ADR-035, ADR-047): a new
+/// session that reads the parent's events up to `at` in place and records its
+/// own after them.
+///
+/// The fork must not reuse the parent's thinking blocks, so it continues in a
+/// segment of its own: when the inherited segment holds conversation, the
+/// caller sends `Op::Compact` and the fork starts from a summary of the
+/// parent's segment up to `at`. A fork point inside an unanswered tool round
+/// moves back to before that round (I4).
+///
+/// # Errors
+/// [`RuntimeError::NotFound`] for an unknown parent, [`RuntimeError::Invalid`]
+/// for a fork point outside it, or a store error.
+pub async fn fork_session(
+    deps: RuntimeDeps,
+    config: SessionConfig,
+    parent: SessionId,
+    at: Seq,
+) -> Result<Forked, RuntimeError> {
+    let Some(record) = deps.sessions.session(parent).await? else {
+        return Err(RuntimeError::NotFound(parent));
+    };
+    let last = deps.log.last_seq(parent).await?.unwrap_or(Seq(0));
+    if at.0 == 0 || at > last {
+        return Err(RuntimeError::Invalid(format!(
+            "event #{} is not in session {parent} (its events are #1 to #{})",
+            at.0, last.0
+        )));
+    }
+    let history = deps.log.range(parent, Seq::FIRST, at).await?;
+    let at = safe_fork_point(&history, at);
+    let segment = history
+        .iter()
+        .take_while(|l| l.envelope.seq <= at)
+        .last()
+        .map_or(0, |l| l.segment);
+    let id = SessionId::new();
+    deps.sessions
+        .create_session(SessionRecord {
+            id,
+            created_at: deps.clock.now_ms(),
+            title: record.title.map(|t| format!("{t} (fork at #{})", at.0)),
+            persona: record.persona,
+            cwd: config.cwd.clone(),
+            status: SessionStatus::Open,
+            parent: Some(parent),
+            forked_at: Some(at),
+            current_segment: segment,
+        })
+        .await?;
+    let mut rebuilt = rebuild(deps.log.as_ref(), deps.blobs.as_ref(), id).await?;
+    let (events_tx, events_rx) = broadcast::channel(EVENT_CAPACITY);
+    let journal = Arc::new(Journal::new(
+        id,
+        Arc::clone(&deps.log),
+        Arc::clone(&deps.clock),
+        events_tx.clone(),
+        Some(at),
+        segment,
+    ));
+    let mut mode = rebuilt.mode.unwrap_or(config.mode);
+    if mode == Mode::Full && !config.full_access {
+        mode = Mode::Auto;
+    }
+    journal
+        .record(
+            None,
+            Event::SessionOpened {
+                persona: config.persona.name.clone(),
+                segment,
+                mode: Some(mode),
+            },
+        )
+        .await?;
+    let needs_compaction = rebuilt
+        .segment
+        .as_ref()
+        .is_some_and(|s| !s.messages().is_empty());
+    let memory = std::mem::take(&mut rebuilt.memory);
+    let actor = Actor::new(
+        id,
+        deps,
+        config,
+        journal,
+        Restored {
+            segment: rebuilt.segment,
+            paused: None,
+            mode,
+            memory,
+        },
+    );
+    Ok(Forked {
+        handle: start(actor, events_tx),
+        events: events_rx,
+        at,
+        needs_compaction,
+    })
+}
+
+/// `at`, or the event before the assistant message whose tool round `at`
+/// falls inside (that round has calls without results up to `at`).
+fn safe_fork_point(history: &[LoggedEvent], at: Seq) -> Seq {
+    let mut open: Option<(Seq, usize)> = None;
+    for logged in history.iter().take_while(|l| l.envelope.seq <= at) {
+        match &logged.envelope.event {
+            Event::AssistantMessage { message, .. } => {
+                let calls = message.tool_call_ids().len();
+                open = (calls > 0).then_some((logged.envelope.seq, calls));
+            }
+            Event::ToolFinished { .. } => {
+                if let Some((seq, left)) = open {
+                    open = (left > 1).then_some((seq, left - 1));
+                }
+            }
+            _ => {}
+        }
+    }
+    match open {
+        Some((assistant, _)) => Seq(assistant.0.saturating_sub(1).max(1)),
+        None => at,
+    }
+}
+
 fn start(actor: Actor, events: broadcast::Sender<Envelope>) -> SessionHandle {
     let id = actor.id;
     let (ops_tx, ops_rx) = mpsc::channel(OP_CAPACITY);
@@ -263,6 +436,35 @@ fn start(actor: Actor, events: broadcast::Sender<Envelope>) -> SessionHandle {
         ops: ops_tx,
         events,
     }
+}
+
+/// What a session starts with besides its settings: nothing for a new
+/// session, the rebuilt state for a resumed one or a fork.
+struct Restored {
+    segment: Option<SegmentContext>,
+    paused: Option<PausedTask>,
+    mode: Mode,
+    memory: SessionMemory,
+}
+
+impl Restored {
+    /// A new session in `mode`.
+    fn fresh(mode: Mode) -> Self {
+        Self {
+            segment: None,
+            paused: None,
+            mode,
+            memory: SessionMemory::default(),
+        }
+    }
+}
+
+/// A model switch in progress.
+struct Switch {
+    model: ModelRef,
+    effort: Option<Effort>,
+    provider: Arc<dyn Provider>,
+    price: Option<ModelPrice>,
 }
 
 /// A task currently running on its own tokio task.
@@ -299,6 +501,10 @@ struct Actor {
     questions: Arc<Questions>,
     /// The permission mode, shared with running tasks and their tools.
     mode: Arc<SessionMode>,
+    /// Pins and anchors from earlier compactions.
+    memory: Arc<std::sync::Mutex<SessionMemory>>,
+    /// A model switch waiting for its compaction to finish.
+    switching: Option<Switch>,
     running: Option<Running>,
     paused: Option<Paused>,
     /// Parent of every task's cancellation token.
@@ -311,10 +517,14 @@ impl Actor {
         deps: RuntimeDeps,
         config: SessionConfig,
         journal: Arc<Journal>,
-        segment: Option<SegmentContext>,
-        paused: Option<PausedTask>,
-        mode: Mode,
+        restored: Restored,
     ) -> Self {
+        let Restored {
+            segment,
+            paused,
+            mode,
+            memory,
+        } = restored;
         let mode = Arc::new(SessionMode::new(
             mode,
             config.full_access,
@@ -329,6 +539,8 @@ impl Actor {
             approvals: Arc::default(),
             questions: Arc::default(),
             mode,
+            memory: Arc::new(std::sync::Mutex::new(memory)),
+            switching: None,
             running: None,
             paused: paused.map(|p| Paused {
                 task: p.task,
@@ -373,6 +585,21 @@ impl Actor {
     ) {
         match joined {
             Ok(result) => {
+                if let Some(switch) = self.switching.take() {
+                    let frame = result.segment.frame();
+                    if frame.provider == switch.model.provider()
+                        && frame.model == switch.model.model()
+                        && frame.effort == switch.effort
+                    {
+                        self.apply_switch(switch).await;
+                    } else {
+                        self.warn(
+                            "model",
+                            format!("the session stays on {}/{}: the compaction for the switch did not finish", frame.provider, frame.model),
+                        )
+                        .await;
+                    }
+                }
                 if result.state == TaskState::Paused {
                     self.paused = Some(Paused {
                         task,
@@ -429,9 +656,13 @@ impl Actor {
             Op::Resume { task } => self.resume(task).await,
             Op::Undo { session } => self.undo(session).await,
             Op::SetMode { session, mode } => self.set_mode(session, mode).await,
-            Op::Compact { .. } => {
-                self.warn("unsupported", "compaction arrives in Phase 5".into())
-                    .await;
+            Op::SwitchModel {
+                session,
+                model,
+                effort,
+            } => self.switch_model(session, model, effort).await,
+            Op::Compact { session, focus } => {
+                self.compact(session, focus, FrameChange::default()).await;
             }
             Op::SwitchPersona { .. } => {
                 self.warn("unsupported", "persona switching arrives in Phase 6".into())
@@ -440,7 +671,7 @@ impl Actor {
             Op::Fork { .. } => {
                 self.warn(
                     "unsupported",
-                    "fork arrives with compaction in Phase 5".into(),
+                    "a fork is a new session: create it through the front-end (harness session fork, /fork)".into(),
                 )
                 .await;
             }
@@ -530,6 +761,7 @@ impl Actor {
         let initial = match start {
             Start::New(_) => TaskState::Queued,
             Start::Continue(_) | Start::Cancel(_) => TaskState::Paused,
+            Start::Compact { .. } => TaskState::Queued,
         };
         let ctx = TaskCtx {
             session: self.id,
@@ -545,6 +777,8 @@ impl Actor {
             approvals: Arc::clone(&self.approvals),
             questions: Arc::clone(&self.questions),
             mode: Arc::clone(&self.mode),
+            context: self.config.context.clone(),
+            memory: Arc::clone(&self.memory),
             cancel: cancel.clone(),
             stop: Arc::clone(&stop),
             pause: Arc::clone(&pause),
@@ -773,6 +1007,143 @@ impl Actor {
             && let Some(segment) = &mut self.segment
         {
             segment.push_note(note);
+        }
+    }
+
+    /// Continues the session with `model` at `effort` (ADR-046): compacts into
+    /// a new segment that uses them, or, before the first segment, simply
+    /// starts with them.
+    async fn switch_model(&mut self, session: SessionId, model: ModelRef, effort: Option<Effort>) {
+        let (provider, model_id, current_effort) = match &self.segment {
+            Some(s) => (
+                s.frame().provider.clone(),
+                s.frame().model.clone(),
+                s.frame().effort,
+            ),
+            None => (
+                self.config.persona.model.provider().to_owned(),
+                self.config.persona.model.model().to_owned(),
+                self.config.persona.effort,
+            ),
+        };
+        if provider == model.provider() && model_id == model.model() && current_effort == effort {
+            self.warn("model", format!("the session already uses {model}"))
+                .await;
+            return;
+        }
+        let opened = match self.deps.models.clone() {
+            Some(source) => {
+                let wanted = model.clone();
+                tokio::task::spawn_blocking(move || source.open(&wanted))
+                    .await
+                    .unwrap_or_else(|e| Err(format!("opening the model failed: {e}")))
+            }
+            None if provider == model.provider() => {
+                Ok((Arc::clone(&self.deps.provider), self.config.price))
+            }
+            None => Err(format!(
+                "this session cannot switch to another provider ({})",
+                model.provider()
+            )),
+        };
+        let (next_provider, price) = match opened {
+            Ok(opened) => opened,
+            Err(message) => {
+                self.error("model", message).await;
+                return;
+            }
+        };
+        let switch = Switch {
+            model,
+            effort,
+            provider: next_provider,
+            price,
+        };
+        if self
+            .segment
+            .as_ref()
+            .is_some_and(|s| !s.messages().is_empty())
+        {
+            let change = FrameChange {
+                model: Some((
+                    switch.model.provider().to_owned(),
+                    switch.model.model().to_owned(),
+                )),
+                effort: Some(effort),
+            };
+            self.switching = Some(switch);
+            self.compact(session, None, change).await;
+            if self.running.is_none() {
+                // The compaction did not start (busy, wrong session).
+                self.switching = None;
+            }
+        } else if session == self.id {
+            // Nothing sent yet: the first segment opens with the new model.
+            self.segment = None;
+            self.apply_switch(switch).await;
+        } else {
+            self.error(
+                "unknown_session",
+                format!("this is session {}, not {session}", self.id),
+            )
+            .await;
+        }
+    }
+
+    /// Makes later model calls use the switched model's provider and price.
+    async fn apply_switch(&mut self, switch: Switch) {
+        self.deps.provider = switch.provider;
+        self.config.price = switch.price;
+        self.config.persona.model = switch.model.clone();
+        self.config.persona.effort = switch.effort;
+        let _ = self
+            .journal
+            .record(
+                None,
+                Event::ModelSwitched {
+                    model: switch.model,
+                    effort: switch.effort,
+                },
+            )
+            .await;
+    }
+
+    /// Starts a task that compacts the current segment (`/compact`, or a
+    /// model or effort switch).
+    async fn compact(&mut self, session: SessionId, focus: Option<String>, change: FrameChange) {
+        if session != self.id {
+            self.error(
+                "unknown_session",
+                format!("this is session {}, not {session}", self.id),
+            )
+            .await;
+            return;
+        }
+        if self.running.is_some() {
+            self.error(
+                "busy",
+                "a task is running; compact when it has finished".into(),
+            )
+            .await;
+            return;
+        }
+        if let Some(paused) = &self.paused {
+            self.error(
+                "busy",
+                format!("task {} is paused; resume or cancel it first", paused.task),
+            )
+            .await;
+            return;
+        }
+        match self.segment.take() {
+            Some(segment) if !segment.messages().is_empty() => {
+                self.start_task(TaskId::new(), segment, Start::Compact { focus, change });
+            }
+            other => {
+                self.segment = other;
+                self.warn("compaction", "nothing to compact yet".into())
+                    .await;
+            }
         }
     }
 

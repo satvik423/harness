@@ -14,18 +14,16 @@ pub const PROVIDER_ID: &str = "anthropic";
 /// Never sends `temperature`, `top_p` or `top_k` (rejected by API version
 /// `2026-10-21`), assistant prefill, or a forced `tool_choice`.
 ///
+/// An `output_schema` becomes `output_config.format` (JSON schema); the reply's
+/// text is then JSON matching it (ADR-044).
+///
 /// # Errors
 /// [`ProviderError::Unsupported`] for content this phase cannot send yet
-/// (images, documents, structured output).
+/// (images, documents).
 pub fn build_messages_body(
     request: &ModelRequest,
     settings: &AnthropicSettings,
 ) -> Result<Value, ProviderError> {
-    if request.output_schema.is_some() {
-        return Err(ProviderError::Unsupported(
-            "structured output arrives in Phase 15".into(),
-        ));
-    }
     let ephemeral = json!({"type": "ephemeral"});
     let mut body = Map::new();
     body.insert("model".into(), json!(request.model));
@@ -75,11 +73,18 @@ pub fn build_messages_body(
         json!({"prefix_mismatch_behavior": settings.thinking_mismatch.as_str()});
     body.insert("thinking".into(), thinking);
 
+    let mut output_config = Map::new();
     if let Some(effort) = request.effort {
-        body.insert(
-            "output_config".into(),
-            json!({"effort": effort_name(effort)}),
+        output_config.insert("effort".into(), json!(effort_name(effort)));
+    }
+    if let Some(schema) = &request.output_schema {
+        output_config.insert(
+            "format".into(),
+            json!({"type": "json_schema", "schema": schema}),
         );
+    }
+    if !output_config.is_empty() {
+        body.insert("output_config".into(), Value::Object(output_config));
     }
     if request.cache_plan.auto_tail {
         body.insert("cache_control".into(), ephemeral);
@@ -364,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn images_and_structured_output_are_unsupported_for_now() {
+    fn images_are_unsupported_for_now() {
         let mut r = request();
         r.messages[0].content.push(ContentBlock::Image {
             blob: BlobRef::from_bytes([0; 32]),
@@ -374,12 +379,24 @@ mod tests {
             build_messages_body(&r, &AnthropicSettings::default()),
             Err(ProviderError::Unsupported(_))
         ));
+    }
+
+    #[test]
+    fn an_output_schema_becomes_output_config_format_next_to_effort() {
+        let schema = json!({"type": "object", "properties": {}, "required": [], "additionalProperties": false});
         let mut r = request();
-        r.output_schema = Some(json!({"type": "object"}));
-        assert!(matches!(
-            build_messages_body(&r, &AnthropicSettings::default()),
-            Err(ProviderError::Unsupported(_))
-        ));
+        r.output_schema = Some(schema.clone());
+        let b = build_messages_body(&r, &AnthropicSettings::default()).unwrap();
+        assert_eq!(
+            b["output_config"],
+            json!({"effort": "high", "format": {"type": "json_schema", "schema": schema}})
+        );
+        r.effort = None;
+        let b = build_messages_body(&r, &AnthropicSettings::default()).unwrap();
+        assert_eq!(
+            b["output_config"],
+            json!({"format": {"type": "json_schema", "schema": schema}})
+        );
     }
 
     #[test]

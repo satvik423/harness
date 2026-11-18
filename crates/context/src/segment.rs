@@ -8,7 +8,7 @@ use harness_types::{ContentBlock, Message, Role};
 use serde::{Deserialize, Serialize};
 
 use crate::prompt::BASE_PROMPT;
-use crate::{ActivePersona, ContextError};
+use crate::{ActivePersona, ContextError, estimate_tokens};
 
 /// Everything needed to open a segment.
 #[derive(Debug, Clone)]
@@ -68,6 +68,9 @@ pub struct SegmentContext {
     messages: Vec<Message>,
     /// System notes waiting to be sent with the next user message.
     notes: Vec<String>,
+    /// The input tokens the provider reported for the last request, and how
+    /// many messages that request held (P5-T1).
+    measured: Option<(u64, usize)>,
 }
 
 impl SegmentContext {
@@ -111,7 +114,60 @@ impl SegmentContext {
             frame,
             messages: Vec::new(),
             notes: Vec::new(),
+            measured: None,
         }
+    }
+
+    /// Records the input tokens the provider reported for the request built
+    /// from the current transcript (call it before appending the reply).
+    pub fn record_input(&mut self, total_input: u64) {
+        self.measured = Some((total_input, self.messages.len()));
+    }
+
+    /// Estimated input tokens of the next request if `extra` (new user input)
+    /// were appended: the last measured input plus an estimate of everything
+    /// appended since, or an estimate of the whole request when nothing was
+    /// measured yet in this segment.
+    #[must_use]
+    pub fn estimated_input(&self, extra: &[ContentBlock]) -> u64 {
+        let notes: u64 = self.notes.iter().map(|n| estimate_tokens(n)).sum();
+        let extra: u64 = extra.iter().map(block_tokens).sum();
+        let base = match self.measured {
+            Some((total, mark)) => {
+                total
+                    + self
+                        .messages
+                        .get(mark..)
+                        .unwrap_or_default()
+                        .iter()
+                        .map(message_tokens)
+                        .sum::<u64>()
+            }
+            None => {
+                let system: u64 = self
+                    .frame
+                    .system
+                    .iter()
+                    .map(|p| estimate_tokens(&p.text))
+                    .sum();
+                let tools: u64 = self
+                    .frame
+                    .tools
+                    .iter()
+                    .map(|t| {
+                        estimate_tokens(&t.description)
+                            + estimate_tokens(&t.input_schema.to_string())
+                    })
+                    .sum();
+                let opener = if self.messages.is_empty() {
+                    estimate_tokens(&self.frame.opener)
+                } else {
+                    0
+                };
+                system + tools + opener + self.messages.iter().map(message_tokens).sum::<u64>()
+            }
+        };
+        base + notes + extra
     }
 
     /// The frozen part of the segment.
@@ -310,6 +366,40 @@ impl SegmentContext {
     }
 }
 
+/// Estimated tokens of one message.
+fn message_tokens(message: &Message) -> u64 {
+    message.content.iter().map(block_tokens).sum()
+}
+
+/// Rough size of an image or document before it is ingested (Phase 11).
+const ATTACHMENT_TOKENS: u64 = 1_500;
+
+/// Estimated tokens of one content block.
+fn block_tokens(block: &ContentBlock) -> u64 {
+    match block {
+        ContentBlock::Text { text } => estimate_tokens(text),
+        ContentBlock::Image { .. } | ContentBlock::Document { .. } => ATTACHMENT_TOKENS,
+        ContentBlock::ToolCall { name, input, .. } => {
+            estimate_tokens(name) + estimate_tokens(&input.to_string())
+        }
+        ContentBlock::ToolResult { content, .. } => content.iter().map(block_tokens).sum(),
+        ContentBlock::Opaque { raw, .. } => estimate_tokens(&raw.to_string()),
+    }
+}
+
+impl SegmentFrame {
+    /// The frame of the segment that follows this one after a compaction: the
+    /// same system prompt, tools and model settings, a new number and opener.
+    #[must_use]
+    pub fn successor(&self, segment: u32, opener: String) -> Self {
+        Self {
+            segment,
+            opener,
+            ..self.clone()
+        }
+    }
+}
+
 fn frame_of(
     persona: ActivePersona,
     system: Vec<SystemPart>,
@@ -356,6 +446,39 @@ mod tests {
             environment: "<environment>env</environment>".into(),
             segment: 0,
         })
+    }
+
+    #[test]
+    fn the_estimate_starts_from_the_last_measured_input_and_adds_what_came_after() {
+        let mut s = segment();
+        let fresh = s.estimated_input(&[ContentBlock::text("x".repeat(400))]);
+        assert!(fresh > 100, "the whole request is estimated: {fresh}");
+        s.push_user(vec![ContentBlock::text("hi")]).unwrap();
+        s.record_input(5_000);
+        assert_eq!(s.estimated_input(&[]), 5_000);
+        s.push_assistant(Message::new(
+            Role::Assistant,
+            vec![ContentBlock::text("y".repeat(40))],
+        ))
+        .unwrap();
+        s.push_note("n".repeat(8));
+        assert_eq!(
+            s.estimated_input(&[ContentBlock::text("z".repeat(4))]),
+            5_000 + 10 + 2 + 1
+        );
+    }
+
+    #[test]
+    fn a_successor_frame_keeps_the_prefix_and_changes_number_and_opener() {
+        let s = segment();
+        let next = s
+            .frame()
+            .successor(1, "<environment>new</environment>".into());
+        assert_eq!(next.segment, 1);
+        assert_eq!(next.opener, "<environment>new</environment>");
+        assert_eq!(next.system, s.frame().system);
+        assert_eq!(next.tools, s.frame().tools);
+        assert_eq!(next.model, s.frame().model);
     }
 
     fn call(id: &str) -> ContentBlock {

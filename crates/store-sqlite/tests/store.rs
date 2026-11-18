@@ -73,7 +73,7 @@ async fn opening_creates_the_layout_and_reopening_keeps_the_data() {
     }
     let store = SqliteStore::open(dir.path()).unwrap();
     assert_eq!(store.last_seq(id).await.unwrap(), Some(Seq(1)));
-    assert_eq!(SCHEMA_VERSION, 2);
+    assert_eq!(SCHEMA_VERSION, 3);
 }
 
 #[tokio::test]
@@ -754,4 +754,202 @@ async fn recent_inputs_come_from_every_session_newest_first() {
         .map(Message::text)
         .collect();
     assert_eq!(texts, ["third", "second"]);
+}
+
+#[tokio::test]
+async fn compactions_fill_the_anchor_and_pin_tables_and_close_the_segment() {
+    use harness_protocol::{Anchor, CompactionRecord, PinKind, PinnedFact};
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(dir.path()).unwrap();
+    let id = new_session(&store, dir.path()).await;
+    let frame = store
+        .put(b"{}".to_vec(), "application/json", None)
+        .await
+        .unwrap();
+    store
+        .append(logged(
+            id,
+            1,
+            None,
+            Event::SegmentOpened {
+                segment: 0,
+                opener: Message::user_text("env"),
+                frame,
+            },
+        ))
+        .await
+        .unwrap();
+    let pin = |id, superseded_by| PinnedFact {
+        id,
+        quote: format!("fact {id}"),
+        seq: Seq(1),
+        kind: PinKind::Id,
+        superseded_by,
+    };
+    let compacted = |pins: Vec<PinnedFact>, anchor: &str, seq| {
+        logged(
+            id,
+            seq,
+            None,
+            Event::Compacted {
+                from_segment: 0,
+                to_segment: 1,
+                anchors: 1,
+                before: 900,
+                after: 90,
+                record: Box::new(CompactionRecord {
+                    segment: 0,
+                    from: Seq(1),
+                    to: Seq(seq - 1),
+                    goal: "g".into(),
+                    state_of_work: "s".into(),
+                    decisions: vec![],
+                    pins,
+                    files_touched: vec![],
+                    open_questions: vec![],
+                    next_steps: vec![],
+                    anchors: vec![Anchor {
+                        id: anchor.into(),
+                        segment: 0,
+                        from: Seq(1),
+                        to: Seq(seq - 1),
+                        topic: "t".into(),
+                        has: vec!["error text".into()],
+                        tokens: 42,
+                    }],
+                }),
+            },
+        )
+    };
+    store
+        .append(compacted(vec![pin(1, None)], "a1", 2))
+        .await
+        .unwrap();
+    store
+        .append(compacted(vec![pin(1, Some(Seq(2))), pin(2, None)], "a2", 3))
+        .await
+        .unwrap();
+    let db = rusqlite::Connection::open(dir.path().join(".harness/state.db")).unwrap();
+    let pins: Vec<(i64, bool)> = db
+        .prepare("SELECT pin_id, active FROM pinned_facts WHERE session_id = ?1 ORDER BY pin_id")
+        .unwrap()
+        .query_map([id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(pins, [(1, false), (2, true)]);
+    let anchors: Vec<(String, String)> = db
+        .prepare("SELECT anchor_id, has_json FROM anchors WHERE session_id = ?1 ORDER BY anchor_id")
+        .unwrap()
+        .query_map([id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(anchors[0], ("a1".to_owned(), "[\"error text\"]".to_owned()));
+    assert_eq!(anchors.len(), 2);
+    let (end, before): (i64, i64) = db
+        .query_row(
+            "SELECT end_seq, tokens_before FROM segments WHERE session_id = ?1 AND segment = 0",
+            [id.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((end, before), (2, 900));
+    // Deleting the session removes the projections too.
+    store.delete_session(id).await.unwrap();
+    let left: i64 = db
+        .query_row("SELECT COUNT(*) FROM pinned_facts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(left, 0);
+}
+
+#[tokio::test]
+async fn a_fork_reads_its_parent_up_to_the_fork_point_and_continues_numbering_after_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(dir.path()).unwrap();
+    let parent = new_session(&store, dir.path()).await;
+    let task = TaskId::new();
+    let say = |text: &str| Event::UserInput {
+        task,
+        message: Message::user_text(text),
+    };
+    for (i, word) in ["alpha", "bravo", "charlie", "delta", "echo"]
+        .iter()
+        .enumerate()
+    {
+        store
+            .append(logged(
+                parent,
+                i as u64 + 1,
+                Some(task),
+                say(&format!("parent says {word}")),
+            ))
+            .await
+            .unwrap();
+    }
+    let fork = |id, from: SessionId, at| SessionRecord {
+        parent: Some(from),
+        forked_at: Some(Seq(at)),
+        ..record(id, dir.path())
+    };
+    let child = SessionId::new();
+    store.create_session(fork(child, parent, 3)).await.unwrap();
+    assert_eq!(store.last_seq(child).await.unwrap(), Some(Seq(3)));
+    assert!(matches!(
+        store.append(logged(child, 1, None, say("too early"))).await,
+        Err(StoreError::Conflict(_))
+    ));
+    store
+        .append(logged(child, 4, Some(task), say("child says foxtrot")))
+        .await
+        .unwrap();
+
+    let seen: Vec<(u64, SessionId)> = store
+        .range(child, Seq::FIRST, Seq(u64::MAX))
+        .await
+        .unwrap()
+        .iter()
+        .map(|e| (e.envelope.seq.0, e.envelope.session))
+        .collect();
+    assert_eq!(seen, [(1, parent), (2, parent), (3, parent), (4, child)]);
+    assert_eq!(store.range(child, Seq(3), Seq(4)).await.unwrap().len(), 2);
+
+    let hits = |q: &'static str, id| {
+        let store = &store;
+        async move {
+            store
+                .search(id, q, 10)
+                .await
+                .unwrap()
+                .iter()
+                .map(|h| h.seq.0)
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(hits("charlie", child).await, [3]);
+    assert!(
+        hits("delta", child).await.is_empty(),
+        "after the fork point"
+    );
+    assert_eq!(hits("foxtrot", child).await, [4]);
+    assert!(hits("foxtrot", parent).await.is_empty());
+
+    // A fork of the fork reads through both.
+    let grandchild = SessionId::new();
+    store
+        .create_session(fork(grandchild, child, 4))
+        .await
+        .unwrap();
+    let seqs: Vec<u64> = store
+        .range(grandchild, Seq::FIRST, Seq(u64::MAX))
+        .await
+        .unwrap()
+        .iter()
+        .map(|e| e.envelope.seq.0)
+        .collect();
+    assert_eq!(seqs, [1, 2, 3, 4]);
+    assert!(matches!(
+        store.delete_session(child).await,
+        Err(StoreError::Conflict(_))
+    ));
 }

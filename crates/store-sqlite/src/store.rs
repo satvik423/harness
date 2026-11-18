@@ -208,6 +208,122 @@ impl SqliteStore {
     }
 }
 
+/// Keeps the `anchors` and `pinned_facts` tables and the closed segment's row
+/// in step with a `Compacted` record (ADR-045). The record is the source of
+/// truth; these tables are a projection for queries.
+fn project_compaction(
+    conn: &Connection,
+    session: &str,
+    segment: u32,
+    before: u64,
+    after: u64,
+    record: &harness_protocol::CompactionRecord,
+    ts: i64,
+) -> Result<(), StoreError> {
+    conn.execute(
+        "UPDATE segments SET end_seq = ?1, tokens_before = ?2, tokens_after = ?3
+         WHERE session_id = ?4 AND segment = ?5",
+        params![
+            to_i64(record.to.0),
+            to_i64(before),
+            to_i64(after),
+            session,
+            segment
+        ],
+    )
+    .map_err(backend)?;
+    for anchor in &record.anchors {
+        let has = serde_json::to_string(&anchor.has)
+            .map_err(|e| StoreError::Backend(format!("cannot encode an anchor: {e}")))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO anchors (session_id, anchor_id, segment, from_seq, to_seq, topic, has_json, tokens)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                session,
+                anchor.id,
+                anchor.segment,
+                to_i64(anchor.from.0),
+                to_i64(anchor.to.0),
+                anchor.topic,
+                has,
+                to_i64(anchor.tokens)
+            ],
+        )
+        .map_err(backend)?;
+    }
+    for pin in &record.pins {
+        conn.execute(
+            "INSERT INTO pinned_facts (session_id, pin_id, text, source_seq, kind, active, superseded_by, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(session_id, pin_id) DO UPDATE SET active = excluded.active,
+               superseded_by = excluded.superseded_by",
+            params![
+                session,
+                pin.id,
+                pin.quote,
+                to_i64(pin.seq.0),
+                pin.kind.name(),
+                pin.superseded_by.is_none(),
+                pin.superseded_by.map(|s| to_i64(s.0)),
+                ts
+            ],
+        )
+        .map_err(backend)?;
+    }
+    Ok(())
+}
+
+/// Where a session's events live (FR-SES-06, ADR-047): its own events, and for
+/// a fork, its parent's events up to the fork point (recursively), read in
+/// place and never copied. Each part is `(session, first seq, last seq)`,
+/// oldest ancestor first.
+fn lineage(conn: &Connection, session: &str) -> Result<Vec<(String, i64, i64)>, StoreError> {
+    let mut chain: Vec<(String, Option<i64>)> = Vec::new();
+    let mut current = session.to_owned();
+    let mut upper: Option<i64> = None;
+    for _ in 0..64 {
+        let row: Option<(Option<String>, Option<i64>)> = conn
+            .query_row(
+                "SELECT parent_id, forked_at_seq FROM sessions WHERE id = ?1",
+                [&current],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(backend)?;
+        chain.push((current.clone(), upper));
+        match row {
+            Some((Some(parent), at)) => {
+                upper = at;
+                current = parent;
+            }
+            _ => break,
+        }
+    }
+    chain.reverse();
+    let mut parts = Vec::with_capacity(chain.len());
+    let mut low = 1;
+    for (id, high) in chain {
+        let high = high.unwrap_or(i64::MAX);
+        parts.push((id, low, high));
+        low = high.saturating_add(1);
+    }
+    Ok(parts)
+}
+
+/// The fork point of `session`, if it is a fork: its own events start after it.
+fn fork_point(conn: &Connection, session: &str) -> Result<i64, StoreError> {
+    let at: Option<i64> = conn
+        .query_row(
+            "SELECT forked_at_seq FROM sessions WHERE id = ?1",
+            [session],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(backend)?
+        .flatten();
+    Ok(at.unwrap_or(0))
+}
+
 /// Inserts one event and updates the views that depend on it.
 fn append_event(conn: &Connection, event: &LoggedEvent) -> Result<(), StoreError> {
     let envelope = &event.envelope;
@@ -232,7 +348,8 @@ fn append_event(conn: &Connection, event: &LoggedEvent) -> Result<(), StoreError
             |r| r.get(0),
         )
         .map_err(backend)?;
-    let expected = last.map_or(1, |l| l + 1);
+    // A fork's own events continue after the fork point.
+    let expected = last.unwrap_or(0).max(fork_point(conn, &session)?) + 1;
     let seq = to_i64(envelope.seq.0);
     if seq != expected {
         return Err(StoreError::Conflict(format!(
@@ -283,6 +400,21 @@ fn append_event(conn: &Connection, event: &LoggedEvent) -> Result<(), StoreError
             )
             .map_err(backend)?;
         }
+        Event::Compacted {
+            from_segment,
+            before,
+            after,
+            record,
+            ..
+        } => project_compaction(
+            conn,
+            &session,
+            *from_segment,
+            *before,
+            *after,
+            record,
+            envelope.ts,
+        )?,
         Event::SegmentOpened { segment, .. } => {
             conn.execute(
                 "INSERT OR REPLACE INTO segments (session_id, segment, start_seq, opener_seq) VALUES (?1, ?2, ?3, ?3)",
@@ -351,14 +483,16 @@ impl EventLog for SqliteStore {
 
     async fn last_seq(&self, session: SessionId) -> Result<Option<Seq>, StoreError> {
         self.read(move |conn| {
+            let id = session.to_string();
             let last: Option<i64> = conn
                 .query_row(
                     "SELECT MAX(seq) FROM events WHERE session_id = ?1",
-                    [session.to_string()],
+                    [&id],
                     |r| r.get(0),
                 )
                 .map_err(backend)?;
-            Ok(last.map(|l| Seq(u64::try_from(l).unwrap_or(0))))
+            let last = last.unwrap_or(0).max(fork_point(conn, &id)?);
+            Ok((last > 0).then(|| Seq(u64::try_from(last).unwrap_or(0))))
         })
         .await
     }
@@ -376,10 +510,15 @@ impl EventLog for SqliteStore {
                      WHERE session_id = ?1 AND seq BETWEEN ?2 AND ?3 ORDER BY seq",
                 )
                 .map_err(backend)?;
-            let rows = stmt
-                .query_map(
-                    params![session.to_string(), to_i64(from.0), to_i64(to.0)],
-                    |r| {
+            let mut out = Vec::new();
+            for (owner, low, high) in lineage(conn, &session.to_string())? {
+                let (a, b) = (to_i64(from.0).max(low), to_i64(to.0).min(high));
+                if a > b {
+                    continue;
+                }
+                let owner_id: SessionId = parse_id(&owner, "session id")?;
+                let rows = stmt
+                    .query_map(params![owner, a, b], |r| {
                         Ok((
                             r.get::<_, i64>(0)?,
                             r.get::<_, i64>(1)?,
@@ -387,14 +526,14 @@ impl EventLog for SqliteStore {
                             r.get::<_, u32>(3)?,
                             r.get::<_, String>(4)?,
                         ))
-                    },
-                )
-                .map_err(backend)?;
-            rows.map(|row| {
-                let (seq, ts, task, segment, payload) = row.map_err(backend)?;
-                row_to_event(session, seq, ts, task, segment, &payload)
-            })
-            .collect()
+                    })
+                    .map_err(backend)?;
+                for row in rows {
+                    let (seq, ts, task, segment, payload) = row.map_err(backend)?;
+                    out.push(row_to_event(owner_id, seq, ts, task, segment, &payload)?);
+                }
+            }
+            Ok(out)
         })
         .await
     }
@@ -415,28 +554,40 @@ impl EventLog for SqliteStore {
                             snippet(events_fts, 0, '[', ']', '…', 12)
                      FROM events_fts JOIN events e ON e.id = events_fts.rowid
                      WHERE events_fts MATCH ?1 AND events_fts.session_id = ?2
+                       AND e.seq BETWEEN ?4 AND ?5
                      ORDER BY bm25(events_fts) LIMIT ?3",
                 )
                 .map_err(backend)?;
-            let rows = stmt
-                .query_map(
-                    params![
-                        query,
-                        session.to_string(),
-                        i64::try_from(limit).unwrap_or(i64::MAX)
-                    ],
-                    |r| {
-                        Ok(SearchHit {
-                            seq: Seq(u64::try_from(r.get::<_, i64>(0)?).unwrap_or(0)),
-                            segment: r.get(1)?,
-                            // bm25 is lower-is-better; the port wants higher-is-better.
-                            score: -r.get::<_, f64>(2)?,
-                            snippet: r.get(3)?,
-                        })
-                    },
-                )
-                .map_err(backend)?;
-            rows.map(|r| r.map_err(backend)).collect()
+            let mut hits = Vec::new();
+            for (owner, low, high) in lineage(conn, &session.to_string())? {
+                let rows = stmt
+                    .query_map(
+                        params![
+                            query,
+                            owner,
+                            i64::try_from(limit).unwrap_or(i64::MAX),
+                            low,
+                            high
+                        ],
+                        |r| {
+                            Ok(SearchHit {
+                                seq: Seq(u64::try_from(r.get::<_, i64>(0)?).unwrap_or(0)),
+                                segment: r.get(1)?,
+                                // bm25 is lower-is-better; the port wants higher-is-better.
+                                score: -r.get::<_, f64>(2)?,
+                                snippet: r.get(3)?,
+                            })
+                        },
+                    )
+                    .map_err(backend)?;
+                for hit in rows {
+                    hits.push(hit.map_err(backend)?);
+                }
+            }
+            // Best first across the parts, then the limit.
+            hits.sort_by(|a: &SearchHit, b: &SearchHit| b.score.total_cmp(&a.score));
+            hits.truncate(limit);
+            Ok(hits)
         })
         .await
     }

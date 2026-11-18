@@ -6,10 +6,14 @@ use std::time::Duration;
 use async_trait::async_trait;
 use harness_policy::ApprovalPolicy;
 use harness_ports::{
-    BlobStore, Effort, EventLog, Provider, SessionStore, SnapshotStore, TaskRecord,
+    BlobStore, Effort, EventLog, Provider, RecallSelector, Recollection, SessionStore,
+    SnapshotStore, TaskRecord,
 };
 use harness_protocol::Op;
-use harness_runtime::{ApprovalMode, SessionConfig, SessionHandle, resume_session, spawn_session};
+use harness_runtime::{
+    ApprovalMode, ModelPrice, ModelSource, SessionConfig, SessionHandle, fork_session,
+    resume_session, spawn_session,
+};
 use harness_store_sqlite::SessionLock;
 use harness_tui::app::PROMPT_HISTORY;
 use harness_tui::{Attached, Backend, ChangedFile, SessionSummary, SessionView};
@@ -29,6 +33,25 @@ const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 /// Builds the provider for a model. It may block (the OS keyring), so the
 /// backend calls it on a blocking thread.
 pub type Providers = dyn Fn(&ModelRef) -> Result<Arc<dyn Provider>, String> + Send + Sync;
+
+/// Providers and prices for `/model` inside a session (ADR-046).
+struct BackendModels {
+    factory: Arc<SessionFactory>,
+    providers: Arc<Providers>,
+}
+
+impl ModelSource for BackendModels {
+    fn open(&self, model: &ModelRef) -> Result<(Arc<dyn Provider>, Option<ModelPrice>), String> {
+        Ok(((self.providers)(model)?, self.factory.price(model)))
+    }
+}
+
+/// How [`CliBackend::attach`] gets its session.
+enum Opening {
+    New,
+    Resume(SessionId),
+    Fork { parent: SessionId, at: Option<Seq> },
+}
 
 /// The session the TUI is attached to, and its lock.
 struct Current {
@@ -107,8 +130,23 @@ impl CliBackend {
         model: ModelRef,
         effort: Option<Effort>,
     ) -> Result<Attached, String> {
+        let how = session.map_or(Opening::New, Opening::Resume);
+        self.attach(how, provider, model, effort).await
+    }
+
+    async fn attach(
+        &self,
+        how: Opening,
+        provider: Arc<dyn Provider>,
+        model: ModelRef,
+        effort: Option<Effort>,
+    ) -> Result<Attached, String> {
         let f = &self.factory;
-        let (deps, approval) = f.deps(provider).map_err(|e| e.to_string())?;
+        let (mut deps, approval) = f.deps(provider).map_err(|e| e.to_string())?;
+        deps.models = Some(Arc::new(BackendModels {
+            factory: Arc::clone(&self.factory),
+            providers: Arc::clone(&self.providers),
+        }));
         let mode = f.start_mode().map_err(|e| e.to_string())?;
         let mut persona = harness_context::builtin_default();
         persona.model = model.clone();
@@ -124,13 +162,41 @@ impl CliBackend {
             },
             mode,
             full_access: f.full_access,
+            context: f.context_settings(&model),
             max_turns: TUI_MAX_TURNS,
             output_cap_tokens: f.config.context.output_cap_tokens,
             max_parallel_tools: usize::try_from(f.config.runtime.max_parallel_tools).unwrap_or(1),
             price: f.price(&model),
         };
-        let (handle, events, history, lock) = match session {
-            Some(id) => {
+        let mut compact_fork = false;
+        let (handle, events, history, lock) = match how {
+            Opening::Fork { parent, at } => {
+                let at = match at {
+                    Some(at) => at,
+                    None => f
+                        .store
+                        .last_seq(parent)
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .unwrap_or(Seq(0)),
+                };
+                let forked = fork_session(deps, config, parent, at)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                compact_fork = forked.needs_compaction;
+                let id = forked.handle.id();
+                let lock = f.store.lock_session(id).map_err(|e| e.to_string())?;
+                let history = f
+                    .store
+                    .range(id, Seq::FIRST, Seq(u64::MAX))
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .map(|e| e.envelope)
+                    .collect();
+                (forked.handle, forked.events, history, lock)
+            }
+            Opening::Resume(id) => {
                 let lock = f.store.lock_session(id).map_err(|e| e.to_string())?;
                 // History first: the receiver below sees recovery events live.
                 let history = f
@@ -146,7 +212,7 @@ impl CliBackend {
                     .map_err(|e| e.to_string())?;
                 (handle, events, history, lock)
             }
-            None => {
+            Opening::New => {
                 let (handle, events) = spawn_session(deps, config)
                     .await
                     .map_err(|e| e.to_string())?;
@@ -158,6 +224,16 @@ impl CliBackend {
             }
         };
         let id = handle.id();
+        if compact_fork {
+            // The fork starts its own segment from a summary (ADR-047).
+            handle
+                .send(Op::Compact {
+                    session: id,
+                    focus: None,
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+        }
         let previous = self.current.lock().await.replace(Current {
             handle,
             id,
@@ -202,9 +278,14 @@ impl CliBackend {
                 .iter()
                 .filter_map(|b| match b {
                     ContentBlock::Text { text }
-                        if !["<environment>", "<system-note>", "<attachment "]
-                            .iter()
-                            .any(|p| text.starts_with(p)) =>
+                        if ![
+                            "<environment>",
+                            "<system-note>",
+                            "<attachment ",
+                            "<recalled ",
+                        ]
+                        .iter()
+                        .any(|p| text.starts_with(p)) =>
                     {
                         Some(text.as_str())
                     }
@@ -324,6 +405,34 @@ impl Backend for CliBackend {
         };
         let provider = self.provider(&model).await?;
         self.open(Some(id), provider, model, effort).await
+    }
+
+    async fn fork(&self, at: Option<Seq>) -> Result<Attached, String> {
+        let parent = self.current_id().await?;
+        let store = &self.factory.store;
+        let frame = session_frame(store.as_ref(), store.as_ref(), parent)
+            .await
+            .map_err(|e| e.to_string())?;
+        let (model, effort) = match frame {
+            Some(frame) => (
+                format!("{}/{}", frame.provider, frame.model)
+                    .parse()
+                    .map_err(|e| format!("{e}"))?,
+                frame.effort,
+            ),
+            None => (self.factory.config.default_model.clone(), None),
+        };
+        let provider = self.provider(&model).await?;
+        self.attach(Opening::Fork { parent, at }, provider, model, effort)
+            .await
+    }
+
+    async fn recall(&self, selector: RecallSelector) -> Result<Recollection, String> {
+        let id = self.current_id().await?;
+        let store = Arc::clone(&self.factory.store);
+        harness_runtime::recall(Arc::clone(&store) as _, store as _, id, &selector)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     fn models(&self) -> Vec<ModelRef> {
@@ -549,5 +658,98 @@ mod tests {
                 .is_err()
         );
         second.close().await;
+    }
+}
+
+#[cfg(test)]
+mod fork_tests {
+    use super::*;
+    use harness_config::{Config, Paths};
+    use harness_protocol::{Event, InputItem, TaskState};
+    use harness_store_sqlite::SqliteStore;
+    use harness_testkit::FakeProvider;
+
+    async fn until(
+        events: &mut tokio::sync::broadcast::Receiver<harness_protocol::Envelope>,
+        want: impl Fn(&Event) -> bool,
+    ) {
+        loop {
+            let e = tokio::time::timeout(std::time::Duration::from_secs(10), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if want(&e.event) {
+                return;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fork_attaches_a_new_session_that_starts_from_a_compaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let summary = serde_json::json!({
+            "goal": "g", "state_of_work": "s", "decisions": [], "pinned": [],
+            "superseded_pins": [], "files_touched": [], "open_questions": [], "next_steps": [],
+            "anchors": []
+        })
+        .to_string();
+        let fake = FakeProvider::new()
+            .with_text_turn("hello")
+            .with_text_turn(&summary);
+        let factory = Arc::new(SessionFactory {
+            config: Config::default(),
+            paths: Paths {
+                user_config_dir: dir.path().join(".c"),
+                user_data_dir: dir.path().join(".d"),
+            },
+            cwd: dir.path().to_path_buf(),
+            trusted: false,
+            approval: None,
+            full_access: false,
+            mode: None,
+            store: Arc::new(SqliteStore::open(dir.path()).unwrap()),
+        });
+        let provider = fake.clone();
+        let backend = CliBackend::with_providers(
+            factory,
+            Arc::new(move |_: &ModelRef| Ok(Arc::new(provider.clone()) as Arc<dyn Provider>)),
+        );
+        let model: ModelRef = "openai/gpt-6-luna".parse().unwrap();
+        let mut parent = backend
+            .open(None, Arc::new(fake.clone()), model, None)
+            .await
+            .unwrap();
+        let parent_id = parent.view.id;
+        backend
+            .send(Op::Submit {
+                session: parent_id,
+                input: vec![InputItem::Text {
+                    text: "remember ABC".into(),
+                }],
+            })
+            .await
+            .unwrap();
+        until(&mut parent.events, |e| {
+            matches!(
+                e,
+                Event::TaskState {
+                    to: TaskState::Completed,
+                    ..
+                }
+            )
+        })
+        .await;
+
+        let mut fork = backend.fork(None).await.unwrap();
+        assert_ne!(fork.view.id, parent_id);
+        assert!(
+            fork.history
+                .iter()
+                .any(|e| matches!(&e.event, Event::UserInput { .. })),
+            "the fork shows the parent's history"
+        );
+        until(&mut fork.events, |e| matches!(e, Event::Compacted { .. })).await;
+        let listed = backend.sessions().await.unwrap();
+        assert!(listed.iter().any(|s| s.id == parent_id), "the parent stays");
     }
 }

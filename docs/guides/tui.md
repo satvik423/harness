@@ -65,9 +65,12 @@ the bell and sends a desktop notification.
 | Command | Does |
 |---|---|
 | `/help` | commands and keys |
-| `/model [provider/model]` | list models to pick from, or name one; starts a new session with it |
-| `/effort [low…max]` | show or pick the effort for a new session |
+| `/model [provider/model]` | list models to pick from, or name one; this session continues with it (after a compaction) |
+| `/effort [low…max]` | show the effort, or continue this session at another one |
 | `/mode [read-only\|auto\|plan\|full]` | list the permission modes to pick from, or switch to one (also Shift+Tab) |
+| `/compact [focus]` | compact the conversation into a new segment now (see [long sessions](context.md)) |
+| `/recall [aN \| words]` | list anchors, or attach an anchor or search result to your next message |
+| `/fork [event]` | a new session that shares this one's history up to an event (default: now) |
 | `/pause`, `/resume` | pause the task / continue the paused task |
 | `/tasks` | this session's tasks |
 | `/diff` | files this session changed, as diffs |
@@ -78,9 +81,9 @@ the bell and sends a desktop notification.
 | `/context` | how full the context is |
 | `/quit` | leave |
 
-A session keeps the model it started with; `/model` and `/effort` start a new one
-(compaction in Phase 5 will allow switching inside a session). The new session keeps
-your current mode.
+`/model` and `/effort` ask first, then compact the conversation and continue in a new
+segment with the new settings; nothing is lost (ADR-046). `/clear` starts a new
+session and keeps your current mode.
 
 ## Costs
 

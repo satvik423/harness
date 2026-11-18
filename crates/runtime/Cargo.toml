@@ -16,7 +16,7 @@ harness-protocol.workspace = true
 harness-types.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync", "rt", "macros", "time"] }
+tokio = { workspace = true, features = ["sync", "rt", "macros", "time", "fs"] }
 tokio-util.workspace = true
 tracing.workspace = true
 

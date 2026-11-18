@@ -18,17 +18,18 @@ Port traits (SDD layer L4). The runtime depends only on these; adapters implemen
 | `Clock` | Injectable time; `SystemClock` provided | `testkit::FixedClock` for tests |
 | `Policy` | `evaluate` a call → `Verdict` (allow, ask, deny); `remember` approvals (ADR-029) | `policy`, `testkit::AskForChanges` |
 | `UserChannel` | A tool asks the user a question (`ask_user`); `NoUser` for headless (ADR-028); `NO_ANSWER` is what a closed input answers | `runtime` |
+| `History` | What `recall` reads: earlier events by anchor, range or search, rendered (`NoHistory` outside a session) | `runtime` |
 | `ModeControl` | Read and switch the session's permission mode (`propose_plan` uses it); `FixedMode` outside a session (ADR-042) | `runtime` |
 
 Ports for hooks and memory are added in Phases 7 and 14.
 
 ## Supporting types
 
-- Provider: `ModelRequest`, `SystemPart`/`SystemSlot` (slot order 1–6 from Tech
+- Provider: `Effort` (re-exported from `harness-types`), `ModelRequest`, `SystemPart`/`SystemSlot` (slot order 1–6 from Tech
   spec 2.6), `CachePlan`, `Effort`, `Capabilities`, `CacheStyle`, `ProviderEvent`,
   `ProviderError` (`is_retryable`, `retry_after`).
 - Tools: `ToolName` (validated `[A-Za-z0-9_-]{1,64}`), `ToolSpec`, `ToolCtx`
-  (including the `call_id` of the call being run, `user` for `ask_user`, `snapshots` for undo and `mode` for the permission mode), `RiskCtx`, `ToolOutput`,
+  (including the `call_id` of the call being run, `user` for `ask_user`, `snapshots` for undo, `mode` for the permission mode and `history` for `recall`), `RiskCtx`, `ToolOutput`,
   `ToolError`, and `ToolRegistry` (tools by name; specs sorted by name).
 - Streaming: `ProviderEvent::BlockComplete` carries each finished content block
   exactly as the model produced it. The runtime builds the transcript only from

@@ -163,6 +163,17 @@ enum SessionCommand {
         /// Session id or unique prefix.
         id: String,
     },
+    /// Fork a session after one of its events: a new session that shares the
+    /// history up to there and continues from a summary of it.
+    Fork {
+        /// Session id or unique prefix.
+        id: String,
+        /// The event to fork after (default: the last one; see `session show`).
+        #[arg(long)]
+        at: Option<u64>,
+        #[command(flatten)]
+        flags: RunFlags,
+    },
     /// Delete a session and everything stored for it. Cannot be undone.
     Delete {
         /// Session id or unique prefix.
@@ -414,6 +425,10 @@ impl App {
                 let id = self.find_session(&id)?;
                 self.drive(&RunFlags::offline(), Some(id), Action::Undo, false)
             }
+            SessionCommand::Fork { id, at, flags } => {
+                let id = self.find_session(&id)?;
+                self.drive(&flags, Some(id), Action::Fork(at.map(Seq)), true)
+            }
             SessionCommand::Delete { id, yes } => self.delete_session(&id, yes),
         }
     }
@@ -627,13 +642,14 @@ impl App {
         let mut out = std::io::stdout();
         match cmd {
             DebugCommand::LastRequest { .. } => {
-                let (seq, request) = history
+                let last = history
                     .last()
                     .context("this session has not sent a request yet")?;
+                let request = &last.request;
                 writeln!(
                     out,
-                    "// session {id}, request at event #{}, provider {provider}",
-                    seq.0
+                    "// session {id}, segment {}, request at event #{}, provider {provider}",
+                    last.segment, last.seq.0
                 )?;
                 writeln!(
                     out,
@@ -642,22 +658,20 @@ impl App {
                 )?;
             }
             DebugCommand::DiffRequests { .. } => {
-                let [.., (s1, older), (s2, newer)] = history.as_slice() else {
-                    bail!("this session has sent fewer than two requests");
-                };
+                let (older, newer) = debug::latest_pair(&history).map_err(anyhow::Error::msg)?;
                 let older_body =
-                    debug::body(&provider, older, config).map_err(anyhow::Error::msg)?;
+                    debug::body(&provider, &older.request, config).map_err(anyhow::Error::msg)?;
                 let newer_body =
-                    debug::body(&provider, newer, config).map_err(anyhow::Error::msg)?;
+                    debug::body(&provider, &newer.request, config).map_err(anyhow::Error::msg)?;
                 writeln!(
                     out,
-                    "// session {id}: request at #{} → request at #{}",
-                    s1.0, s2.0
+                    "// session {id}, segment {}: request at #{} → request at #{}",
+                    newer.segment, older.seq.0, newer.seq.0
                 )?;
                 write!(
                     out,
                     "{}",
-                    debug::diff_report(older, newer, &older_body, &newer_body)
+                    debug::diff_report(&older.request, &newer.request, &older_body, &newer_body)
                 )?;
             }
         }
@@ -720,6 +734,7 @@ impl App {
             mode: factory.start_mode()?,
             mode_given: flags.mode.is_some(),
             full_access: flags.dangerously_full_access,
+            context: factory.context_settings(&persona.model),
         };
         let target = session.map_or(Target::New, Target::Existing);
         tracing::info!(model = %persona.model, ?target, "driving a session");

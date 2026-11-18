@@ -16,7 +16,11 @@ context only (ADR-001, ADR-016).
 | `RuntimeError` | `Closed`, `NotFound`, `Store`, `Corrupt` |
 | `OUTCOME_UNKNOWN` | The result given to a call that was running when harness stopped |
 | `ModelPrice` | Price per million tokens; `SessionConfig.price` fills `Usage.cost_micros` (ADR-040) |
-| `request_history(log, blobs, session)` | The `ModelRequest` at each `TurnStarted`, rebuilt from the log (for `harness debug`) |
+| `request_history(log, blobs, session)` | Each request as a `RecordedRequest` (event, segment, request), rebuilt from the log (for `harness debug`) |
+| `ContextSettings` | When and how to compact: `compact_at_ratio`, `compact_at_tokens`, `compaction_model`, `style` |
+| `fork_session(deps, config, parent, at)` | A fork after event `at`, returned as `Forked { handle, events, at, needs_compaction }` (ADR-047) |
+| `ModelSource` | Providers and prices for other models, for `/model` inside a session (ADR-046) |
+| `recall(log, blobs, session, selector)` | Renders history for a front-end's own `/recall` |
 
 ## The loop (one task)
 
@@ -43,7 +47,7 @@ context only (ADR-001, ADR-016).
 
 `Submit`, `Approve`, `Answer` (for `ask_user`, ADR-028), `Interrupt` (→ Paused at once),
 `Pause` (→ Paused at the next safe point), `Resume`, `Cancel` (running or paused),
-`Undo` (ADR-034), `SetMode` (records `ModeChanged` and queues a note for the model; refuses `full` without full access; ADR-042), `Shutdown`. `Fork` answers that it arrives in Phase 5 (ADR-035).
+`Undo` (ADR-034), `Compact { focus }` (a compaction task), `SwitchModel` (compacts, then the next segment uses the new model; ADR-046), `SetMode` (records `ModeChanged` and queues a note for the model; refuses `full` without full access; ADR-042), `Shutdown`. `Fork` answers that it arrives in Phase 5 (ADR-035).
 
 ## Permission modes (ADR-042)
 
@@ -95,3 +99,27 @@ requests carry the call's one-line `description` as `summary` (ADR-043).
   `harness_testkit::AskForChanges`.
 - `ask_user` reaches the user through a per-call `SessionUser` (`UserChannel`):
   the task moves to `AwaitingApproval` until `Op::Answer` arrives.
+
+## Compaction (Phase 5)
+
+`compact.rs` runs one compaction:
+1. `CompactionStarted`;
+2. the segment's events from the log, rendered;
+3. the compaction model (the session's, at effort medium, with structured output);
+4. validation;
+5. `Compacted` with the record;
+6. a new frame and `SegmentOpened`.
+
+On any failure the segment stays and a warning says why.
+
+Compaction is triggered three ways:
+- **At a turn boundary**, before new input is added, when the estimate reaches the
+  threshold.
+- **In an emergency**, after a tool round's results are logged, followed by "Continue
+  the task from the summary above."
+- **By `Op::Compact`**, run as its own task.
+
+Before each model call, the estimate is the last measured input plus whatever was
+appended since. Near the threshold, the provider counts exactly. `memory.rs` keeps the
+session's pins and anchors (rebuilt on replay); `history.rs` serves `recall` with full
+tool outputs.

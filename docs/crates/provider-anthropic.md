@@ -50,3 +50,7 @@ and between stream events.
 - `tests/http.rs`: wiremock server (headers, retries, retry-after, auth, cut streams, cancellation, count_tokens, capabilities).
 - Live recordings are not made yet (no Anthropic API key); `fixtures/README.md` has the command.
 - `examples/record_anthropic_fixtures.rs`: re-records those fixtures (needs an API key).
+
+## Structured output (Phase 5, ADR-044)
+
+`ModelRequest::output_schema` becomes `output_config.format = {type: "json_schema", schema}` next to `output_config.effort` (no beta header); the reply's text is the JSON. Compaction uses it. `tests/live.rs` has an opt-in smoke test (`--ignored`, needs `ANTHROPIC_API_KEY`) that replays thinking blocks with `prefix_mismatch_behavior: "error"`.

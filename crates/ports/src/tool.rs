@@ -140,6 +140,8 @@ pub struct ToolCtx {
     pub snapshots: Arc<dyn FileSnapshots>,
     /// The session's permission mode ([`crate::FixedMode`] outside a session).
     pub mode: Arc<dyn crate::ModeControl>,
+    /// The session's history, for `recall` ([`crate::NoHistory`] outside a session).
+    pub history: Arc<dyn crate::History>,
 }
 
 impl fmt::Debug for ToolCtx {

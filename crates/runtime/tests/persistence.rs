@@ -117,6 +117,7 @@ impl Env {
             log,
             sessions: Arc::clone(&self.store) as _,
             snapshots: Arc::clone(&self.store) as _,
+            models: None,
         }
     }
 
@@ -131,6 +132,7 @@ impl Env {
             approval: ApprovalMode::Ask,
             mode,
             full_access,
+            context: harness_runtime::ContextSettings::default(),
             max_turns: 10,
             output_cap_tokens: 2_000,
             max_parallel_tools: 4,
@@ -1114,7 +1116,7 @@ async fn the_request_history_rebuilds_exactly_what_the_provider_received() {
         harness_runtime::request_history(env.store.as_ref(), env.store.as_ref(), handle.id())
             .await
             .unwrap();
-    let rebuilt: Vec<_> = history.into_iter().map(|(_, r)| r).collect();
+    let rebuilt: Vec<_> = history.into_iter().map(|r| r.request).collect();
     assert_eq!(rebuilt, fake.requests());
 }
 
@@ -1176,7 +1178,7 @@ async fn a_resumed_session_keeps_its_mode_and_still_sends_the_note() {
         .await
         .unwrap();
     assert_eq!(
-        history.last().unwrap().1,
+        history.last().unwrap().request,
         second.requests().last().unwrap().clone()
     );
 }
@@ -1213,4 +1215,263 @@ async fn full_mode_does_not_survive_a_restart_without_full_access() {
         matches!(&warned, Event::Warning { kind, message } if kind == "mode" && message.contains("--dangerously-full-access")),
         "{warned:?}"
     );
+}
+
+// ---------- compaction across restarts (Phase 5) ----------
+
+fn summary(quote: &str, seq: u64) -> String {
+    json!({
+        "goal": "g", "state_of_work": "s", "decisions": [],
+        "pinned": [{"quote": quote, "seq": seq, "kind": "id"}],
+        "superseded_pins": [], "files_touched": [], "open_questions": [], "next_steps": [],
+        "anchors": []
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn a_compacted_session_resumes_in_its_new_segment_and_keeps_numbering_pins_and_anchors() {
+    let env = Env::new();
+    let first = FakeProvider::new()
+        .with_text_turn("ok")
+        .with_text_turn(&summary("token ABC-123", 4));
+    let (handle, mut rx) = env.spawn(&first).await;
+    let id = handle.id();
+    drive(
+        &handle,
+        &mut rx,
+        Some(submit(id, "the token ABC-123 matters")),
+        ENDS,
+        |_| None,
+    )
+    .await;
+    drive(
+        &handle,
+        &mut rx,
+        Some(Op::Compact {
+            session: id,
+            focus: None,
+        }),
+        ENDS,
+        |_| None,
+    )
+    .await;
+    handle.send(Op::Shutdown).await.unwrap();
+    handle.closed().await;
+
+    let second = FakeProvider::new().with_text_turn("resumed");
+    let (handle, mut rx, _) = env.resume(&second, id).await;
+    let events = drive(
+        &handle,
+        &mut rx,
+        Some(submit(id, "the port is 8443")),
+        ENDS,
+        |_| None,
+    )
+    .await;
+    let input_seq = events
+        .iter()
+        .find(|e| matches!(e.event, Event::UserInput { .. }))
+        .unwrap()
+        .seq
+        .0;
+    let opener = second.requests()[0].messages[0].text();
+    assert!(opener.contains("[p1 · id · #4] token ABC-123"), "{opener}");
+
+    // A second compaction after another restart: pin and anchor ids continue.
+    let record = {
+        let fake = FakeProvider::new().with_text_turn(&summary("the port is 8443", input_seq));
+        handle.send(Op::Shutdown).await.unwrap();
+        handle.closed().await;
+        let (handle, mut rx, _) = env.resume(&fake, id).await;
+        let events = drive(
+            &handle,
+            &mut rx,
+            Some(Op::Compact {
+                session: id,
+                focus: None,
+            }),
+            ENDS,
+            |_| None,
+        )
+        .await;
+        events
+            .into_iter()
+            .find_map(|e| match e.event {
+                Event::Compacted { record, .. } => Some(record),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let ids: Vec<u32> = record.pins.iter().map(|p| p.id).collect();
+    assert_eq!(ids, [1, 2]);
+    assert!(
+        record.anchors[0].id != "a1",
+        "anchor ids continue: {:?}",
+        record.anchors
+    );
+    let all: Vec<(Seq, Event)> = env
+        .store
+        .range(id, Seq::FIRST, Seq(u64::MAX))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|l| (l.envelope.seq, l.envelope.event))
+        .collect();
+    assert!(harness_testkit::invariants::check_events(&all).is_empty());
+    let history = harness_runtime::request_history(env.store.as_ref(), env.store.as_ref(), id)
+        .await
+        .unwrap();
+    let segments: Vec<u32> = history.iter().map(|r| r.segment).collect();
+    assert_eq!(segments.first(), Some(&0));
+    assert_eq!(segments.last(), Some(&1), "requests carry their segment");
+}
+
+// ---------- fork (FR-SES-06, ADR-047) ----------
+
+#[tokio::test]
+async fn a_fork_compacts_the_parent_up_to_the_fork_point_and_continues_on_its_own() {
+    let env = Env::new();
+    let parent_fake = FakeProvider::new()
+        .with_text_turn("noted ABC")
+        .with_text_turn("noted XYZ");
+    let (handle, mut rx) = env.spawn(&parent_fake).await;
+    let parent = handle.id();
+    let first = drive(
+        &handle,
+        &mut rx,
+        Some(submit(parent, "the code is ABC")),
+        ENDS,
+        |_| None,
+    )
+    .await;
+    let at = first
+        .iter()
+        .find(|e| matches!(e.event, Event::AssistantMessage { .. }))
+        .unwrap()
+        .seq;
+    drive(
+        &handle,
+        &mut rx,
+        Some(submit(parent, "no, the code is XYZ")),
+        ENDS,
+        |_| None,
+    )
+    .await;
+    let parent_events = env.store.events(parent).len();
+
+    let fork_fake = FakeProvider::new()
+        .with_text_turn(&summary("the code is ABC", 4))
+        .with_text_turn("it is ABC");
+    let forked = harness_runtime::fork_session(
+        env.deps(Arc::new(fork_fake.clone()), Arc::clone(&env.store) as _),
+        env.config(),
+        parent,
+        at,
+    )
+    .await
+    .unwrap();
+    assert_eq!(forked.at, at);
+    assert!(forked.needs_compaction);
+    let child = forked.handle.id();
+    let mut rx = forked.events;
+    drive(
+        &forked.handle,
+        &mut rx,
+        Some(Op::Compact {
+            session: child,
+            focus: None,
+        }),
+        ENDS,
+        |_| None,
+    )
+    .await;
+    drive(
+        &forked.handle,
+        &mut rx,
+        Some(submit(child, "what is the code?")),
+        ENDS,
+        |_| None,
+    )
+    .await;
+
+    let asked = fork_fake.requests()[0].messages[0].text();
+    assert!(asked.contains("the code is ABC"), "{asked}");
+    assert!(
+        !asked.contains("XYZ"),
+        "nothing after the fork point: {asked}"
+    );
+    let opener = fork_fake.requests()[1].messages[0].text();
+    assert!(
+        opener.contains("[p1 · id · #4] the code is ABC"),
+        "{opener}"
+    );
+    assert_eq!(
+        env.store.events(parent).len(),
+        parent_events,
+        "the parent is untouched"
+    );
+    assert_eq!(
+        env.store.events(child).first().unwrap().envelope.seq,
+        at.next(),
+        "the fork's own events continue after the fork point"
+    );
+    let all: Vec<(Seq, Event)> = env
+        .store
+        .range(child, Seq::FIRST, Seq(u64::MAX))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|l| (l.envelope.seq, l.envelope.event))
+        .collect();
+    assert!(harness_testkit::invariants::check_events(&all).is_empty());
+    assert!(harness_testkit::invariants::check_segments(&fork_fake.requests()).is_empty());
+}
+
+#[tokio::test]
+async fn a_fork_point_inside_a_tool_round_moves_back_before_it() {
+    let env = Env::new();
+    let fake = FakeProvider::new()
+        .with_tool_call_turn("c1", "slow_read", &json!({"tag": "x"}))
+        .with_text_turn("done");
+    let (handle, mut rx) = env.spawn(&fake).await;
+    let parent = handle.id();
+    let events = drive(
+        &handle,
+        &mut rx,
+        Some(submit(parent, "read it")),
+        ENDS,
+        |_| None,
+    )
+    .await;
+    let call = events
+        .iter()
+        .find(|e| matches!(e.event, Event::AssistantMessage { .. }))
+        .unwrap()
+        .seq;
+    let started = events
+        .iter()
+        .find(|e| matches!(e.event, Event::ToolStarted { .. }))
+        .unwrap()
+        .seq;
+    let forked = harness_runtime::fork_session(
+        env.deps(Arc::new(FakeProvider::new()), Arc::clone(&env.store) as _),
+        env.config(),
+        parent,
+        started,
+    )
+    .await
+    .unwrap();
+    assert_eq!(forked.at, Seq(call.0 - 1));
+    let bad = harness_runtime::fork_session(
+        env.deps(Arc::new(FakeProvider::new()), Arc::clone(&env.store) as _),
+        env.config(),
+        parent,
+        Seq(10_000),
+    )
+    .await;
+    assert!(matches!(
+        bad,
+        Err(harness_runtime::RuntimeError::Invalid(_))
+    ));
 }

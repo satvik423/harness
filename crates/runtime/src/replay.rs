@@ -16,6 +16,7 @@ use harness_types::{ContentBlock, Mode, Seq, SessionId, TaskId};
 
 use crate::RuntimeError;
 use crate::journal::Journal;
+use crate::memory::SessionMemory;
 use crate::turn::Round;
 
 /// The result given to a call that was running when the harness stopped.
@@ -37,6 +38,8 @@ pub(crate) struct Rebuilt {
     pub(crate) task_input: bool,
     /// The permission mode in force at the end of the log, if it says.
     pub(crate) mode: Option<Mode>,
+    /// Pins and anchors from the session's compactions.
+    pub(crate) memory: SessionMemory,
 }
 
 fn corrupt(seq: Seq, e: impl std::fmt::Display) -> RuntimeError {
@@ -56,9 +59,21 @@ pub(crate) async fn rebuild(
     replay(log, blobs, session, &mut |_, _| {}).await
 }
 
-/// The model request sent at each turn of a session's current segment,
+/// One model request rebuilt from the log.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordedRequest {
+    /// The `TurnStarted` event it was sent at.
+    pub seq: Seq,
+    /// The segment it belongs to: the append-only check compares requests of
+    /// one segment only (a compaction starts a new transcript).
+    pub segment: u32,
+    /// The request exactly as the model received it.
+    pub request: ModelRequest,
+}
+
+/// The model request sent at each turn of the session, every segment,
 /// rebuilt from the log (for `harness debug last-request` and
-/// `diff-requests`). Each is paired with its `TurnStarted` sequence number.
+/// `diff-requests`). Compaction requests are not included.
 ///
 /// # Errors
 /// As for resuming: [`RuntimeError::Store`] or [`RuntimeError::Corrupt`].
@@ -66,10 +81,14 @@ pub async fn request_history(
     log: &dyn EventLog,
     blobs: &dyn BlobStore,
     session: SessionId,
-) -> Result<Vec<(Seq, ModelRequest)>, RuntimeError> {
+) -> Result<Vec<RecordedRequest>, RuntimeError> {
     let mut requests = Vec::new();
     replay(log, blobs, session, &mut |seq, segment| {
-        requests.push((seq, segment.request()));
+        requests.push(RecordedRequest {
+            seq,
+            segment: segment.segment(),
+            request: segment.request(),
+        });
     })
     .await?;
     Ok(requests)
@@ -92,6 +111,7 @@ async fn replay(
         started: BTreeSet::new(),
         task_input: false,
         mode: None,
+        memory: SessionMemory::default(),
     };
     for logged in events {
         let seq = logged.envelope.seq;
@@ -100,7 +120,17 @@ async fn replay(
                 let bytes = blobs.get(&frame).await?;
                 let frame: SegmentFrame =
                     serde_json::from_slice(&bytes).map_err(|e| corrupt(seq, e))?;
-                out.segment = Some(SegmentContext::from_frame(frame));
+                // Notes not yet sent move to the new segment, as they do live.
+                let carried: Vec<String> = out
+                    .segment
+                    .as_ref()
+                    .map(|s| s.pending_notes().to_vec())
+                    .unwrap_or_default();
+                let mut next = SegmentContext::from_frame(frame);
+                for note in carried {
+                    next.push_note(note);
+                }
+                out.segment = Some(next);
                 out.round = None;
                 out.started.clear();
             }
@@ -114,6 +144,13 @@ async fn replay(
             }
             Event::SystemNote { text, .. } => segment(&mut out, seq)?.push_note(text),
             Event::SessionOpened { mode, .. } => out.mode = mode.or(out.mode),
+            Event::Compacted { record, .. } => out.memory.apply(&record),
+            // The same measurement the live loop takes before appending a reply.
+            Event::Usage { usage, .. } => {
+                if let Some(segment) = &mut out.segment {
+                    segment.record_input(usage.total_input());
+                }
+            }
             // Live, the note waits for the next user message only when a segment
             // is open; a new segment's environment states the mode instead.
             Event::ModeChanged { to, note, .. } => {

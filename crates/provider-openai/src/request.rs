@@ -14,18 +14,16 @@ pub const PROVIDER_ID: &str = "openai";
 /// The harness owns the conversation: `store` follows the settings (default
 /// `false`) and encrypted reasoning is requested so it can be replayed.
 ///
+/// An `output_schema` becomes a strict JSON-schema `text.format`; the reply's
+/// text is then JSON matching it (ADR-044).
+///
 /// # Errors
 /// [`ProviderError::Unsupported`] for content this phase cannot send yet
-/// (images, documents, structured output).
+/// (images, documents).
 pub fn build_responses_body(
     request: &ModelRequest,
     settings: &OpenAiSettings,
 ) -> Result<Value, ProviderError> {
-    if request.output_schema.is_some() {
-        return Err(ProviderError::Unsupported(
-            "structured output arrives in Phase 15".into(),
-        ));
-    }
     let mut body = Map::new();
     body.insert("model".into(), json!(request.model));
     body.insert("stream".into(), json!(true));
@@ -53,6 +51,12 @@ pub fn build_responses_body(
     }
     if request.show_thinking {
         reasoning.insert("summary".into(), json!("auto"));
+    }
+    if let Some(schema) = &request.output_schema {
+        body.insert(
+            "text".into(),
+            json!({"format": {"type": "json_schema", "name": "harness_output", "schema": schema, "strict": true}}),
+        );
     }
     if !reasoning.is_empty() {
         body.insert("reasoning".into(), Value::Object(reasoning));
@@ -367,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn images_and_structured_output_are_unsupported_for_now() {
+    fn images_are_unsupported_for_now() {
         let mut r = request();
         r.messages[0].content.push(ContentBlock::Image {
             blob: BlobRef::from_bytes([0; 32]),
@@ -377,11 +381,23 @@ mod tests {
             build_responses_body(&r, &OpenAiSettings::default()),
             Err(ProviderError::Unsupported(_))
         ));
+    }
+
+    #[test]
+    fn an_output_schema_becomes_a_strict_json_schema_text_format() {
+        let schema = json!({"type": "object", "properties": {}, "required": [], "additionalProperties": false});
         let mut r = request();
-        r.output_schema = Some(json!({}));
-        assert!(matches!(
-            build_responses_body(&r, &OpenAiSettings::default()),
-            Err(ProviderError::Unsupported(_))
-        ));
+        r.output_schema = Some(schema.clone());
+        let b = build_responses_body(&r, &OpenAiSettings::default()).unwrap();
+        assert_eq!(
+            b["text"],
+            json!({"format": {"type": "json_schema", "name": "harness_output", "schema": schema, "strict": true}})
+        );
+        assert!(
+            build_responses_body(&request(), &OpenAiSettings::default())
+                .unwrap()
+                .get("text")
+                .is_none()
+        );
     }
 }

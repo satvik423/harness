@@ -1,6 +1,6 @@
 # ADR-038: `/model` and `/effort` apply to a new session (until Phase 5)
 
-- **Status:** Accepted
+- **Status:** Accepted; superseded in Phase 5 by ADR-046 (switching inside a session)
 - **Date:** 2026-11-18
 - **Source:** Decision by the user at the start of Phase 4 (P4-T4)
 

@@ -11,9 +11,12 @@ Test support. Dev-dependency only; production crates must not depend on it
 | `TempProject` | Temp project dir with `with_file` (rejects paths escaping the project) and `harness_dir` |
 | `FixedClock` | `Clock` you can `set_ms` / `advance_ms` |
 | `RecordingSink` | `EventSink` that keeps every event |
-| `MemoryStore` | In-memory `EventLog`, `SessionStore`, `SnapshotStore` and `BlobStore` with the SQLite store's rules (gapless numbers, task view, undo restores real files) |
+| `MemoryStore` | In-memory `EventLog`, `SessionStore`, `SnapshotStore` and `BlobStore` with the SQLite store's rules (gapless numbers, task view, undo restores real files, forks read through their parents) |
+| `AskForChanges::modes` | The mode of every judged call (ADR-042 tests) |
 | `AskForChanges` | Minimal `Policy`: reads allowed, everything else asks, `"deny": true` inputs denied; remembers grants (`grants()`) |
-| `invariants::check_all` | Append-only (I1), tool pairing (I2) and no-prefill checks over recorded requests |
+| `invariants::check_all` | Append-only (I1), tool pairing (I2) and no-prefill checks over recorded requests of one segment |
+| `invariants::check_segments` | `check_all` per segment for a session that compacted (compaction requests checked on their own) |
+| `invariants::check_events` | I4 (no compaction while a call waits), I5 (pins quote their event exactly), I6 (anchors cover the segment) over logged events, read independently of the runtime |
 | `arch::DependencyGraph` | Workspace dependency graph from `cargo metadata` (normal deps only) |
 | `arch::harness_rules`, `arch::adapter`, `arch::check` | The layering rules and the checker |
 

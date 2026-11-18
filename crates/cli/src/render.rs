@@ -175,6 +175,21 @@ impl Renderer {
             Event::UndoApplied { paths, .. } => {
                 writeln!(err, "↺ restored {}", paths.join(", "))?;
             }
+            Event::CompactionStarted { segment } => {
+                self.end_line(out)?;
+                writeln!(err, "◇ compacting segment {segment}…")?;
+            }
+            Event::Compacted {
+                from_segment,
+                to_segment,
+                anchors,
+                before,
+                after,
+                ..
+            } => writeln!(
+                err,
+                "◇ compacted segment {from_segment} → {to_segment}: {anchors} anchors, about {before} → {after} tokens"
+            )?,
             Event::Error { message, hint, .. } => {
                 self.end_line(out)?;
                 writeln!(err, "error: {message}")?;
@@ -328,6 +343,42 @@ mod tests {
         assert_eq!(out, "Two files.\n");
         assert!(err.contains("▸ shell: ls -la"), "{err}");
         assert!(err.contains("✓ [exit code 0]"), "{err}");
+    }
+
+    #[test]
+    fn compactions_are_reported_on_stderr() {
+        let (out, err) = render(
+            &mut Renderer::new(false),
+            vec![
+                Event::CompactionStarted { segment: 0 },
+                Event::Compacted {
+                    from_segment: 0,
+                    to_segment: 1,
+                    anchors: 3,
+                    before: 180_000,
+                    after: 6_000,
+                    record: Box::new(harness_protocol::CompactionRecord {
+                        segment: 0,
+                        from: harness_types::Seq(1),
+                        to: harness_types::Seq(9),
+                        goal: String::new(),
+                        state_of_work: String::new(),
+                        decisions: vec![],
+                        pins: vec![],
+                        files_touched: vec![],
+                        open_questions: vec![],
+                        next_steps: vec![],
+                        anchors: vec![],
+                    }),
+                },
+            ],
+        );
+        assert!(out.is_empty());
+        assert!(err.contains("◇ compacting segment 0…"), "{err}");
+        assert!(
+            err.contains("◇ compacted segment 0 → 1: 3 anchors, about 180000 → 6000 tokens"),
+            "{err}"
+        );
     }
 
     #[test]

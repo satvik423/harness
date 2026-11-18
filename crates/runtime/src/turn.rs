@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use futures::StreamExt;
-use harness_context::{SegmentContext, cap_output};
+use harness_context::{Budget, Pressure, SegmentContext, cap_output};
 use harness_ports::{
     GrantScope, PolicyCall, ProviderError, ProviderEvent, ProviderStream, RiskCtx, Tool, ToolCtx,
     ToolError, ToolOutput, Verdict,
@@ -30,6 +30,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::approval::{Approvals, Questions};
+use crate::compact::{CompactError, FrameChange, compact};
 use crate::journal::Journal;
 use crate::mode::SessionMode;
 use crate::snapshots::TurnSnapshots;
@@ -100,6 +101,13 @@ pub(crate) enum Start {
     Continue(Option<Round>),
     /// Cancel a paused task, closing its unanswered round.
     Cancel(Option<Round>),
+    /// Compact the segment (`/compact [focus]`, or a model switch, ADR-046).
+    Compact {
+        /// What to keep in focus.
+        focus: Option<String>,
+        /// Model or effort for the next segment.
+        change: crate::compact::FrameChange,
+    },
 }
 
 /// What a task run leaves behind.
@@ -129,6 +137,10 @@ pub(crate) struct TaskCtx {
     /// The session's permission mode; read on every call, so a switch applies
     /// from the next call even while the task runs.
     pub(crate) mode: Arc<SessionMode>,
+    /// Context-engine settings.
+    pub(crate) context: crate::ContextSettings,
+    /// The session's pins and anchors, shared with `recall`.
+    pub(crate) memory: Arc<Mutex<crate::memory::SessionMemory>>,
     pub(crate) cancel: CancellationToken,
     pub(crate) stop: StopSlot,
     pub(crate) pause: Arc<PauseFlag>,
@@ -140,7 +152,7 @@ pub(crate) struct TaskCtx {
 
 /// The event log refused a write: the task must stop before any side effect.
 #[derive(Debug)]
-struct LogFailed;
+pub(crate) struct LogFailed;
 
 /// How the loop ended.
 enum End {
@@ -182,7 +194,7 @@ enum Approval {
 
 impl TaskCtx {
     /// Records an event for this task.
-    async fn record(&self, event: Event) -> Result<Seq, LogFailed> {
+    pub(crate) async fn record(&self, event: Event) -> Result<Seq, LogFailed> {
         self.journal
             .record(Some(self.task), event)
             .await
@@ -191,7 +203,7 @@ impl TaskCtx {
 
     /// Records an event whose failure needs no immediate handling (the next
     /// safe point stops the task anyway).
-    async fn note(&self, event: Event) {
+    pub(crate) async fn note(&self, event: Event) {
         let _ = self.record(event).await;
     }
 
@@ -220,6 +232,7 @@ pub(crate) async fn run_task(
     mut segment: SegmentContext,
     start: Start,
 ) -> TaskResult {
+    let budget = budget_for(&ctx, &segment).await;
     let round = match start {
         Start::New(input) => {
             let persona = segment.frame().persona.clone();
@@ -228,6 +241,17 @@ pub(crate) async fn run_task(
                 format!("started with persona {persona}"),
             )
             .await;
+            // Preferred trigger: at a turn boundary, before the input is added.
+            if !segment.messages().is_empty() && over_budget(&ctx, &segment, &input, budget).await {
+                match compact(&ctx, &mut segment, None, FrameChange::default()).await {
+                    Ok(()) => {}
+                    Err(CompactError::LogFailed) => {
+                        return finish(&ctx, segment, End::LogFailed).await;
+                    }
+                    Err(CompactError::Stopped) => return finish(&ctx, segment, End::Stopped).await,
+                    Err(CompactError::Failed(message)) => compaction_failed(&ctx, message).await,
+                }
+            }
             for note in ctx.mode.take_notes() {
                 segment.push_note(note);
             }
@@ -263,10 +287,74 @@ pub(crate) async fn run_task(
             let end = cancel_round(&ctx, &mut segment, round).await;
             return finish(&ctx, segment, end).await;
         }
+        Start::Compact { focus, change } => {
+            ctx.set_state(TaskState::Running, "compacting").await;
+            let end = match compact(&ctx, &mut segment, focus.as_deref(), change).await {
+                Ok(()) => End::Completed,
+                Err(CompactError::LogFailed) => End::LogFailed,
+                Err(CompactError::Stopped) => End::Stopped,
+                Err(CompactError::Failed(message)) => End::Failed(message),
+            };
+            return finish(&ctx, segment, end).await;
+        }
     };
-    let end = run_turns(&ctx, &mut segment, round).await;
+    let end = run_turns(&ctx, &mut segment, round, budget).await;
     finish(&ctx, segment, end).await
 }
+
+/// The segment's compaction threshold, from the model's window and the settings.
+async fn budget_for(ctx: &TaskCtx, segment: &SegmentContext) -> Budget {
+    let window = ctx
+        .deps
+        .provider
+        .capabilities(&segment.frame().model)
+        .await
+        .map_or(0, |c| c.context_window);
+    Budget::new(
+        window,
+        ctx.context.compact_at_ratio,
+        ctx.context.compact_at_tokens,
+    )
+}
+
+/// Whether the next request (with `extra` appended) reaches the threshold.
+/// Near it, the provider counts exactly (Tech spec 3.13).
+async fn over_budget(
+    ctx: &TaskCtx,
+    segment: &SegmentContext,
+    extra: &[ContentBlock],
+    budget: Budget,
+) -> bool {
+    match budget.pressure(segment.estimated_input(extra)) {
+        Pressure::Over => true,
+        Pressure::Under => false,
+        Pressure::Near => {
+            let mut request = segment.request();
+            if !extra.is_empty() {
+                request
+                    .messages
+                    .push(Message::new(Role::User, extra.to_vec()));
+            }
+            match ctx.deps.provider.count_tokens(&request).await {
+                Ok(n) => budget.pressure(n) == Pressure::Over,
+                // Without an exact count, the estimate decides.
+                Err(_) => false,
+            }
+        }
+    }
+}
+
+/// Tells the user compaction failed; the task goes on in the current segment.
+async fn compaction_failed(ctx: &TaskCtx, message: String) {
+    ctx.note(Event::Warning {
+        kind: "compaction".into(),
+        message: format!("compaction failed, continuing in this segment: {message}"),
+    })
+    .await;
+}
+
+/// The synthetic user turn after an emergency compaction (Tech spec 3.13).
+pub(crate) const CONTINUE_AFTER_COMPACTION: &str = "Continue the task from the summary above.";
 
 /// Records the final state of a run.
 async fn finish(ctx: &TaskCtx, segment: SegmentContext, end: End) -> TaskResult {
@@ -326,7 +414,12 @@ async fn cancel_round(ctx: &TaskCtx, segment: &mut SegmentContext, round: Option
     End::Stopped
 }
 
-async fn run_turns(ctx: &TaskCtx, segment: &mut SegmentContext, mut round: Option<Round>) -> End {
+async fn run_turns(
+    ctx: &TaskCtx,
+    segment: &mut SegmentContext,
+    mut round: Option<Round>,
+    budget: Budget,
+) -> End {
     let mut turns = 0;
     loop {
         // Finish an unanswered tool round first (a fresh reply, or a resumed task).
@@ -364,6 +457,34 @@ async fn run_turns(ctx: &TaskCtx, segment: &mut SegmentContext, mut round: Optio
         }
         if turns >= ctx.max_turns {
             return End::Budget;
+        }
+        // Emergency trigger: mid-task, only once a tool round is fully answered
+        // and logged, never while a call waits for its result (I4).
+        if ends_with_tool_results(segment) && over_budget(ctx, segment, &[], budget).await {
+            match compact(ctx, segment, None, FrameChange::default()).await {
+                Ok(()) => {
+                    let input = vec![ContentBlock::text(CONTINUE_AFTER_COMPACTION)];
+                    if let Err(e) = segment.push_user(input) {
+                        ctx.internal_error(e.to_string()).await;
+                        return End::Failed("could not continue after compaction".into());
+                    }
+                    let message = segment.messages().last().cloned();
+                    if let Some(message) = message
+                        && ctx
+                            .record(Event::UserInput {
+                                task: ctx.task,
+                                message,
+                            })
+                            .await
+                            .is_err()
+                    {
+                        return End::LogFailed;
+                    }
+                }
+                Err(CompactError::LogFailed) => return End::LogFailed,
+                Err(CompactError::Stopped) => return End::Stopped,
+                Err(CompactError::Failed(message)) => compaction_failed(ctx, message).await,
+            }
         }
         turns += 1;
         if ctx
@@ -405,6 +526,8 @@ async fn run_turns(ctx: &TaskCtx, segment: &mut SegmentContext, mut round: Optio
             cost_micros: ctx.price.map_or(0, |p| p.cost_micros(&reply.usage)),
         })
         .await;
+        // Replay records the same measurement from the `Usage` event.
+        segment.record_input(reply.usage.total_input());
         let stop = reply.stop.unwrap_or_else(|| StopReason::Other {
             raw: "stream ended without a stop reason".into(),
         });
@@ -466,6 +589,16 @@ async fn run_turns(ctx: &TaskCtx, segment: &mut SegmentContext, mut round: Optio
             return End::Completed;
         }
     }
+}
+
+/// Whether the transcript ends with a tool round's results.
+fn ends_with_tool_results(segment: &SegmentContext) -> bool {
+    segment.messages().last().is_some_and(|m| {
+        m.role == Role::User
+            && m.content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+    })
 }
 
 /// Reads the provider stream to its end, broadcasting live deltas.
@@ -770,6 +903,15 @@ fn tool_ctx(ctx: &TaskCtx, risk_ctx: &RiskCtx, id: &str, turn: Seq) -> ToolCtx {
             store: Arc::clone(&ctx.deps.snapshots),
         }),
         mode: Arc::clone(&ctx.mode) as _,
+        history: Arc::new(crate::history::SessionHistory {
+            session: ctx.session,
+            task: ctx.task,
+            log: Arc::clone(&ctx.deps.log),
+            blobs: Arc::clone(&ctx.deps.blobs),
+            memory: Arc::clone(&ctx.memory),
+            journal: Some(Arc::clone(&ctx.journal)),
+            segment: ctx.journal.segment(),
+        }),
     }
 }
 

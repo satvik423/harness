@@ -24,8 +24,10 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod compaction;
 mod event;
 mod op;
 
+pub use compaction::{Anchor, CompactionRecord, KeyDecision, PinKind, PinnedFact};
 pub use event::{BlobOrText, Envelope, Event, HookOutcome, TaskState};
 pub use op::{Decision, InputItem, Op, RuleScope};

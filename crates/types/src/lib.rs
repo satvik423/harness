@@ -4,7 +4,7 @@
 //! harness crate. It holds only data types and small, pure helpers:
 //!
 //! - identifiers: [`SessionId`], [`TaskId`], [`ApprovalId`], [`QuestionId`], [`Seq`], [`BlobRef`]
-//! - model naming: [`ModelRef`]
+//! - model naming: [`ModelRef`], [`Effort`]
 //! - conversation content: [`Role`], [`ContentBlock`], [`Message`]
 //! - accounting: [`Usage`], [`StopReason`]
 //! - safety: [`Risk`], [`Mode`]
@@ -18,6 +18,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod effort;
 mod ids;
 mod message;
 mod mode;
@@ -25,6 +26,7 @@ mod model_ref;
 mod risk;
 mod usage;
 
+pub use effort::Effort;
 pub use ids::{
     ApprovalId, BlobRef, ParseBlobRefError, ParseIdError, QuestionId, Seq, SessionId, TaskId,
 };

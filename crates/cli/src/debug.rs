@@ -61,6 +61,39 @@ pub fn redact(text: &str) -> String {
     out
 }
 
+/// The two requests `diff-requests` compares: the last two of the newest
+/// segment that has two. A compaction starts a new transcript, so requests of
+/// different segments are never compared.
+///
+/// # Errors
+/// A message explaining why there is nothing to compare.
+#[allow(clippy::type_complexity)]
+pub fn latest_pair(
+    history: &[harness_runtime::RecordedRequest],
+) -> Result<
+    (
+        &harness_runtime::RecordedRequest,
+        &harness_runtime::RecordedRequest,
+    ),
+    String,
+> {
+    let Some(last) = history.last() else {
+        return Err("this session has not sent a request yet".into());
+    };
+    let same: Vec<&harness_runtime::RecordedRequest> = history
+        .iter()
+        .filter(|r| r.segment == last.segment)
+        .collect();
+    match same.as_slice() {
+        [.., older, newer] => Ok((older, newer)),
+        _ if last.segment > 0 => Err(format!(
+            "the last request (event #{}) is the first of segment {}: a compaction starts a new transcript, so there is no earlier request in this segment to compare it with",
+            last.seq.0, last.segment
+        )),
+        _ => Err("this session has sent fewer than two requests".into()),
+    }
+}
+
 /// A report comparing two consecutive requests: whether the newer one only
 /// appends to the older one (I1), then a line diff of the bodies.
 #[must_use]
@@ -117,6 +150,45 @@ pub fn diff_report(
 
 #[cfg(test)]
 mod tests {
+    fn recorded(seq: u64, segment: u32) -> harness_runtime::RecordedRequest {
+        harness_runtime::RecordedRequest {
+            seq: harness_types::Seq(seq),
+            segment,
+            request: harness_ports::ModelRequest {
+                model: "m".into(),
+                system: vec![],
+                tools: vec![],
+                messages: vec![],
+                max_output: 1,
+                effort: None,
+                cache_plan: harness_ports::CachePlan::default(),
+                output_schema: None,
+                show_thinking: false,
+            },
+        }
+    }
+
+    #[test]
+    fn requests_of_different_segments_are_never_compared() {
+        let history = vec![recorded(5, 0), recorded(9, 0), recorded(20, 1)];
+        let message = latest_pair(&history).unwrap_err();
+        assert!(message.contains("first of segment 1"), "{message}");
+        let history = vec![
+            recorded(5, 0),
+            recorded(9, 0),
+            recorded(20, 1),
+            recorded(25, 1),
+        ];
+        let (a, b) = latest_pair(&history).unwrap();
+        assert_eq!((a.seq.0, b.seq.0), (20, 25));
+        assert!(
+            latest_pair(&[recorded(5, 0)])
+                .unwrap_err()
+                .contains("fewer than two")
+        );
+        assert!(latest_pair(&[]).is_err());
+    }
+
     use super::*;
     use harness_ports::{CachePlan, SystemPart, SystemSlot};
     use harness_types::{ContentBlock, Message, Role};

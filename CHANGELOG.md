@@ -3,7 +3,23 @@
 All notable changes to harness. Versions follow the release plan in
 `building-harness.html` (Part 1.10 and the phase plan).
 
-## Unreleased (Phase 4)
+## Unreleased (Phase 5)
+
+- **Long sessions keep every detail:** when the context gets full, harness compacts it
+  into a new segment with a structured summary, pinned facts (exact quotes, checked)
+  and anchors over every event. `/compact [focus]` does it now.
+- **`recall`:** the model fetches earlier events by anchor, event range or search, in
+  pages; a trimmed tool result's full output comes back by range. `/recall` lists
+  anchors or attaches one to your next message.
+- **`/model` and `/effort` switch inside a session** (the conversation is compacted
+  first), across providers too.
+- **Forks:** `harness session fork ID [--at SEQ]` and `/fork [event]`.
+- **Structured output** for OpenAI and Anthropic (used by compaction).
+- **Evals:** `harness-evals needle` and `fidelity` (M1, M2), offline or live; results
+  in `evals/results.tsv`.
+- `harness debug diff-requests` compares requests of one segment.
+
+## Phase 4
 
 - **Terminal UI:** `harness` opens it; `harness --session ID` reopens a session with its
   history. Streaming Markdown with highlighted code, tool cards with live output and

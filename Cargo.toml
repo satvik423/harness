@@ -15,6 +15,7 @@ members = [
     "crates/policy",
     "crates/store-sqlite",
     "crates/tui",
+    "crates/evals",
 ]
 # Needs nightly (cargo +nightly fuzz run apply_patch); has its own lockfile.
 exclude = ["fuzz"]

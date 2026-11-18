@@ -5,12 +5,18 @@
 pub enum Slash {
     /// Show the commands and keys.
     Help,
-    /// Show models, or pick one for the next session.
+    /// Show models, or continue the session with another one (ADR-046).
     Model(Option<String>),
-    /// Show the effort, or pick one for the next session.
+    /// Show the effort, or continue the session at another one (ADR-046).
     Effort(Option<String>),
     /// Show the permission modes, or switch to one (ADR-042).
     Mode(Option<String>),
+    /// Compact the session now, optionally with a focus.
+    Compact(Option<String>),
+    /// List the anchors, or attach recalled events to the next message.
+    Recall(Option<String>),
+    /// Fork the session after an event (the last one by default).
+    Fork(Option<String>),
     /// Pause the running task at its next safe point.
     Pause,
     /// Resume the paused task.
@@ -38,15 +44,27 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/help", "commands and keys"),
     (
         "/model [provider/model]",
-        "show models, or pick one for a new session",
+        "show models, or continue this session with another one",
     ),
     (
         "/effort [low|medium|high|xhigh|max]",
-        "show or pick the effort for a new session",
+        "show the effort, or continue this session at another one",
     ),
     (
         "/mode [read-only|auto|plan|full]",
         "show or switch the permission mode (also Shift+Tab)",
+    ),
+    (
+        "/compact [focus]",
+        "compact the conversation into a summary now (keeps every detail recallable)",
+    ),
+    (
+        "/recall [aN | words]",
+        "list anchors, or attach an anchor or search result to your next message",
+    ),
+    (
+        "/fork [event]",
+        "a new session sharing this one's history up to an event (default: now)",
     ),
     ("/pause", "pause the task at its next safe point"),
     ("/resume", "resume the paused task"),
@@ -92,6 +110,9 @@ pub fn parse(input: &str) -> Option<Result<Slash, String>> {
         "model" => Ok(Slash::Model(arg)),
         "effort" => Ok(Slash::Effort(arg)),
         "mode" => Ok(Slash::Mode(arg)),
+        "compact" => Ok(Slash::Compact(arg)),
+        "recall" => Ok(Slash::Recall(arg)),
+        "fork" => Ok(Slash::Fork(arg)),
         "pause" => Ok(Slash::Pause),
         "resume" => Ok(Slash::Resume),
         "tasks" => Ok(Slash::Tasks),
@@ -137,8 +158,8 @@ mod tests {
     #[test]
     fn help_lists_every_command() {
         for name in [
-            "help", "model", "effort", "mode", "pause", "resume", "tasks", "diff", "undo", "clear",
-            "sessions", "cost", "context", "quit",
+            "help", "model", "effort", "mode", "compact", "recall", "fork", "pause", "resume",
+            "tasks", "diff", "undo", "clear", "sessions", "cost", "context", "quit",
         ] {
             assert!(
                 COMMANDS

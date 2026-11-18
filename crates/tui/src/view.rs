@@ -229,10 +229,7 @@ pub(crate) fn ago(now_ms: i64, then_ms: i64) -> String {
 #[must_use]
 pub fn status_line(app: &App) -> Line<'static> {
     let session = app.ledger.session();
-    let used = app
-        .ledger
-        .last()
-        .map_or(0, |t| t.usage.total_input() + t.usage.output);
+    let used = app.context_used();
     let cost = if app.view.priced {
         money(session.cost_micros)
     } else {
@@ -357,7 +354,7 @@ pub fn render(app: &App, frame: &mut Frame<'_>) {
         .unwrap_or(1)
         .clamp(1, 6)
         + 2;
-    let attach_height = u16::from(!app.attachments.is_empty());
+    let attach_height = u16::from(!app.attachments.is_empty() || !app.recalls.is_empty());
     let [head, body, panel, attach, input, status] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
@@ -404,6 +401,7 @@ pub fn render(app: &App, frame: &mut Frame<'_>) {
                     )
                 )
             })
+            .chain(app.recalls.iter().map(|(label, _)| format!("↺ {label}")))
             .collect();
         frame.render_widget(
             Paragraph::new(Line::styled(
@@ -591,8 +589,8 @@ pub fn cost_overlay(app: &App) -> Overlay {
 /// `/context`: how full the context is.
 #[must_use]
 pub fn context_overlay(app: &App) -> Overlay {
+    let used = app.context_used();
     let last = app.ledger.last();
-    let used = last.map_or(0, |t| t.usage.total_input() + t.usage.output);
     #[allow(clippy::cast_precision_loss)]
     let pct = if app.view.context_limit == 0 {
         0.0
@@ -615,9 +613,10 @@ pub fn context_overlay(app: &App) -> Overlay {
             "Limit          {} ({pct:.1}% used)",
             tokens(app.view.context_limit)
         )),
+        Line::raw(format!("Anchors        {}", app.anchors.len())),
         Line::default(),
         Line::styled(
-            "Compaction into a new segment arrives in Phase 5; until then long sessions keep growing.",
+            "When the context reaches the limit, harness compacts it into a new segment: a summary, pinned facts and anchors you can /recall. /compact does it now.",
             DIM,
         ),
     ];
@@ -679,14 +678,10 @@ pub fn diff_overlay(changes: &[ChangedFile]) -> Overlay {
 #[must_use]
 pub fn models_overlay(app: &App, models: &[harness_types::ModelRef]) -> Overlay {
     let mut lines = vec![
-        Line::raw(format!(
-            "This session: {} (a session keeps its model)",
-            app.view.model
-        )),
-        Line::raw(format!("Next session: {}", app.next.model)),
+        Line::raw(format!("This session: {}", app.view.model)),
         Line::default(),
         Line::styled(
-            "Pick one for a new session (or type /model provider/model):",
+            "Pick one to continue this session with it; the conversation is compacted into a new segment (or type /model provider/model):",
             DIM,
         ),
     ];
@@ -701,6 +696,57 @@ pub fn models_overlay(app: &App, models: &[harness_types::ModelRef]) -> Overlay 
     let mut o = overlay("Models", lines);
     o.picks = picks;
     o
+}
+
+/// `/recall`: the session's anchors; picking one attaches it to the next message.
+#[must_use]
+pub fn anchors_overlay(app: &App) -> Overlay {
+    if app.anchors.is_empty() {
+        return overlay(
+            "Anchors",
+            vec![Line::raw(
+                "No anchors yet: they appear after the first compaction (/compact).",
+            )],
+        );
+    }
+    let mut lines = vec![
+        Line::styled(
+            "Pick one to attach it to your next message (or type /recall aN or /recall words):",
+            DIM,
+        ),
+        Line::default(),
+    ];
+    let mut picks = Vec::new();
+    for anchor in &app.anchors {
+        picks.push(Pick {
+            line: lines.len(),
+            action: Action::Command(Slash::Recall(Some(anchor.id.clone()))),
+        });
+        lines.push(Line::raw(format!(
+            " {}",
+            harness_context_free_anchor_line(anchor)
+        )));
+    }
+    let mut o = overlay("Anchors", lines);
+    o.picks = picks;
+    o
+}
+
+/// One anchor in the `/recall` list (the TUI cannot use `harness-context`).
+fn harness_context_free_anchor_line(a: &harness_protocol::Anchor) -> String {
+    let has = if a.has.is_empty() {
+        String::new()
+    } else {
+        format!(" · has: {}", a.has.join("; "))
+    };
+    format!(
+        "{:<4} ev {}-{} · {} tok · {}{has}",
+        a.id,
+        a.from.0,
+        a.to.0,
+        tokens(a.tokens),
+        a.topic
+    )
 }
 
 /// `/mode`: the permission modes; picking one switches to it (ADR-042).

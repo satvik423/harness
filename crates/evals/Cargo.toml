@@ -1,0 +1,35 @@
+[package]
+name = "harness-evals"
+description = "Context-engine evals for harness (M1 needle, M2 fidelity); not published."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "harness-evals"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+clap.workspace = true
+futures.workspace = true
+harness-cli = { path = "../cli" }
+harness-config.workspace = true
+harness-context.workspace = true
+harness-ports.workspace = true
+harness-protocol.workspace = true
+harness-runtime.workspace = true
+harness-store-sqlite.workspace = true
+harness-testkit.workspace = true
+harness-tools.workspace = true
+harness-types.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-util.workspace = true
+
+[lints]
+workspace = true

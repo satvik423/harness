@@ -23,7 +23,15 @@ harness session list
 harness run --session 01M7P3 "now write tests for it"
 ```
 
-Ids can be shortened to any unique prefix. A session keeps the model it started with.
+Ids can be shortened to any unique prefix. A session keeps its model unless you switch
+it with `/model` in the terminal UI (the conversation is compacted first). Long sessions
+compact automatically; see [long sessions](context.md).
+
+## Fork
+
+`harness session fork ID [--at SEQ]` (or `/fork [event]` in the terminal UI) creates a
+new session that shares the history up to an event and continues from a summary of it.
+The original is untouched.
 A session nobody typed into is deleted when the terminal UI leaves it, so opening and
 closing harness leaves nothing behind.
 

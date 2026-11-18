@@ -18,8 +18,10 @@ use harness_ports::{
     SystemClock, Tool, ToolCtx, ToolError, ToolName, ToolOutput, ToolRegistry, ToolSpec,
 };
 use harness_protocol::{Decision, Envelope, Event, InputItem, Op, TaskState};
-use harness_runtime::{ApprovalMode, RuntimeDeps, SessionConfig, SessionHandle, spawn_session};
-use harness_testkit::invariants::check_all;
+use harness_runtime::{
+    ApprovalMode, ContextSettings, RuntimeDeps, SessionConfig, SessionHandle, spawn_session,
+};
+use harness_testkit::invariants::{check_all, check_events, check_segments};
 use harness_testkit::{AskForChanges, FakeProvider, MemoryStore};
 use harness_tools::{MemoryReadLedger, Unsandboxed};
 use harness_types::{ContentBlock, Mode, Risk, Role, StopReason, TaskId};
@@ -195,6 +197,47 @@ async fn start_in(
     mode: Mode,
     full_access: bool,
 ) -> Run {
+    start_with(
+        provider,
+        approval,
+        max_turns,
+        mode,
+        full_access,
+        ContextSettings::default(),
+    )
+    .await
+}
+
+async fn start_with(
+    provider: Arc<dyn Provider>,
+    approval: ApprovalMode,
+    max_turns: u32,
+    mode: Mode,
+    full_access: bool,
+    context: ContextSettings,
+) -> Run {
+    start_full(
+        provider,
+        approval,
+        max_turns,
+        mode,
+        full_access,
+        context,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_full(
+    provider: Arc<dyn Provider>,
+    approval: ApprovalMode,
+    max_turns: u32,
+    mode: Mode,
+    full_access: bool,
+    context: ContextSettings,
+    models: Option<Arc<dyn harness_runtime::ModelSource>>,
+) -> Run {
     let dir = tempfile::tempdir().unwrap();
     let mut tools = ToolRegistry::new();
     tools.register(Arc::new(Echo)).unwrap();
@@ -202,6 +245,7 @@ async fn start_in(
     tools.register(Arc::new(Fails)).unwrap();
     tools.register(Arc::new(EchoTinyCap)).unwrap();
     tools.register(Arc::new(harness_tools::AskUser)).unwrap();
+    tools.register(Arc::new(harness_tools::Recall)).unwrap();
     let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     tools
         .register(Arc::new(SlowRead {
@@ -222,6 +266,7 @@ async fn start_in(
         log: Arc::clone(&store) as _,
         sessions: Arc::clone(&store) as _,
         snapshots: Arc::clone(&store) as _,
+        models,
     };
     let config = SessionConfig {
         cwd: dir.path().to_path_buf(),
@@ -229,6 +274,7 @@ async fn start_in(
         approval,
         mode,
         full_access,
+        context,
         max_turns,
         output_cap_tokens: TEST_CAP_TOKENS,
         max_parallel_tools: 2,
@@ -801,11 +847,12 @@ async fn ops_from_later_phases_are_reported_as_unsupported() {
     ] {
         assert_eq!(kind_of(&first_problem(&mut run, op).await), "no_such_task");
     }
+    let empty = Op::Compact {
+        session,
+        focus: None,
+    };
+    assert_eq!(kind_of(&first_problem(&mut run, empty).await), "compaction");
     for op in [
-        Op::Compact {
-            session,
-            focus: None,
-        },
         Op::SwitchPersona {
             session,
             persona: "x".into(),
@@ -1455,4 +1502,460 @@ async fn a_switch_while_a_task_runs_applies_to_its_next_call() {
     }
     assert_eq!(run.policy.modes(), [Mode::Auto, Mode::ReadOnly]);
     assert_invariants(&fake);
+}
+
+// ---------- compaction (Phase 5) ----------
+
+fn small_budget() -> ContextSettings {
+    ContextSettings {
+        compact_at_tokens: 60,
+        ..ContextSettings::default()
+    }
+}
+
+/// A compaction reply pinning `quote` from event `seq` and anchoring `from..=to`.
+fn summary_json(quote: &str, seq: u64, from: u64, to: u64) -> String {
+    json!({
+        "goal": "ship the feature", "state_of_work": "planning",
+        "decisions": [{"text": "use Postgres", "seq": seq}],
+        "pinned": [{"quote": quote, "seq": seq, "kind": "requirement"},
+                   {"quote": "not in the log", "seq": seq, "kind": "id"}],
+        "superseded_pins": [], "files_touched": [], "open_questions": [],
+        "next_steps": ["write the migration"],
+        "anchors": [{"from_seq": from, "to_seq": to, "topic": "the request", "has": ["the database requirement"]}]
+    })
+    .to_string()
+}
+
+async fn logged(run: &Run) -> Vec<(harness_types::Seq, Event)> {
+    use harness_ports::EventLog as _;
+    run.blobs
+        .range(
+            run.handle.id(),
+            harness_types::Seq::FIRST,
+            harness_types::Seq(u64::MAX),
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|l| (l.envelope.seq, l.envelope.event))
+        .collect()
+}
+
+/// Sends `op` and collects events until a task ends.
+async fn until_task_ends(run: &mut Run, op: Op) -> Vec<Event> {
+    run.handle.send(op).await.unwrap();
+    let mut events = Vec::new();
+    loop {
+        let e = tokio::time::timeout(Duration::from_secs(10), run.events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .event;
+        let done = ends_task(&e);
+        events.push(e);
+        if done {
+            return events;
+        }
+    }
+}
+
+fn first_text(request: &ModelRequest) -> String {
+    text_of(&request.messages[0])
+}
+
+#[tokio::test]
+async fn compact_opens_a_new_segment_with_the_summary_pins_and_anchors() {
+    // Seq 1 SessionOpened, 2 SegmentOpened, 3 TaskState, 4 UserInput.
+    let fake = FakeProvider::new()
+        .with_text_turn("Noted.")
+        .with_text_turn(&summary_json("must support Postgres 14", 4, 1, 3))
+        .with_text_turn("Continuing.");
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
+    let first = submit_envelopes(
+        &mut run,
+        "the app must support Postgres 14",
+        OnApproval::Approve,
+    )
+    .await;
+    assert!(
+        first
+            .iter()
+            .any(|e| e.seq.0 == 4 && matches!(e.event, Event::UserInput { .. }))
+    );
+    let op = Op::Compact {
+        session: run.handle.id(),
+        focus: Some("the database".into()),
+    };
+    let events = until_task_ends(&mut run, op).await;
+    assert_eq!(final_state(&events), TaskState::Completed);
+    let Some(Event::Compacted {
+        record, to_segment, ..
+    }) = events.iter().find(|e| matches!(e, Event::Compacted { .. }))
+    else {
+        panic!("{events:?}")
+    };
+    assert_eq!(*to_segment, 1);
+    assert_eq!(record.pins.len(), 1, "the made-up quote is dropped");
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Warning { kind, message } if kind == "compaction" && message.contains("not in the log")))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::SegmentOpened { segment: 1, .. }))
+    );
+
+    // The compaction request: the segment rendered, with the focus, as structured output.
+    let compaction = &fake.requests()[1];
+    assert!(compaction.output_schema.is_some());
+    let asked = compaction.messages[0].text();
+    // The opener's environment block is left out of the rendering.
+    assert!(!asked.contains("<environment>"), "{asked}");
+    assert!(
+        asked.contains("#4 user: the app must support Postgres 14"),
+        "{asked}"
+    );
+    assert!(asked.contains("keep this in focus: the database"));
+
+    // The next request starts at the new opener.
+    submit(&mut run, "go on", OnApproval::Approve).await;
+    let next = first_text(&fake.requests()[2]);
+    assert!(next.contains("<compacted-context segment=\"1\""), "{next}");
+    assert!(next.contains("[p1 · requirement · #4] must support Postgres 14"));
+    assert!(next.contains("[[a1 | ev 1-3"));
+    assert!(next.ends_with("go on"));
+    assert!(
+        check_segments(&fake.requests()).is_empty(),
+        "{:?}",
+        check_segments(&fake.requests())
+    );
+    assert!(check_events(&logged(&run).await).is_empty());
+}
+
+#[tokio::test]
+async fn a_full_segment_is_compacted_at_the_turn_boundary_before_the_new_input() {
+    let fake = FakeProvider::new()
+        .with_text_turn("first reply")
+        .with_text_turn(&summary_json("first", 4, 1, 4))
+        .with_text_turn("second reply");
+    let mut run = start_with(
+        Arc::new(fake.clone()),
+        ApprovalMode::Ask,
+        10,
+        Mode::Auto,
+        false,
+        small_budget(),
+    )
+    .await;
+    submit(
+        &mut run,
+        &format!("first {}", "a".repeat(300)),
+        OnApproval::Approve,
+    )
+    .await;
+    let events = submit(
+        &mut run,
+        &format!("second {}", "b".repeat(300)),
+        OnApproval::Approve,
+    )
+    .await;
+    let started = events
+        .iter()
+        .position(|e| matches!(e, Event::CompactionStarted { .. }))
+        .unwrap();
+    let input = events
+        .iter()
+        .position(|e| matches!(e, Event::UserInput { .. }))
+        .unwrap();
+    assert!(started < input, "compaction runs before the input is added");
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1].output_schema.is_some());
+    let opened = first_text(&requests[2]);
+    assert!(
+        opened.contains("<compacted-context") && opened.contains("second bbb"),
+        "{opened}"
+    );
+    assert_eq!(
+        requests[2].messages.len(),
+        1,
+        "nothing from segment 0 is replayed"
+    );
+    assert!(check_segments(&requests).is_empty());
+    assert!(check_events(&logged(&run).await).is_empty());
+}
+
+#[tokio::test]
+async fn an_emergency_compaction_follows_a_tool_round_and_the_task_continues() {
+    let fake = FakeProvider::new()
+        .with_tool_call_turn("c1", "echo", &json!({"text": "x".repeat(600)}))
+        .with_text_turn(&summary_json("go", 4, 1, 9))
+        .with_text_turn("done");
+    let mut run = start_with(
+        Arc::new(fake.clone()),
+        ApprovalMode::Ask,
+        10,
+        Mode::Auto,
+        false,
+        small_budget(),
+    )
+    .await;
+    let events = submit(&mut run, "go", OnApproval::Approve).await;
+    assert_eq!(final_state(&events), TaskState::Completed);
+    let requests = fake.requests();
+    assert!(
+        requests[1].output_schema.is_some(),
+        "compacted after the tool round"
+    );
+    let last = requests[2].messages.last().unwrap().text();
+    assert!(last.ends_with(harness_runtime_continue()), "{last}");
+    assert!(check_segments(&requests).is_empty());
+    assert!(check_events(&logged(&run).await).is_empty());
+}
+
+fn harness_runtime_continue() -> &'static str {
+    "Continue the task from the summary above."
+}
+
+#[tokio::test]
+async fn a_failed_compaction_warns_and_the_task_goes_on_in_the_same_segment() {
+    let fake = FakeProvider::new()
+        .with_text_turn("first reply")
+        .with_text_turn("this is not json")
+        .with_text_turn("second reply");
+    let mut run = start_with(
+        Arc::new(fake.clone()),
+        ApprovalMode::Ask,
+        10,
+        Mode::Auto,
+        false,
+        small_budget(),
+    )
+    .await;
+    submit(
+        &mut run,
+        &format!("first {}", "a".repeat(300)),
+        OnApproval::Approve,
+    )
+    .await;
+    let events = submit(
+        &mut run,
+        &format!("second {}", "b".repeat(300)),
+        OnApproval::Approve,
+    )
+    .await;
+    assert_eq!(final_state(&events), TaskState::Completed);
+    assert!(events.iter().any(
+        |e| matches!(e, Event::Warning { kind, message } if kind == "compaction" && message.contains("continuing in this segment"))
+    ));
+    let requests = fake.requests();
+    assert_eq!(
+        first_text(&requests[2]),
+        first_text(&requests[0]),
+        "still segment 0"
+    );
+    assert!(check_segments(&requests).is_empty());
+}
+
+#[tokio::test]
+async fn recall_returns_the_full_output_behind_a_trimmed_result_and_records_it() {
+    let big = format!("{}MIDDLE-MARKER{}", "z".repeat(2_000), "z".repeat(2_000));
+    let fake = FakeProvider::new()
+        .with_tool_call_turn("c1", "echo", &json!({ "text": big }))
+        .with_tool_call_turn(
+            "c2",
+            "recall",
+            &json!({"seq_from": 1, "seq_to": 40, "max_tokens": 8000}),
+        )
+        .with_text_turn("found it");
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
+    let events = submit(&mut run, "go", OnApproval::Approve).await;
+    assert_eq!(final_state(&events), TaskState::Completed);
+    let requests = fake.requests();
+    let trimmed = tool_results(&requests[1]);
+    assert!(
+        !trimmed[0].2.contains("MIDDLE-MARKER"),
+        "the model first sees the capped form"
+    );
+    let recalled = tool_results(&requests[2]);
+    assert!(recalled[0].2.contains("MIDDLE-MARKER"), "{}", recalled[0].2);
+    assert!(events.iter().any(
+        |e| matches!(e, Event::Recalled { anchor: None, auto: false, tokens } if *tokens > 0)
+    ));
+    assert_invariants(&fake);
+}
+
+#[tokio::test]
+async fn recall_by_anchor_after_a_compaction_brings_back_the_exact_words() {
+    let fake = FakeProvider::new()
+        .with_text_turn("Noted.")
+        .with_text_turn(&summary_json("ticket FOO-4521", 4, 1, 6))
+        .with_tool_call_turn("c1", "recall", &json!({"anchor": "a1"}))
+        .with_text_turn("It was FOO-4521.");
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
+    submit(
+        &mut run,
+        "remember ticket FOO-4521 for later",
+        OnApproval::Approve,
+    )
+    .await;
+    let op = Op::Compact {
+        session: run.handle.id(),
+        focus: None,
+    };
+    until_task_ends(&mut run, op).await;
+    let events = submit(&mut run, "which ticket?", OnApproval::Approve).await;
+    let results = tool_results(&fake.requests()[3]);
+    assert!(
+        results[0].2.contains("[recall a1 · events 1-6"),
+        "{}",
+        results[0].2
+    );
+    assert!(results[0].2.contains("remember ticket FOO-4521 for later"));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Recalled { anchor: Some(a), .. } if a == "a1"))
+    );
+    assert!(check_segments(&fake.requests()).is_empty());
+}
+
+// ---------- switching models inside a session (ADR-046) ----------
+
+struct OtherProvider(FakeProvider);
+
+impl harness_runtime::ModelSource for OtherProvider {
+    fn open(
+        &self,
+        _: &harness_types::ModelRef,
+    ) -> Result<(Arc<dyn Provider>, Option<harness_runtime::ModelPrice>), String> {
+        Ok((
+            Arc::new(self.0.clone()),
+            Some(harness_runtime::ModelPrice {
+                input: 1.0,
+                output: 1.0,
+                cache_read: 1.0,
+                cache_write: 1.0,
+            }),
+        ))
+    }
+}
+
+async fn until_switched(run: &mut Run, op: Op) -> Vec<Event> {
+    run.handle.send(op).await.unwrap();
+    let mut events = Vec::new();
+    loop {
+        let e = tokio::time::timeout(Duration::from_secs(10), run.events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .event;
+        let done = match &e {
+            Event::ModelSwitched { .. } | Event::Error { .. } => true,
+            Event::Warning { kind, .. } => kind == "model",
+            _ => false,
+        };
+        events.push(e);
+        if done {
+            return events;
+        }
+    }
+}
+
+#[tokio::test]
+async fn switching_model_compacts_and_the_next_segment_uses_the_new_model() {
+    let fake = FakeProvider::new()
+        .with_text_turn("hi")
+        .with_text_turn(&summary_json("hello", 4, 1, 4))
+        .with_text_turn("hi from sonnet");
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
+    submit(&mut run, "hello", OnApproval::Approve).await;
+    let op = Op::SwitchModel {
+        session: run.handle.id(),
+        model: "anthropic/claude-sonnet-5-5".parse().unwrap(),
+        effort: Some(harness_types::Effort::Low),
+    };
+    let events = until_switched(&mut run, op).await;
+    assert!(events.iter().any(|e| matches!(e, Event::Compacted { .. })));
+    assert!(matches!(
+        events.last(),
+        Some(Event::ModelSwitched {
+            effort: Some(harness_types::Effort::Low),
+            ..
+        })
+    ));
+    submit(&mut run, "again", OnApproval::Approve).await;
+    let requests = fake.requests();
+    assert_eq!(
+        requests[1].model, "claude-opus-5-5",
+        "the old model summarises"
+    );
+    assert_eq!(requests[2].model, "claude-sonnet-5-5");
+    assert_eq!(requests[2].effort, Some(harness_types::Effort::Low));
+    assert!(check_segments(&requests).is_empty());
+}
+
+#[tokio::test]
+async fn switching_before_the_first_message_needs_no_compaction() {
+    let fake = FakeProvider::new().with_text_turn("hi");
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
+    let op = Op::SwitchModel {
+        session: run.handle.id(),
+        model: "anthropic/claude-sonnet-5-5".parse().unwrap(),
+        effort: None,
+    };
+    let events = until_switched(&mut run, op).await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::CompactionStarted { .. }))
+    );
+    submit(&mut run, "hello", OnApproval::Approve).await;
+    assert_eq!(fake.requests()[0].model, "claude-sonnet-5-5");
+    assert_eq!(fake.requests()[0].effort, None);
+}
+
+#[tokio::test]
+async fn another_provider_needs_a_model_source_and_then_gets_the_next_requests() {
+    let fake = FakeProvider::new().with_text_turn("hi");
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
+    let op = Op::SwitchModel {
+        session: run.handle.id(),
+        model: "openai/gpt-6-luna".parse().unwrap(),
+        effort: None,
+    };
+    let refused = until_switched(&mut run, op).await;
+    assert!(matches!(refused.last(), Some(Event::Error { kind, .. }) if kind == "model"));
+
+    let first = FakeProvider::new()
+        .with_text_turn("hi")
+        .with_text_turn(&summary_json("hello", 4, 1, 4));
+    let other = FakeProvider::new().with_text_turn("hi from luna");
+    let mut run = start_full(
+        Arc::new(first.clone()),
+        ApprovalMode::Ask,
+        10,
+        Mode::Auto,
+        false,
+        ContextSettings::default(),
+        Some(Arc::new(OtherProvider(other.clone()))),
+    )
+    .await;
+    submit(&mut run, "hello", OnApproval::Approve).await;
+    let op = Op::SwitchModel {
+        session: run.handle.id(),
+        model: "openai/gpt-6-luna".parse().unwrap(),
+        effort: None,
+    };
+    until_switched(&mut run, op).await;
+    let events = submit(&mut run, "again", OnApproval::Approve).await;
+    assert_eq!(other.requests().len(), 1);
+    assert_eq!(other.requests()[0].model, "gpt-6-luna");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Usage { cost_micros, .. } if *cost_micros > 0)),
+        "the new model's price is used"
+    );
 }

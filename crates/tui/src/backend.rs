@@ -4,9 +4,9 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use harness_ports::{Effort, TaskRecord};
+use harness_ports::{Effort, RecallSelector, Recollection, TaskRecord};
 use harness_protocol::{Envelope, Op, TaskState};
-use harness_types::{Mode, ModelRef, SessionId};
+use harness_types::{Mode, ModelRef, Seq, SessionId};
 use tokio::sync::broadcast;
 
 /// What the TUI shows about the current session.
@@ -114,6 +114,20 @@ pub trait Backend: Send + Sync {
     /// A message if it cannot be opened (for example it is open in another
     /// harness process, or its provider has no API key).
     async fn open_session(&self, id: SessionId) -> Result<Attached, String>;
+
+    /// Forks the current session after event `at` (its last one when `None`)
+    /// and makes the fork current; it then compacts into its own segment.
+    ///
+    /// # Errors
+    /// A message when the fork point is outside the session or the fork
+    /// cannot be opened.
+    async fn fork(&self, at: Option<Seq>) -> Result<Attached, String>;
+
+    /// Renders earlier events of the current session for `/recall`.
+    ///
+    /// # Errors
+    /// A message when nothing matches or the log cannot be read.
+    async fn recall(&self, selector: RecallSelector) -> Result<Recollection, String>;
 
     /// Models offered by `/model` (the configured default and priced models).
     fn models(&self) -> Vec<ModelRef>;

@@ -60,3 +60,7 @@ retryable (waiting does not refill a quota); 5xx → `Server`; other 4xx →
 
 - `count_tokens` is a local estimate (characters ÷ 4); the usage in each response is exact.
 - Capabilities are defaults; `capabilities()` only confirms the model exists.
+
+## Structured output (Phase 5, ADR-044)
+
+`ModelRequest::output_schema` becomes `text.format = {type: "json_schema", name: "harness_output", schema, strict: true}`; the reply's text is the JSON. Compaction uses it.

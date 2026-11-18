@@ -9,6 +9,7 @@ use harness_ports::StoreError;
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_init.sql"),
     include_str!("../migrations/0002_task_controls.sql"),
+    include_str!("../migrations/0003_pin_ids.sql"),
 ];
 
 /// The schema version this build writes.

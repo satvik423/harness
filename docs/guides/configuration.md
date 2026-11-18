@@ -86,3 +86,19 @@ only with an update; harness never fetches prices.
 start in; `default_deny_paths` lists files no tool may touch. Rules go in separate
 `rules.toml` files. You can switch modes while working (Shift+Tab, `/mode`, `--mode`).
 See the [permissions guide](permissions.md).
+
+## Long sessions
+
+`[context]` decides when a session compacts into a new segment (see
+[long sessions](context.md)):
+
+```toml
+[context]
+compact_at_ratio = 0.7        # share of the model's context window
+compact_at_tokens = 250000    # compact at this many input tokens at the latest
+compaction_model = "same"     # or a provider/model on the same provider, e.g. a cheaper one
+output_cap_tokens = 2000      # tool output the model sees before "recall" is needed
+```
+
+A `compaction_model` on another provider is ignored (with a log line): compaction runs
+on the session's provider.

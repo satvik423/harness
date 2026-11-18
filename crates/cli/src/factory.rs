@@ -80,6 +80,7 @@ impl SessionFactory {
             log: Arc::clone(&self.store) as _,
             sessions: Arc::clone(&self.store) as _,
             snapshots: Arc::clone(&self.store) as _,
+            models: None,
         };
         Ok((deps, approval))
     }
@@ -114,6 +115,34 @@ impl SessionFactory {
                 PolicyProfile::Plan => Mode::Plan,
                 PolicyProfile::Full => Mode::Full,
             }),
+        }
+    }
+
+    /// The context-engine settings for a session on `model`: `[context]`
+    /// from the config. A `compaction_model` on another provider cannot run
+    /// on the session's provider, so the session's own model is used instead.
+    #[must_use]
+    pub fn context_settings(&self, model: &ModelRef) -> harness_runtime::ContextSettings {
+        let c = &self.config.context;
+        let compaction_model = match c.compaction_model.as_str() {
+            "same" | "" => None,
+            other => match other.parse::<ModelRef>() {
+                Ok(m) if m.provider() == model.provider() => Some(m.model().to_owned()),
+                Ok(m) => {
+                    tracing::warn!(compaction = %m, session = %model, "context.compaction_model is on another provider; using the session's model");
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "context.compaction_model is not provider/model; using the session's model");
+                    None
+                }
+            },
+        };
+        harness_runtime::ContextSettings {
+            compact_at_ratio: c.compact_at_ratio,
+            compact_at_tokens: c.compact_at_tokens,
+            compaction_model,
+            ..harness_runtime::ContextSettings::default()
         }
     }
 
@@ -183,6 +212,23 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn context_settings_come_from_the_config_and_stay_on_the_sessions_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut f = factory(dir.path());
+        let model: ModelRef = "openai/gpt-6-luna".parse().unwrap();
+        f.config.context.compact_at_tokens = 30_000;
+        let c = f.context_settings(&model);
+        assert_eq!((c.compact_at_tokens, c.compaction_model), (30_000, None));
+        f.config.context.compaction_model = "openai/gpt-6-sol".into();
+        assert_eq!(
+            f.context_settings(&model).compaction_model.as_deref(),
+            Some("gpt-6-sol")
+        );
+        f.config.context.compaction_model = "anthropic/claude-haiku-5-5".into();
+        assert_eq!(f.context_settings(&model).compaction_model, None);
     }
 
     #[test]

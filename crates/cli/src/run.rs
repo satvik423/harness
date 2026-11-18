@@ -16,9 +16,10 @@ use harness_protocol::{Decision, Envelope, Event, InputItem, Op, TaskState};
 use harness_provider_anthropic::{AnthropicSettings, ThinkingMismatch};
 use harness_provider_openai::OpenAiSettings;
 use harness_runtime::{
-    ApprovalMode, Resumed, RuntimeDeps, SessionConfig, SessionHandle, resume_session, spawn_session,
+    ApprovalMode, Resumed, RuntimeDeps, SessionConfig, SessionHandle, fork_session, resume_session,
+    spawn_session,
 };
-use harness_types::{Mode, QuestionId, SessionId, TaskId};
+use harness_types::{Mode, QuestionId, Seq, SessionId, TaskId};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 use tokio::sync::{Notify, broadcast, mpsc};
 
@@ -58,6 +59,8 @@ pub struct RunOptions {
     pub mode_given: bool,
     /// Whether `full` mode may be chosen (`--dangerously-full-access`).
     pub full_access: bool,
+    /// When and how to compact (`[context]`).
+    pub context: harness_runtime::ContextSettings,
 }
 
 /// Which session to drive.
@@ -80,6 +83,9 @@ pub enum Action {
     Cancel(TaskId),
     /// Restore the files changed by the last turn.
     Undo,
+    /// Fork the session after an event (its last one when `None`), then
+    /// compact the fork into its own segment (ADR-047).
+    Fork(Option<Seq>),
 }
 
 /// Takes a session's lock; the guard is held until the run ends. Called before
@@ -152,6 +158,7 @@ pub async fn execute(
         },
         mode: options.mode,
         full_access: options.full_access,
+        context: options.context.clone(),
         max_turns: options.max_turns,
         output_cap_tokens: options.output_cap_tokens,
         max_parallel_tools: options.max_parallel_tools,
@@ -159,7 +166,9 @@ pub async fn execute(
     };
     // Another process must not recover or run the same session meanwhile.
     let mut guard = None;
-    if let Target::Existing(id) = target {
+    let forking = matches!(action, Action::Fork(_));
+    // A fork only reads its parent, so the parent is not locked.
+    if let (Target::Existing(id), false) = (target, forking) {
         match locker(id) {
             Ok(g) => guard = Some(g),
             Err(e) => {
@@ -168,8 +177,32 @@ pub async fn execute(
             }
         }
     }
-    let opened = match target {
-        Target::New => spawn_session(deps, config).await.map(|(h, rx)| {
+    let mut fork: Option<(Seq, bool)> = None;
+    let opened = match (target, &action) {
+        (Target::Existing(parent), Action::Fork(at)) => {
+            let at = match at {
+                Some(at) => *at,
+                None => deps
+                    .log
+                    .last_seq(parent)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(Seq(0)),
+            };
+            fork_session(deps, config, parent, at).await.map(|f| {
+                fork = Some((f.at, f.needs_compaction));
+                (
+                    f.handle,
+                    f.events,
+                    Resumed {
+                        paused: None,
+                        recovered: false,
+                    },
+                )
+            })
+        }
+        (Target::New, _) => spawn_session(deps, config).await.map(|(h, rx)| {
             (
                 h,
                 rx,
@@ -179,7 +212,7 @@ pub async fn execute(
                 },
             )
         }),
-        Target::Existing(id) => resume_session(deps, config, id).await,
+        (Target::Existing(id), _) => resume_session(deps, config, id).await,
     };
     let (handle, mut events, resumed) = match opened {
         Ok(opened) => opened,
@@ -237,6 +270,24 @@ pub async fn execute(
             )?;
             let _ = handle.send(Op::Shutdown).await;
             return Ok(exit::OK);
+        }
+        (Action::Fork(_), _) => {
+            let (at, needs_compaction) = fork.unwrap_or((Seq(0), false));
+            if !needs_compaction {
+                writeln!(io.err, "forked session {session} after event #{}", at.0)?;
+                let _ = handle.send(Op::Shutdown).await;
+                handle.closed().await;
+                return Ok(exit::OK);
+            }
+            writeln!(
+                io.err,
+                "forked session {session} after event #{}; compacting the conversation up to there…",
+                at.0
+            )?;
+            Op::Compact {
+                session,
+                focus: None,
+            }
         }
         (Action::Undo, _) => {
             let code = undo(&handle, &mut events, &mut renderer, io).await?;
@@ -497,7 +548,7 @@ pub async fn run_session(
 mod tests {
     use super::*;
     use crate::render::exit;
-    use harness_ports::{SystemClock, ToolRegistry};
+    use harness_ports::{SessionStore as _, SystemClock, ToolRegistry};
     use harness_testkit::FakeProvider;
     use harness_tools::{MemoryReadLedger, Unsandboxed};
     use serde_json::json;
@@ -551,15 +602,9 @@ mod tests {
         .unwrap()
     }
 
-    async fn run(
-        fake: FakeProvider,
-        approval: ApprovalArg,
-        json: bool,
-        answers: &str,
-        dir: &std::path::Path,
-    ) -> (u8, Outputs) {
+    fn test_deps(fake: FakeProvider, approval: ApprovalArg, dir: &std::path::Path) -> RuntimeDeps {
         let store = Arc::new(harness_store_sqlite::SqliteStore::open(dir).unwrap());
-        let deps = RuntimeDeps {
+        RuntimeDeps {
             provider: Arc::new(fake),
             tools: harness_tools::builtin_registry().unwrap_or_else(|_| ToolRegistry::new()),
             clock: Arc::new(SystemClock),
@@ -570,15 +615,12 @@ mod tests {
             log: Arc::clone(&store) as _,
             sessions: Arc::clone(&store) as _,
             snapshots: Arc::clone(&store) as _,
-        };
-        let (out, err) = (Buffer::default(), Buffer::default());
-        let mut io = Io {
-            out: Box::new(out.clone()),
-            err: Box::new(err.clone()),
-            input: Box::new(std::io::Cursor::new(answers.as_bytes().to_vec())),
-            echo_input: true,
-        };
-        let options = RunOptions {
+            models: None,
+        }
+    }
+
+    fn test_options(json: bool, approval: ApprovalArg, dir: &std::path::Path) -> RunOptions {
+        RunOptions {
             json,
             max_turns: 10,
             output_cap_tokens: 2_000,
@@ -589,10 +631,32 @@ mod tests {
             mode: Mode::Auto,
             mode_given: false,
             full_access: false,
+            context: harness_runtime::ContextSettings::default(),
+        }
+    }
+
+    fn test_io(answers: &str) -> (Io, Outputs) {
+        let (out, err) = (Buffer::default(), Buffer::default());
+        let io = Io {
+            out: Box::new(out.clone()),
+            err: Box::new(err.clone()),
+            input: Box::new(std::io::Cursor::new(answers.as_bytes().to_vec())),
+            echo_input: true,
         };
+        (io, Outputs { out, err })
+    }
+
+    async fn run(
+        fake: FakeProvider,
+        approval: ApprovalArg,
+        json: bool,
+        answers: &str,
+        dir: &std::path::Path,
+    ) -> (u8, Outputs) {
+        let (mut io, outputs) = test_io(answers);
         let code = run_session(
-            options,
-            deps,
+            test_options(json, approval, dir),
+            test_deps(fake, approval, dir),
             harness_context::builtin_default(),
             "go".into(),
             &mut io,
@@ -600,7 +664,56 @@ mod tests {
         )
         .await
         .unwrap();
-        (code, Outputs { out, err })
+        (code, outputs)
+    }
+
+    #[tokio::test]
+    async fn forking_creates_a_new_session_and_compacts_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (code, _) = run(
+            FakeProvider::new().with_text_turn("noted"),
+            ApprovalArg::OnRequest,
+            false,
+            "",
+            dir.path(),
+        )
+        .await;
+        assert_eq!(code, exit::OK);
+        let store = harness_store_sqlite::SqliteStore::open(dir.path()).unwrap();
+        let parent = store.sessions().await.unwrap()[0].id;
+        let summary = json!({
+            "goal": "g", "state_of_work": "s", "decisions": [], "pinned": [],
+            "superseded_pins": [], "files_touched": [], "open_questions": [], "next_steps": [],
+            "anchors": []
+        });
+        let (mut io, o) = test_io("");
+        let no_lock = |_: SessionId| Ok(Box::new(()) as Box<dyn std::any::Any + Send>);
+        let code = execute(
+            &test_options(false, ApprovalArg::OnRequest, dir.path()),
+            test_deps(
+                FakeProvider::new().with_text_turn(&summary.to_string()),
+                ApprovalArg::OnRequest,
+                dir.path(),
+            ),
+            harness_context::builtin_default(),
+            Target::Existing(parent),
+            Action::Fork(None),
+            &no_lock,
+            &mut io,
+            Arc::new(Notify::new()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, exit::OK, "{}", o.err.text());
+        assert!(o.err.text().contains("forked session"), "{}", o.err.text());
+        assert!(
+            o.err.text().contains("◇ compacted segment 0 → 1"),
+            "{}",
+            o.err.text()
+        );
+        let sessions = store.sessions().await.unwrap();
+        let fork = sessions.iter().find(|s| s.parent == Some(parent)).unwrap();
+        assert!(fork.forked_at.is_some());
     }
 
     #[tokio::test]

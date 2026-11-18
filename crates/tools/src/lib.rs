@@ -9,6 +9,8 @@
 //!   (parser and planner in [`patch`])
 //! - [`Glob`] (`glob`), [`Grep`] (`grep`): gitignore-aware search on the ripgrep libraries
 //! - [`Todo`] (`todo`): the model's checklist; [`AskUser`] (`ask_user`): ask the user
+//! - [`Recall`] (`recall`): earlier events by anchor, event range or search, in
+//!   token-bounded pages (FR-CTX-04)
 //! - [`ProposePlan`] (`propose_plan`): in plan mode, ask the user to approve a plan
 //!   and leave plan mode when they do (ADR-042)
 //! - [`PtyStart`], [`PtyWrite`], [`PtyRead`], [`PtyKill`]: interactive programs on
@@ -34,7 +36,8 @@
 //!     names,
 //!     [
 //!         "apply_patch", "ask_user", "edit_file", "glob", "grep", "propose_plan", "pty_kill",
-//!         "pty_read", "pty_start", "pty_write", "read_file", "shell", "todo", "write_file"
+//!         "pty_read", "pty_start", "pty_write", "read_file", "recall", "shell", "todo",
+//!         "write_file"
 //!     ]
 //! );
 //! ```
@@ -50,6 +53,7 @@ pub mod patch;
 mod propose_plan;
 mod pty;
 mod read_file;
+mod recall;
 mod shell;
 mod support;
 mod todo;
@@ -70,6 +74,7 @@ pub use pty::{
     PtyWrite, pty_tools,
 };
 pub use read_file::{MAX_LINE_CHARS, MAX_LINES, ReadFile};
+pub use recall::{DEFAULT_RECALL_TOKENS, MAX_RECALL_TOKENS, Recall};
 pub use shell::{DEFAULT_TIMEOUT_S, MAX_KEPT_BYTES, MAX_TIMEOUT_S, Shell};
 pub use support::{MemoryBlobStore, MemoryReadLedger, Unsandboxed, stamp_of};
 pub use todo::Todo;
@@ -97,6 +102,7 @@ pub fn builtin_registry() -> Result<ToolRegistry, DuplicateTool> {
     registry.register(Arc::new(Todo))?;
     registry.register(Arc::new(AskUser))?;
     registry.register(Arc::new(ProposePlan))?;
+    registry.register(Arc::new(Recall))?;
     for tool in pty_tools(&Arc::new(PtyManager::default())) {
         registry.register(tool)?;
     }
@@ -133,6 +139,7 @@ pub(crate) mod test_support {
             user: Arc::new(harness_ports::NoUser),
             snapshots: Arc::new(harness_ports::NoSnapshots),
             mode: Arc::new(harness_ports::FixedMode(harness_types::Mode::Auto)),
+            history: Arc::new(harness_ports::NoHistory),
         };
         (ctx, sink, ledger)
     }

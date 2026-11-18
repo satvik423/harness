@@ -9,11 +9,11 @@ The terminal UI (Phase 4, Tech spec 3.16), built purely on the session event str
 | Item | Purpose |
 |---|---|
 | `run(backend, attached, TuiOptions)` | Runs the terminal loop: raw mode, alternate screen, bracketed paste, focus events; restores the terminal on exit and on panic |
-| `Backend` | What the TUI needs: `send(Op)`, `tasks()`, `changes()`, `new_session(model, effort)`, `sessions()`, `open_session(id)`, `models()` |
+| `Backend` | What the TUI needs: `send(Op)`, `tasks()`, `changes()`, `new_session(model, effort)`, `sessions()`, `open_session(id)`, `fork(at)`, `recall(selector)`, `models()` |
 | `Attached`, `SessionView`, `ChangedFile`, `SessionSummary` | A session to show: its view (id, persona, model, effort, permission mode, whether `full` is allowed, context limit, priced), live events, stored history and the project's earlier prompts; a stored session as `/sessions` lists it |
 | `App` | All state and transitions, free of I/O: `apply(&Envelope) -> Vec<Effect>`, `key(KeyEvent) -> Vec<Action>`, `mouse(MouseEvent)`, `paste(&str)`, `command(Slash)`, `hint_last_session` |
 | `Overlay`, `Pick` | A panel over the transcript; pickers (`/sessions`, `/model`, `/mode`) carry one `Action` per pickable line |
-| `view` | Drawing, plus overlays (`help`, `cost`, `context`, `tasks`, `diff`, `models`, `modes`, `sessions`) |
+| `view` | Drawing, plus overlays (`help`, `cost`, `context`, `tasks`, `diff`, `models`, `modes`, `anchors`, `sessions`) |
 | `markdown::render` | Markdown to styled lines (pulldown-cmark; code blocks highlighted with syntect) |
 | `diff::unified`, `diff::patch_lines` | Unified diffs (similar) and coloured patches |
 | `ledger` | Token and cost totals per turn, task and session; `tokens`, `money` formatting |
@@ -67,3 +67,9 @@ you › fix the login test
   for the decision. `/clear` and `/model` carry the current mode into the new session.
 - **Approval descriptions (ADR-043).** The panel shows the model's `summary` in bold
   above the policy's reason, which names the exact command or files.
+- **Compaction (Phase 5).** `CompactionStarted` and `Compacted` show as notices. The
+  app keeps the anchors (`/recall` lists them), and the context meter shows the new
+  segment's estimate until the next reply reports real usage. `/recall aN|words`
+  fetches through the backend and queues the events (↺) for the next message.
+  `/model` and `/effort` send `SwitchModel` after a yes, and the header follows
+  `ModelSwitched`. `/fork` attaches the new fork.

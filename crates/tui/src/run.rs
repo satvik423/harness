@@ -260,6 +260,34 @@ async fn perform(
                 Err(e) => failed(app, format!("could not open session {id}: {e}")),
             }
         }
+        Action::Fork(at) => {
+            let from = app.view.id;
+            match backend.fork(at).await {
+                Ok(attached) => {
+                    app.attach(&attached);
+                    *events = attached.events;
+                    *events_open = true;
+                    app.items.push(crate::app::Item::Notice {
+                        level: Level::Info,
+                        text: format!("forked from session {from}; this is the new session"),
+                    });
+                }
+                Err(e) => failed(app, format!("could not fork: {e}")),
+            }
+        }
+        Action::Recall(selector) => match backend.recall(selector).await {
+            Ok(recollection) => {
+                app.attach_recall(&recollection);
+                app.items.push(crate::app::Item::Notice {
+                    level: Level::Info,
+                    text: format!(
+                        "↺ {} will go with your next message (Esc removes it)",
+                        recollection.label
+                    ),
+                });
+            }
+            Err(e) => failed(app, format!("recall: {e}")),
+        },
         Action::Command(Slash::Sessions) => match backend.sessions().await {
             Ok(sessions) => app.overlay = Some(view::sessions_overlay(app, &sessions, now_ms())),
             Err(e) => failed(app, e),
@@ -279,14 +307,12 @@ async fn perform(
             let current = app
                 .view
                 .effort
-                .map_or_else(|| "default".to_owned(), |e| format!("{e:?}").to_lowercase());
-            let next = app
-                .next
-                .effort
-                .map_or_else(|| "default".to_owned(), |e| format!("{e:?}").to_lowercase());
+                .map_or_else(|| "default".to_owned(), |e| e.name().to_owned());
             app.items.push(crate::app::Item::Notice {
                 level: Level::Info,
-                text: format!("effort: {current} (next session: {next}); pick with /effort low|medium|high|xhigh|max"),
+                text: format!(
+                    "effort: {current}; change it with /effort low|medium|high|xhigh|max"
+                ),
             });
         }
         Action::Command(other) => {

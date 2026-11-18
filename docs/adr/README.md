@@ -47,3 +47,7 @@ Each record states the context, the decision and its consequences. Records 0001â
 | [ADR-041](0041-deleting-sessions.md) | Deleting sessions, and empty sessions left by the TUI | Accepted |
 | [ADR-042](0042-switchable-permission-modes.md) | Permission modes switch while a session runs; plan mode and `propose_plan` (user decision) | Accepted |
 | [ADR-043](0043-approval-descriptions.md) | Approvals show a one-line description written by the model, next to the exact command | Accepted |
+| [ADR-044](0044-structured-output-in-phase-5.md) | JSON-schema structured output arrives in Phase 5, for compaction (user decision) | Accepted |
+| [ADR-045](0045-compaction-record-in-the-log.md) | The validated compaction record travels in `Compacted`; the store projects anchors and pins | Accepted |
+| [ADR-046](0046-model-and-effort-switch-via-compaction.md) | `/model` and `/effort` switch inside a session through compaction (updates ADR-038; user decision) | Accepted |
+| [ADR-047](0047-fork-reads-through-the-parent.md) | A fork reads its parent in place and starts from a compaction | Accepted |

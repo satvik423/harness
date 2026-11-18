@@ -287,6 +287,25 @@ pub fn event_line(e: &LoggedEvent) -> String {
         Event::Warning { message, .. } | Event::Error { message, .. } => shorten(message, 80),
         Event::UndoApplied { paths, .. } => paths.join(", "),
         Event::ModeChanged { from, to, .. } => format!("{from} → {to}"),
+        Event::Compacted {
+            from_segment,
+            to_segment,
+            anchors,
+            before,
+            after,
+            record,
+        } => format!(
+            "segment {from_segment} → {to_segment} · {anchors} anchors · {} pins · {before} → {after} tokens",
+            record
+                .pins
+                .iter()
+                .filter(|p| p.superseded_by.is_none())
+                .count()
+        ),
+        Event::Recalled { anchor, tokens, .. } => match anchor {
+            Some(a) => format!("{a} · {tokens} tokens"),
+            None => format!("{tokens} tokens"),
+        },
         Event::SystemNote { text, .. } => shorten(text, 80),
         _ => String::new(),
     };

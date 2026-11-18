@@ -238,6 +238,12 @@ pub fn harness_rules() -> Vec<LayerRule> {
             krate: "harness-cli",
             allowed: Allowed::AllExcept(&["harness-testkit"]),
         },
+        // An offline/live eval runner (Phase 5): wires like cli and checks the
+        // log with the testkit's invariant checks; never a front-end.
+        LayerRule {
+            krate: "harness-evals",
+            allowed: Allowed::AllExcept(&["harness-tui"]),
+        },
     ]
 }
 

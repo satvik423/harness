@@ -150,6 +150,7 @@ fn deps(store: &Arc<SqliteStore>, fake: &FakeProvider) -> RuntimeDeps {
         log: Arc::clone(store) as _,
         sessions: Arc::clone(store) as _,
         snapshots: Arc::clone(store) as _,
+        models: None,
     }
 }
 
@@ -160,6 +161,7 @@ fn config(dir: &Path) -> SessionConfig {
         approval: ApprovalMode::Ask,
         mode: Mode::Auto,
         full_access: false,
+        context: harness_runtime::ContextSettings::default(),
         max_turns: 50,
         output_cap_tokens: 2_000,
         max_parallel_tools: 4,

@@ -9,7 +9,7 @@ The full product plan (PRD, design, technical spec, phase plan, guardrails) is
 | [architecture/](architecture/overview.md) | How the crates fit together and which dependency directions are allowed |
 | [crates/](crates/) | One page per crate: purpose, public API, examples, design notes |
 | [adr/](adr/README.md) | Architecture decision records |
-| [guides/](guides/) | User guides: [running](guides/running.md), [terminal UI](guides/tui.md), [sessions](guides/sessions.md), [configuration](guides/configuration.md), [permissions](guides/permissions.md) |
+| [guides/](guides/) | User guides: [running](guides/running.md), [terminal UI](guides/tui.md), [sessions](guides/sessions.md), [configuration](guides/configuration.md), [permissions](guides/permissions.md), [long sessions](guides/context.md) |
 | [phases/](phases/) | One report per completed phase |
 
 ## Crates
@@ -30,6 +30,7 @@ The full product plan (PRD, design, technical spec, phase plan, guardrails) is
 | `harness-testkit` | [testkit](crates/testkit.md) | dev-only test support |
 | `harness-tui` | [tui](crates/tui.md) | L1 front-end: the terminal UI |
 | `harness-cli` | [cli](crates/cli.md) | L1 front-end, the `harness` binary |
+| `harness-evals` | [evals](crates/evals.md) | the `harness-evals` binary: context-engine evals (not published) |
 
 ## Building and checking
 

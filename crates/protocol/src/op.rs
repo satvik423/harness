@@ -2,7 +2,9 @@
 
 use std::path::PathBuf;
 
-use harness_types::{ApprovalId, BlobRef, Mode, QuestionId, Seq, SessionId, TaskId};
+use harness_types::{
+    ApprovalId, BlobRef, Effort, Mode, ModelRef, QuestionId, Seq, SessionId, TaskId,
+};
 use serde::{Deserialize, Serialize};
 
 /// A request sent into the core by a front-end (TUI, CLI, JSON-RPC server, tests).
@@ -89,6 +91,16 @@ pub enum Op {
     Undo {
         /// Target session.
         session: SessionId,
+    },
+    /// Continue the session with another model or effort (`/model`, `/effort`;
+    /// ADR-046): the conversation is compacted into a new segment that uses them.
+    SwitchModel {
+        /// Target session.
+        session: SessionId,
+        /// The model for the new segment.
+        model: ModelRef,
+        /// The effort for the new segment (`None`: the model's default).
+        effort: Option<Effort>,
     },
     /// Switch the session's permission mode (Shift+Tab, `/mode`; ADR-042).
     SetMode {
@@ -225,6 +237,11 @@ mod tests {
             Op::SetMode {
                 session: s,
                 mode: Mode::Plan,
+            },
+            Op::SwitchModel {
+                session: s,
+                model: "openai/gpt-6-luna".parse().unwrap(),
+                effort: Some(Effort::High),
             },
             Op::Shutdown,
         ]

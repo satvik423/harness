@@ -1,12 +1,13 @@
 //! [`Event`]: everything the core reports, and the [`Envelope`] that orders it.
 
 use harness_types::{
-    ApprovalId, BlobRef, ContentBlock, Message, Mode, QuestionId, Risk, Seq, SessionId, StopReason,
-    TaskId, Usage,
+    ApprovalId, BlobRef, ContentBlock, Effort, Message, Mode, ModelRef, QuestionId, Risk, Seq,
+    SessionId, StopReason, TaskId, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::compaction::CompactionRecord;
 use crate::op::Decision;
 
 /// An [`Event`] with its position in the session's log.
@@ -285,6 +286,10 @@ pub enum Event {
         before: u64,
         /// Estimated context tokens after.
         after: u64,
+        /// The validated summary, pinned facts and anchors (ADR-045). Replay
+        /// rebuilds the session's pins and anchors from it, and the store keeps
+        /// its `anchors` and `pinned_facts` tables from it.
+        record: Box<CompactionRecord>,
     },
     /// A new segment was opened with this opener message.
     SegmentOpened {
@@ -314,6 +319,14 @@ pub enum Event {
         child: TaskId,
         /// Child persona.
         persona: String,
+    },
+    /// The session continues with another model or effort (ADR-046), from the
+    /// segment opened next (or the first one, if none is open yet).
+    ModelSwitched {
+        /// The model now used.
+        model: ModelRef,
+        /// The effort now used (`None`: the model's default).
+        effort: Option<Effort>,
     },
     /// The session's permission mode was switched (ADR-042).
     ModeChanged {
@@ -396,6 +409,7 @@ impl Event {
             Self::Recalled { .. } => "recalled",
             Self::SubagentSpawned { .. } => "subagent_spawned",
             Self::ModeChanged { .. } => "mode_changed",
+            Self::ModelSwitched { .. } => "model_switched",
             Self::UndoApplied { .. } => "undo_applied",
             Self::Usage { .. } => "usage",
             Self::Warning { .. } => "warning",
@@ -519,6 +533,33 @@ mod tests {
                 anchors: 3,
                 before: 900,
                 after: 90,
+                record: Box::new(CompactionRecord {
+                    segment: 0,
+                    from: Seq(1),
+                    to: Seq(40),
+                    goal: "g".into(),
+                    state_of_work: "s".into(),
+                    decisions: vec![],
+                    pins: vec![crate::PinnedFact {
+                        id: 1,
+                        quote: "q".into(),
+                        seq: Seq(3),
+                        kind: crate::PinKind::Id,
+                        superseded_by: None,
+                    }],
+                    files_touched: vec![],
+                    open_questions: vec![],
+                    next_steps: vec![],
+                    anchors: vec![crate::Anchor {
+                        id: "a1".into(),
+                        segment: 0,
+                        from: Seq(1),
+                        to: Seq(40),
+                        topic: "t".into(),
+                        has: vec![],
+                        tokens: 10,
+                    }],
+                }),
             },
             Event::SegmentOpened {
                 segment: 1,
@@ -534,6 +575,10 @@ mod tests {
                 parent: t,
                 child: TaskId::new(),
                 persona: "reader".into(),
+            },
+            Event::ModelSwitched {
+                model: "anthropic/claude-opus-5-5".parse().unwrap(),
+                effort: None,
             },
             Event::ModeChanged {
                 from: Mode::Auto,

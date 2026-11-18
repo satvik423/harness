@@ -19,7 +19,10 @@
 #![deny(missing_docs)]
 
 mod approval;
+mod compact;
+mod history;
 mod journal;
+mod memory;
 mod mode;
 mod pricing;
 mod replay;
@@ -29,8 +32,11 @@ mod turn;
 mod user;
 
 pub use approval::ApprovalMode;
+pub use history::recall;
+pub use memory::ContextSettings;
 pub use pricing::ModelPrice;
-pub use replay::{OUTCOME_UNKNOWN, request_history};
+pub use replay::{OUTCOME_UNKNOWN, RecordedRequest, request_history};
 pub use session::{
-    Resumed, RuntimeDeps, RuntimeError, SessionConfig, SessionHandle, resume_session, spawn_session,
+    Forked, ModelSource, Resumed, RuntimeDeps, RuntimeError, SessionConfig, SessionHandle,
+    fork_session, resume_session, spawn_session,
 };

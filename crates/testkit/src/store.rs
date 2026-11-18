@@ -69,6 +69,40 @@ impl MemoryStore {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// The events a session reads: a fork's parent's up to the fork point
+    /// (recursively), then its own (ADR-047).
+    fn visible(&self, session: SessionId) -> Vec<LoggedEvent> {
+        let inner = self.lock();
+        let mut chain = vec![(session, u64::MAX)];
+        let mut current = session;
+        while let Some(record) = inner.sessions.iter().find(|s| s.id == current) {
+            match (record.parent, record.forked_at) {
+                (Some(parent), Some(at)) => {
+                    chain.push((parent, at.0));
+                    current = parent;
+                }
+                _ => break,
+            }
+        }
+        chain.reverse();
+        let mut out = Vec::new();
+        let mut low = 1;
+        // Each ancestor's slice ends where its child was forked off it.
+        for &(owner, high) in &chain {
+            out.extend(
+                inner
+                    .events
+                    .get(&owner)
+                    .into_iter()
+                    .flatten()
+                    .filter(|e| e.envelope.seq.0 >= low && e.envelope.seq.0 <= high)
+                    .cloned(),
+            );
+            low = high.saturating_add(1);
+        }
+        out
+    }
+
     /// Every event of a session, in order (for assertions).
     #[must_use]
     pub fn events(&self, session: SessionId) -> Vec<LoggedEvent> {
@@ -92,8 +126,12 @@ impl EventLog for MemoryStore {
         let Some(record) = inner.sessions.iter().find(|s| s.id == session).cloned() else {
             return Err(StoreError::NotFound(format!("session {session}")));
         };
+        let fork_point = record.forked_at.unwrap_or(Seq(0));
         let events = inner.events.entry(session).or_default();
-        let expected = events.last().map_or(Seq::FIRST, |e| e.envelope.seq.next());
+        let expected = events
+            .last()
+            .map_or(fork_point, |e| e.envelope.seq.max(fork_point))
+            .next();
         if event.envelope.seq != expected {
             return Err(StoreError::Conflict(format!(
                 "expected sequence number {}, got {}",
@@ -132,12 +170,7 @@ impl EventLog for MemoryStore {
     }
 
     async fn last_seq(&self, session: SessionId) -> Result<Option<Seq>, StoreError> {
-        Ok(self
-            .lock()
-            .events
-            .get(&session)
-            .and_then(|e| e.last())
-            .map(|e| e.envelope.seq))
+        Ok(self.visible(session).last().map(|e| e.envelope.seq))
     }
 
     async fn range(
@@ -147,7 +180,7 @@ impl EventLog for MemoryStore {
         to: Seq,
     ) -> Result<Vec<LoggedEvent>, StoreError> {
         Ok(self
-            .events(session)
+            .visible(session)
             .into_iter()
             .filter(|e| e.envelope.seq >= from && e.envelope.seq <= to)
             .collect())
@@ -161,7 +194,7 @@ impl EventLog for MemoryStore {
     ) -> Result<Vec<SearchHit>, StoreError> {
         let needle = query.to_lowercase();
         Ok(self
-            .events(session)
+            .visible(session)
             .into_iter()
             .filter_map(|e| {
                 let text = serde_json::to_string(&e.envelope.event)

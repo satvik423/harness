@@ -93,21 +93,7 @@ pub struct Capabilities {
     pub native_context_editing: bool,
 }
 
-/// Reasoning effort level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Effort {
-    /// Least thinking; fastest and cheapest.
-    Low,
-    /// Moderate thinking.
-    Medium,
-    /// Thorough thinking.
-    High,
-    /// Very thorough thinking.
-    Xhigh,
-    /// Maximum thinking.
-    Max,
-}
+pub use harness_types::Effort;
 
 /// Which part of the frozen system prompt a [`SystemPart`] is (Tech spec 2.6, slots 1–6).
 ///

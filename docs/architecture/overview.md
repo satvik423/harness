@@ -36,9 +36,10 @@ forces a decision about its layer.
 | `harness-testkit` | types, protocol, ports |
 | `harness-tui` | types, protocol, ports, config |
 | `harness-cli` | anything except testkit |
+| `harness-evals` (binary, not published) | anything except tui |
 | adapters *(later)* | anything except runtime, context, front-ends, testkit (`arch::adapter`) |
 
-## Data flow (Phases 3–4)
+## Data flow (Phases 3–5)
 
 1. The CLI opens `.harness/state.db` (`SqliteStore`), builds the provider and the
    policy, and builds `RuntimeDeps` (provider, tools, store as event log, blob store,
@@ -56,6 +57,17 @@ forces a decision about its layer.
    TUI, which renders the same event stream and sends ops through its `Backend`
    (implemented in `cli`). Other terminals can leave pause, resume or cancel requests
    in the store.
+6. **Compaction (Phase 5).** Before each model call the turn engine estimates the
+   request size (`Budget`). When the next request would reach the threshold, at a
+   turn boundary or after a tool round, it compacts:
+   - `harness-context` renders the segment's events and builds the request;
+   - the provider returns the structured summary;
+   - `harness-context` validates it and writes the next opener;
+   - the runtime records `Compacted` (with the record) and opens the next segment
+     with `SegmentOpened`.
+
+   The `recall` tool reads history through the `History` port. Forks read their
+   parent's events through the store, without copying them.
 
 ## Cross-cutting rules already in code
 
