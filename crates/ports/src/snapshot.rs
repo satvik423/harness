@@ -75,4 +75,11 @@ pub trait SnapshotStore: Send + Sync {
     /// Returns a backend or I/O error; files restored before it stay restored,
     /// and a repeated undo finishes the job.
     async fn undo_last_turn(&self, session: SessionId) -> Result<Option<Undone>, StoreError>;
+
+    /// For each file the session changed (and has not undone), its state
+    /// before the session first changed it, sorted by path (for `/diff`).
+    ///
+    /// # Errors
+    /// Returns a backend error if the lookup fails.
+    async fn session_snapshots(&self, session: SessionId) -> Result<Vec<Snapshot>, StoreError>;
 }

@@ -15,6 +15,8 @@ context only (ADR-001, ADR-016).
 | `ApprovalMode` | `Ask` (someone can answer prompts) or `Never` (headless: asks become denials, `ask_user` gets "no user available") |
 | `RuntimeError` | `Closed`, `NotFound`, `Store`, `Corrupt` |
 | `OUTCOME_UNKNOWN` | The result given to a call that was running when harness stopped |
+| `ModelPrice` | Price per million tokens; `SessionConfig.price` fills `Usage.cost_micros` (ADR-040) |
+| `request_history(log, blobs, session)` | The `ModelRequest` at each `TurnStarted`, rebuilt from the log (for `harness debug`) |
 
 ## The loop (one task)
 
@@ -65,6 +67,8 @@ context only (ADR-001, ADR-016).
   session store every 250 ms (ADR-031).
 - **Undo:** restores the last turn's snapshotted files, records `UndoApplied` and a
   `SystemNote` sent with the next user message (ADR-034).
+- **Attachments:** `InputItem::File` becomes a reference note in the user message
+  (path, size, kind; ADR-039).
 - **New input while paused** supersedes the paused task (cancelled, its open calls
   answered) (ADR-036).
 `Pause`, `Resume`, `Compact`, `SwitchPersona`, `Fork`, `CreateSession` and

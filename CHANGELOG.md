@@ -3,6 +3,18 @@
 All notable changes to harness. Versions follow the release plan in
 `building-harness.html` (Part 1.10 and the phase plan).
 
+## Unreleased (Phase 4)
+
+- **Terminal UI:** `harness` opens it; `harness --session ID` reopens a session with its
+  history. Streaming Markdown with highlighted code, tool cards with live output and
+  diffs, approval panel with diff previews and shortcuts, questions, file attachments by
+  paste or drag, slash commands (`/help /model /effort /pause /resume /tasks /diff /undo
+  /clear /cost /context /quit`), status bar with context, cache, cost and task state, and
+  a notification when the terminal is in the background.
+- **Costs** per turn, task and session from the `[pricing]` table.
+- **`harness debug last-request` and `diff-requests`:** the exact request bodies and
+  the append-only check.
+
 ## 0.1.0 — "It works" (2026-11-18)
 
 The first release: a durable, headless coding agent.

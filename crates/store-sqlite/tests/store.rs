@@ -431,6 +431,18 @@ async fn undo_restores_the_last_turn_then_the_one_before() {
     std::fs::create_dir_all(created.parent().unwrap()).unwrap();
     std::fs::write(&created, "new").unwrap();
 
+    // /diff sees each file's state before the session first touched it.
+    let first = store.session_snapshots(id).await.unwrap();
+    assert_eq!(first.len(), 2);
+    assert_eq!(
+        first.iter().find(|s| s.path == file).unwrap().before,
+        Some(v1)
+    );
+    assert_eq!(
+        first.iter().find(|s| s.path == created).unwrap().before,
+        None
+    );
+
     let undone = store.undo_last_turn(id).await.unwrap().unwrap();
     assert_eq!(undone.turn, Seq(20));
     assert_eq!(undone.paths.len(), 2);

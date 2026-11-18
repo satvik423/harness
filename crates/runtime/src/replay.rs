@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use harness_context::{SegmentContext, SegmentFrame};
-use harness_ports::{BlobStore, EventLog};
+use harness_ports::{BlobStore, EventLog, ModelRequest};
 use harness_protocol::{BlobOrText, Event, TaskState};
 use harness_types::{ContentBlock, Seq, SessionId, TaskId};
 
@@ -50,6 +50,36 @@ pub(crate) async fn rebuild(
     log: &dyn EventLog,
     blobs: &dyn BlobStore,
     session: SessionId,
+) -> Result<Rebuilt, RuntimeError> {
+    replay(log, blobs, session, &mut |_, _| {}).await
+}
+
+/// The model request sent at each turn of a session's current segment,
+/// rebuilt from the log (for `harness debug last-request` and
+/// `diff-requests`). Each is paired with its `TurnStarted` sequence number.
+///
+/// # Errors
+/// As for resuming: [`RuntimeError::Store`] or [`RuntimeError::Corrupt`].
+pub async fn request_history(
+    log: &dyn EventLog,
+    blobs: &dyn BlobStore,
+    session: SessionId,
+) -> Result<Vec<(Seq, ModelRequest)>, RuntimeError> {
+    let mut requests = Vec::new();
+    replay(log, blobs, session, &mut |seq, segment| {
+        requests.push((seq, segment.request()));
+    })
+    .await?;
+    Ok(requests)
+}
+
+/// Replays the log, calling `on_turn` with the segment as it stood at each
+/// `TurnStarted` (that is the request the model received).
+async fn replay(
+    log: &dyn EventLog,
+    blobs: &dyn BlobStore,
+    session: SessionId,
+    on_turn: &mut (dyn FnMut(Seq, &SegmentContext) + Send),
 ) -> Result<Rebuilt, RuntimeError> {
     let events = log.range(session, Seq::FIRST, Seq(u64::MAX)).await?;
     let mut out = Rebuilt {
@@ -109,6 +139,11 @@ pub(crate) async fn rebuild(
                     );
                 }
                 close_round_if_answered(&mut out, seq)?;
+            }
+            Event::TurnStarted { .. } => {
+                if let Some(segment) = &out.segment {
+                    on_turn(seq, segment);
+                }
             }
             Event::TaskState { task, to, .. } => {
                 if out.task.is_none_or(|(t, _)| t != task) {

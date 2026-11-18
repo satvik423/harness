@@ -1,0 +1,24 @@
+---
+source: crates/tui/src/view.rs
+expression: "screen(&sample(), 80, 20)"
+---
+ harness  default · openai/gpt-6-luna · high · seg 0 · auto
+
+you › fix the login test
+      📎  spec.md
+The check used < instead of <=.
+▸ edit_file src/auth.rs ⠋ (+1 −1)
+    - x < y
+    + x <= y
+
+
+
+┌ Approve? ────────────────────────────────────────────────────────────────────┐
+│write src/auth.rs                                                             │
+│    - x < y                                                                   │
+│    + x <= y                                                                  │
+└ [o]nce  [s]ession  [a]lways  [p]roject  [d]eny ──────────────────────────────┘
+┌ › ───────────────────────────────────────────────────────────────────────────┐
+│ Ask anything · /help for commands · Alt+Enter for a new line                 │
+└──────────────────────────────────────────────────────────────────────────────┘
+ 41.5k/250.0k ctx · cache 97% · $0.42 · task waiting for you · Esc interrupt · ^

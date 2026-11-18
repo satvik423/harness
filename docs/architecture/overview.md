@@ -34,10 +34,11 @@ forces a decision about its layer.
 | `harness-runtime` | types, protocol, ports, context |
 | `harness-tools`, `harness-provider-anthropic`, `harness-provider-openai`, `harness-policy`, `harness-store-sqlite` | anything except runtime, context, front-ends, testkit (`arch::adapter`) |
 | `harness-testkit` | types, protocol, ports |
+| `harness-tui` | types, protocol, ports, config |
 | `harness-cli` | anything except testkit |
 | adapters *(later)* | anything except runtime, context, front-ends, testkit (`arch::adapter`) |
 
-## Data flow (Phase 3)
+## Data flow (Phases 3–4)
 
 1. The CLI opens `.harness/state.db` (`SqliteStore`), builds the provider and the
    policy, and builds `RuntimeDeps` (provider, tools, store as event log, blob store,
@@ -51,8 +52,10 @@ forces a decision about its layer.
    `dyn Policy`, snapshots files before tools write them, runs the calls (parallel-safe
    reads together), caps each result once, and appends every message through
    `SegmentContext` (I1, I2). Pause requests take effect at safe points.
-5. The CLI renders events, answers prompts from stdin, and other terminals can leave
-   pause, resume or cancel requests in the store.
+5. `harness run` renders events and answers prompts from stdin; `harness` opens the
+   TUI, which renders the same event stream and sends ops through its `Backend`
+   (implemented in `cli`). Other terminals can leave pause, resume or cancel requests
+   in the store.
 
 ## Cross-cutting rules already in code
 

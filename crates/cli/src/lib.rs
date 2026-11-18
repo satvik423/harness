@@ -11,6 +11,8 @@
 //! - [`secrets`]: API keys from the keyring or environment
 //! - [`wiring`]: the provider for the chosen model and the policy engine
 //! - [`telemetry`]: file logging filtered by `HARNESS_LOG`
+//! - [`tui`]: the terminal UI's backend over the runtime and store; [`factory`]:
+//!   building session dependencies; [`debug`]: request bodies and the append-only diff
 //!
 //! # Example
 //! ```
@@ -20,10 +22,13 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod debug;
+pub mod factory;
 pub mod prompt;
 pub mod render;
 pub mod run;
 pub mod secrets;
 pub mod sessions;
 pub mod telemetry;
+pub mod tui;
 pub mod wiring;

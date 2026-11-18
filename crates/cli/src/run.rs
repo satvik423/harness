@@ -47,6 +47,8 @@ pub struct RunOptions {
     pub max_parallel_tools: usize,
     /// The effective approval policy (from the profile or `--approval`).
     pub approval: ApprovalArg,
+    /// The session model's price, from the config's pricing table.
+    pub price: Option<harness_runtime::ModelPrice>,
     /// Working directory.
     pub cwd: PathBuf,
 }
@@ -144,6 +146,7 @@ pub async fn execute(
         max_turns: options.max_turns,
         output_cap_tokens: options.output_cap_tokens,
         max_parallel_tools: options.max_parallel_tools,
+        price: options.price,
     };
     // Another process must not recover or run the same session meanwhile.
     let mut guard = None;
@@ -559,6 +562,7 @@ mod tests {
             output_cap_tokens: 2_000,
             max_parallel_tools: 4,
             approval,
+            price: None,
             cwd: dir.to_path_buf(),
         };
         let code = run_session(

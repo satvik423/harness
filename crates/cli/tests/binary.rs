@@ -223,6 +223,7 @@ mod stored {
                     task,
                     message: segment.messages()[0].clone(),
                 },
+                Event::TurnStarted { task, turn: 1 },
                 Event::AssistantMessage {
                     task,
                     message: assistant,
@@ -300,7 +301,7 @@ fn stored_sessions_can_be_listed_shown_and_exported_by_prefix() {
     );
     assert!(export.status.success(), "{export:?}");
     let file = home.path().join(format!(".harness/exports/{id}.jsonl"));
-    assert_eq!(std::fs::read_to_string(file).unwrap().lines().count(), 7);
+    assert_eq!(std::fs::read_to_string(file).unwrap().lines().count(), 8);
 
     let tasks = run(home.path(), &["task", "list"], &[]);
     assert!(String::from_utf8_lossy(&tasks.stdout).contains(&task.to_string()));
@@ -350,4 +351,39 @@ fn unknown_or_ambiguous_ids_are_errors() {
     let out = run(home.path(), &["session", "show", "ZZZZ"], &[]);
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("no session starts with"));
+}
+
+// ---------- debug commands (P4-T8) ----------
+
+#[test]
+fn debug_last_request_prints_the_rebuilt_provider_body() {
+    let home = tempfile::tempdir().unwrap();
+    let (session, _) = stored::crashed_project(home.path());
+    let out = run(home.path(), &["debug", "last-request"], &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.starts_with(&format!("// session {session}")), "{text}");
+    assert!(
+        text.contains("\"model\": \"gpt-test\"") && text.contains("count the files"),
+        "{text}"
+    );
+    let out = run(home.path(), &["debug", "diff-requests"], &[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("fewer than two requests"));
+}
+
+#[test]
+fn bare_harness_without_a_terminal_explains_the_tui_needs_one() {
+    let home = tempfile::tempdir().unwrap();
+    let out = run(home.path(), &[], &[]);
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("Usage:") && text.contains("needs a terminal"),
+        "{text}"
+    );
 }

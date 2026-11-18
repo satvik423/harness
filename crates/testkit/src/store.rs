@@ -298,6 +298,28 @@ impl SnapshotStore for MemoryStore {
         }
         Ok(Some(Undone { turn, paths }))
     }
+
+    async fn session_snapshots(&self, session: SessionId) -> Result<Vec<Snapshot>, StoreError> {
+        Ok(self.first_snapshots(session))
+    }
+}
+
+impl MemoryStore {
+    fn first_snapshots(&self, session: SessionId) -> Vec<Snapshot> {
+        let inner = self.lock();
+        let mut first: BTreeMap<String, Snapshot> = BTreeMap::new();
+        for files in inner
+            .snapshots
+            .get(&session)
+            .into_iter()
+            .flat_map(BTreeMap::values)
+        {
+            for (path, snap) in files {
+                first.entry(path.clone()).or_insert_with(|| snap.clone());
+            }
+        }
+        first.into_values().collect()
+    }
 }
 
 #[async_trait]

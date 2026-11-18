@@ -128,6 +128,7 @@ impl Env {
             max_turns: 10,
             output_cap_tokens: 2_000,
             max_parallel_tools: 4,
+            price: None,
         }
     }
 
@@ -989,4 +990,122 @@ async fn a_task_whose_input_was_never_saved_is_failed_not_resumed() {
     )
     .await;
     assert!(check_all(&fake.requests()).is_empty());
+}
+
+// ---------- pricing and attachments (Phase 4) ----------
+
+#[tokio::test]
+async fn usage_is_priced_with_the_sessions_model_price() {
+    let env = Env::new();
+    let fake = FakeProvider::new().with_text_turn("Hello");
+    let mut config = env.config();
+    config.price = Some(harness_runtime::ModelPrice {
+        input: 3.0,
+        output: 15.0,
+        cache_read: 0.3,
+        cache_write: 3.75,
+    });
+    let (handle, mut rx) = spawn_session(
+        env.deps(Arc::new(fake.clone()), Arc::clone(&env.store) as _),
+        config,
+    )
+    .await
+    .unwrap();
+    let seen = drive(
+        &handle,
+        &mut rx,
+        Some(submit(handle.id(), "hi")),
+        ENDS,
+        |_| None,
+    )
+    .await;
+    // 10 input tokens × $3/M + 2 output tokens × $15/M = 60 µ$.
+    let cost = seen.iter().find_map(|e| match e.event {
+        Event::Usage { cost_micros, .. } => Some(cost_micros),
+        _ => None,
+    });
+    assert_eq!(cost, Some(60));
+}
+
+#[tokio::test]
+async fn attached_files_become_a_reference_note_not_their_content() {
+    let env = Env::new();
+    std::fs::write(env.dir.path().join("spec.md"), "# secret plan\n").unwrap();
+    let fake = FakeProvider::new().with_text_turn("ok");
+    let (handle, mut rx) = env.spawn(&fake).await;
+    let op = Op::Submit {
+        session: handle.id(),
+        input: vec![
+            InputItem::Text {
+                text: "read this".into(),
+            },
+            InputItem::File {
+                path: env.dir.path().join("spec.md"),
+            },
+        ],
+    };
+    drive(&handle, &mut rx, Some(op), ENDS, |_| None).await;
+    let message = fake.requests()[0].messages[0].clone();
+    let texts: Vec<String> = message
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    let note = texts
+        .iter()
+        .find(|t| t.starts_with("<attachment path="))
+        .expect("a note");
+    assert!(
+        note.contains("spec.md") && note.contains("bytes=\"14\"") && note.contains("read_file"),
+        "{note}"
+    );
+    assert!(
+        !texts.iter().any(|t| t.contains("secret plan")),
+        "content is not inlined"
+    );
+    assert!(texts.iter().any(|t| t == "read this"));
+
+    let missing = Op::Submit {
+        session: handle.id(),
+        input: vec![InputItem::File {
+            path: env.dir.path().join("gone.txt"),
+        }],
+    };
+    handle.send(missing).await.unwrap();
+    loop {
+        let env = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if let Event::Error { message, .. } = env.event {
+            assert!(message.contains("gone.txt"), "{message}");
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_request_history_rebuilds_exactly_what_the_provider_received() {
+    let env = Env::new();
+    let fake = FakeProvider::new()
+        .with_tool_call_turn("c1", "slow_read", &json!({"tag": "a"}))
+        .with_text_turn("done");
+    let (handle, mut rx) = env.spawn(&fake).await;
+    drive(
+        &handle,
+        &mut rx,
+        Some(submit(handle.id(), "go")),
+        ENDS,
+        |_| None,
+    )
+    .await;
+    let history =
+        harness_runtime::request_history(env.store.as_ref(), env.store.as_ref(), handle.id())
+            .await
+            .unwrap();
+    let rebuilt: Vec<_> = history.into_iter().map(|(_, r)| r).collect();
+    assert_eq!(rebuilt, fake.requests());
 }

@@ -11,7 +11,7 @@ Port traits (SDD layer L4). The runtime depends only on these; adapters implemen
 | `EventLog` | Append-only source of truth (`append` a numbered `LoggedEvent`, `last_seq`, `range`, `search`); gapless numbers (ADR-033) | `store-sqlite`, `testkit::MemoryStore` |
 | `BlobStore` | Content-addressed bytes | `store-sqlite`, `testkit::MemoryStore` |
 | `SessionStore` | Sessions, tasks (kept from `TaskState` events), task control requests (ADR-031) | `store-sqlite`, `testkit::MemoryStore` |
-| `SnapshotStore`, `FileSnapshots` | File snapshots before writes and undo (ADR-034); `NoSnapshots` outside a session | `store-sqlite`, `runtime` |
+| `SnapshotStore`, `FileSnapshots` | File snapshots before writes, undo, and each file's first snapshot for `/diff` (ADR-034, ADR-040); `NoSnapshots` outside a session | `store-sqlite`, `runtime` |
 | `Sandbox` | Rewrites a `CommandSpec` to run sandboxed | `sandbox` (Phase 13) |
 | `ReadLedger` | Read-before-edit guard records | `tools` (Phase 2) |
 | `EventSink` | Non-blocking live (non-persisted) events from tools | `runtime`, `testkit::RecordingSink` |

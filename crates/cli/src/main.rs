@@ -16,6 +16,8 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use harness_cli::debug;
+use harness_cli::factory::SessionFactory;
 use harness_cli::render::exit;
 use harness_cli::run::{Action, ApprovalArg, Io, Locker, RunOptions, Target, execute};
 use harness_cli::secrets::SystemSecrets;
@@ -24,23 +26,30 @@ use harness_cli::sessions::{
     session_table, task_table,
 };
 use harness_cli::telemetry::{self, LOG_ENV};
-use harness_cli::wiring::{Offline, PolicyInputs, build_policy, build_provider, session_model};
+use harness_cli::tui::CliBackend;
+use harness_cli::wiring::{Offline, build_provider, session_model};
 use harness_config::{ConfigLoader, LoadedConfig, Paths};
 use harness_policy::ApprovalPolicy;
-use harness_ports::{EventLog, Provider, SessionStore, SystemClock, TaskControl};
+use harness_ports::{EventLog, Provider, SessionStore, TaskControl};
 use harness_protocol::TaskState;
-use harness_runtime::RuntimeDeps;
 use harness_store_sqlite::SqliteStore;
-use harness_tools::{MemoryReadLedger, Unsandboxed};
+use harness_tui::TuiOptions;
 use harness_types::{ModelRef, Seq, SessionId};
 use tokio::sync::Notify;
 
 /// A general-purpose, persona-driven agent harness.
 #[derive(Debug, Parser)]
-#[command(name = "harness", version, about, long_about = None)]
+#[command(name = "harness", version, about, long_about = None, args_conflicts_with_subcommands = true)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+    /// Open the terminal UI and send this first prompt.
+    prompt: Option<String>,
+    /// Reopen a stored session in the terminal UI (id or unique prefix).
+    #[arg(long)]
+    session: Option<String>,
+    #[command(flatten)]
+    flags: RunFlags,
 }
 
 #[derive(Debug, Subcommand)]
@@ -53,6 +62,25 @@ enum Command {
     /// List, pause, resume or cancel tasks.
     #[command(subcommand)]
     Task(TaskCommand),
+    /// Inspect what harness sends to the model.
+    #[command(subcommand)]
+    Debug(DebugCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum DebugCommand {
+    /// Print the exact body of the last request sent to the model (redacted).
+    LastRequest {
+        /// Session id or unique prefix (default: the newest session).
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Diff the last two requests and check that the newer one only appends.
+    DiffRequests {
+        /// Session id or unique prefix (default: the newest session).
+        #[arg(long)]
+        session: Option<String>,
+    },
 }
 
 /// Flags for commands that run a model.
@@ -182,21 +210,36 @@ fn real_main() -> anyhow::Result<ExitCode> {
     let _guard = telemetry::init(&paths.log_dir(), filter).context("setting up logging")?;
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "harness started");
 
-    let Some(command) = cli.command else {
-        Cli::command().print_help()?;
-        return Ok(ExitCode::SUCCESS);
-    };
     let cwd = std::env::current_dir().context("reading the current directory")?;
     let loaded = ConfigLoader::new(paths.clone())
         .project_dir(&cwd)
         .env(std::env::vars())
         .load()?;
+    let Some(command) = cli.command else {
+        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+            Cli::command().print_help()?;
+            writeln!(
+                std::io::stdout(),
+                "\n(The terminal UI needs a terminal; use `harness run PROMPT` in scripts.)"
+            )?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        let store = Arc::new(SqliteStore::open(&cwd).context("opening .harness/state.db")?);
+        let app = App {
+            paths,
+            cwd,
+            loaded,
+            store,
+        };
+        return app.tui(cli.prompt, cli.session.as_deref(), &cli.flags);
+    };
     // Looking around must not create `.harness/` in a folder that has none.
     let read_only = matches!(
         &command,
         Command::Session(
             SessionCommand::List | SessionCommand::Show { .. } | SessionCommand::Export { .. }
         ) | Command::Task(TaskCommand::List { .. } | TaskCommand::Pause { .. })
+            | Command::Debug(_)
     );
     if read_only
         && !cwd
@@ -236,6 +279,7 @@ fn real_main() -> anyhow::Result<ExitCode> {
         }
         Command::Session(cmd) => app.session(cmd),
         Command::Task(cmd) => app.task(cmd),
+        Command::Debug(cmd) => app.debug(cmd),
     }
 }
 
@@ -405,6 +449,128 @@ impl App {
         }
     }
 
+    /// The session factory for these flags.
+    fn factory(&self, flags: &RunFlags) -> SessionFactory {
+        SessionFactory {
+            config: self.loaded.config.clone(),
+            paths: self.paths.clone(),
+            cwd: self.cwd.clone(),
+            trusted: self.loaded.project_trusted,
+            approval: flags.approval.map(|a| match a {
+                ApprovalArg::OnRequest => ApprovalPolicy::OnRequest,
+                ApprovalArg::Never => ApprovalPolicy::Never,
+            }),
+            full_access: flags.dangerously_full_access,
+            store: Arc::clone(&self.store),
+        }
+    }
+
+    /// The terminal UI (`harness [PROMPT]`, `harness --session ID`).
+    fn tui(
+        self,
+        prompt: Option<String>,
+        session: Option<&str>,
+        flags: &RunFlags,
+    ) -> anyhow::Result<ExitCode> {
+        let session = match session {
+            Some(prefix) => Some(self.find_session(prefix)?),
+            None => None,
+        };
+        let config = &self.loaded.config;
+        let stored_model = match session {
+            Some(id) => block_on(session_model(self.store.as_ref(), self.store.as_ref(), id))??,
+            None => None,
+        };
+        let model = stored_model
+            .or_else(|| flags.model.clone())
+            .unwrap_or_else(|| config.default_model.clone());
+        // Read the keyring before the main runtime starts: the keyring client blocks.
+        let provider = build_provider(&model, config, &SystemSecrets)?;
+        let show_thinking = config.ui.show_thinking;
+        let factory = Arc::new(self.factory(flags));
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let result = runtime.block_on(async move {
+            let backend = Arc::new(CliBackend::new(factory));
+            let attached = backend
+                .open(session, provider, model, None)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            let options = TuiOptions {
+                first_prompt: prompt,
+                show_thinking,
+            };
+            let ran = harness_tui::run(Arc::clone(&backend) as _, attached, options).await;
+            backend.close().await;
+            ran.map_err(anyhow::Error::from)
+        });
+        runtime.shutdown_timeout(Duration::from_millis(200));
+        result.map(|()| ExitCode::SUCCESS)
+    }
+
+    /// `harness debug last-request | diff-requests`.
+    fn debug(self, cmd: DebugCommand) -> anyhow::Result<ExitCode> {
+        let (DebugCommand::LastRequest { session } | DebugCommand::DiffRequests { session }) = &cmd;
+        let id = match session {
+            Some(prefix) => self.find_session(prefix)?,
+            None => block_on(self.store.sessions())??
+                .first()
+                .map(|s| s.id)
+                .context("no sessions in this project yet")?,
+        };
+        let store = Arc::clone(&self.store);
+        let (history, model) = block_on(async move {
+            let history =
+                harness_runtime::request_history(store.as_ref(), store.as_ref(), id).await;
+            let model = session_model(store.as_ref(), store.as_ref(), id).await;
+            (history, model)
+        })?;
+        let history = history?;
+        let provider = model?
+            .map(|m| m.provider().to_owned())
+            .context("this session has not sent a request yet")?;
+        let config = &self.loaded.config;
+        let mut out = std::io::stdout();
+        match cmd {
+            DebugCommand::LastRequest { .. } => {
+                let (seq, request) = history
+                    .last()
+                    .context("this session has not sent a request yet")?;
+                writeln!(
+                    out,
+                    "// session {id}, request at event #{}, provider {provider}",
+                    seq.0
+                )?;
+                writeln!(
+                    out,
+                    "{}",
+                    debug::body(&provider, request, config).map_err(anyhow::Error::msg)?
+                )?;
+            }
+            DebugCommand::DiffRequests { .. } => {
+                let [.., (s1, older), (s2, newer)] = history.as_slice() else {
+                    bail!("this session has sent fewer than two requests");
+                };
+                let older_body =
+                    debug::body(&provider, older, config).map_err(anyhow::Error::msg)?;
+                let newer_body =
+                    debug::body(&provider, newer, config).map_err(anyhow::Error::msg)?;
+                writeln!(
+                    out,
+                    "// session {id}: request at #{} → request at #{}",
+                    s1.0, s2.0
+                )?;
+                write!(
+                    out,
+                    "{}",
+                    debug::diff_report(older, newer, &older_body, &newer_body)
+                )?;
+            }
+        }
+        Ok(ExitCode::SUCCESS)
+    }
+
     /// Opens a session (new or stored) and performs `action` on it.
     fn drive(
         self,
@@ -438,41 +604,17 @@ impl App {
         } else {
             Arc::new(Offline)
         };
-        let home = std::env::home_dir();
-        let policy = build_policy(&PolicyInputs {
-            config: &config.policy,
-            paths: &self.paths,
-            project: &self.cwd,
-            trusted: self.loaded.project_trusted,
-            approval: flags.approval.map(|a| match a {
-                ApprovalArg::OnRequest => ApprovalPolicy::OnRequest,
-                ApprovalArg::Never => ApprovalPolicy::Never,
-            }),
-            full_access: flags.dangerously_full_access,
-            sandboxed: false,
-            home: home.as_deref(),
-        })?;
+        let factory = self.factory(flags);
         if flags.dangerously_full_access {
             writeln!(
                 std::io::stderr(),
                 "warning: --dangerously-full-access: commands and edits run without approval or sandbox"
             )?;
         }
-        let approval = match policy.settings().approval {
+        let (deps, approval) = factory.deps(provider)?;
+        let approval = match approval {
             ApprovalPolicy::OnRequest => ApprovalArg::OnRequest,
             ApprovalPolicy::Never => ApprovalArg::Never,
-        };
-        let deps = RuntimeDeps {
-            provider,
-            tools: harness_tools::builtin_registry()?,
-            clock: Arc::new(SystemClock),
-            sandbox: Arc::new(Unsandboxed),
-            blobs: Arc::clone(&self.store) as _,
-            ledger: Arc::new(MemoryReadLedger::default()),
-            policy,
-            log: Arc::clone(&self.store) as _,
-            sessions: Arc::clone(&self.store) as _,
-            snapshots: Arc::clone(&self.store) as _,
         };
         let options = RunOptions {
             json: flags.json,
@@ -481,6 +623,7 @@ impl App {
             max_parallel_tools: usize::try_from(config.runtime.max_parallel_tools).unwrap_or(1),
             approval,
             cwd: self.cwd.clone(),
+            price: factory.price(&persona.model),
         };
         let target = session.map_or(Target::New, Target::Existing);
         tracing::info!(model = %persona.model, ?target, "driving a session");

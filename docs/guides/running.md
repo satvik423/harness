@@ -87,7 +87,11 @@ Each run is saved; the last line shows its session id. Continue it with
 `harness run --session ID "…"`, list sessions with `harness session list`, and see the
 [sessions guide](sessions.md) for resume, pause, undo and export.
 
-## Current limits (Phase 3)
+## The terminal UI
+
+`harness` with no arguments opens the [terminal UI](tui.md); `harness run` is for scripts.
+
+## Current limits (Phase 4)
 
 - Tools: files (`read_file`, `write_file`, `edit_file`, `apply_patch`), search (`glob`,
   `grep`), `shell`, PTY programs (`pty_start`, `pty_write`, `pty_read`, `pty_kill`),

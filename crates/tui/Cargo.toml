@@ -1,0 +1,31 @@
+[package]
+name = "harness-tui"
+description = "Terminal UI for the harness, built purely on the session event stream."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+crossterm.workspace = true
+futures.workspace = true
+harness-ports.workspace = true
+harness-protocol.workspace = true
+harness-types.workspace = true
+pulldown-cmark.workspace = true
+ratatui.workspace = true
+ratatui-textarea.workspace = true
+serde_json.workspace = true
+similar.workspace = true
+syntect.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+
+[dev-dependencies]
+insta.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
+
+[lints]
+workspace = true

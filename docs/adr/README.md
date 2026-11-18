@@ -40,3 +40,7 @@ Each record states the context, the decision and its consequences. Records 0001â
 | [ADR-034](0034-snapshots-and-undo.md) | Snapshot ports and the undo op | Accepted |
 | [ADR-035](0035-fork-in-phase-5.md) | Fork moves to Phase 5 (user decision) | Accepted |
 | [ADR-036](0036-paused-tasks-and-recovery-edges.md) | Paused tasks, new input, and recovery edge cases | Accepted |
+| [ADR-037](0037-ratatui-textarea.md) | The input box uses `ratatui-textarea` (user decision) | Accepted |
+| [ADR-038](0038-model-and-effort-start-a-new-session.md) | `/model` and `/effort` apply to a new session (user decision) | Accepted |
+| [ADR-039](0039-attachments-as-reference-notes.md) | Attached files become reference notes until Phase 11 (user decision) | Accepted |
+| [ADR-040](0040-costs-debug-bodies-and-session-changes.md) | Costs in the runtime, debug bodies rebuilt from the log, session changes from snapshots | Accepted |

@@ -20,6 +20,7 @@
 
 mod approval;
 mod journal;
+mod pricing;
 mod replay;
 mod session;
 mod snapshots;
@@ -27,7 +28,8 @@ mod turn;
 mod user;
 
 pub use approval::ApprovalMode;
-pub use replay::OUTCOME_UNKNOWN;
+pub use pricing::ModelPrice;
+pub use replay::{OUTCOME_UNKNOWN, request_history};
 pub use session::{
     Resumed, RuntimeDeps, RuntimeError, SessionConfig, SessionHandle, resume_session, spawn_session,
 };

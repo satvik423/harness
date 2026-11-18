@@ -229,6 +229,11 @@ pub fn harness_rules() -> Vec<LayerRule> {
         adapter("harness-provider-openai"),
         adapter("harness-policy"),
         adapter("harness-store-sqlite"),
+        // A front-end: it renders events and sends ops; adapters are wired in cli.
+        LayerRule {
+            krate: "harness-tui",
+            allowed: Allowed::Only(&[TYPES, PROTOCOL, PORTS, "harness-config"]),
+        },
         LayerRule {
             krate: "harness-cli",
             allowed: Allowed::AllExcept(&["harness-testkit"]),

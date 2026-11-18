@@ -220,6 +220,7 @@ async fn start(provider: Arc<dyn Provider>, approval: ApprovalMode, max_turns: u
         max_turns,
         output_cap_tokens: TEST_CAP_TOKENS,
         max_parallel_tools: 2,
+        price: None,
     };
     let (handle, events) = spawn_session(deps, config).await.unwrap();
     Run {
@@ -810,7 +811,8 @@ async fn bad_submissions_are_rejected_with_specific_errors() {
             path: "a.pdf".into(),
         }],
     };
-    assert_eq!(kind_of(&first_problem(&mut run, file).await), "unsupported");
+    // A missing attached file is an attachment error (Phase 4 accepts files).
+    assert_eq!(kind_of(&first_problem(&mut run, file).await), "attachment");
     let empty = Op::Submit {
         session,
         input: vec![],

@@ -120,6 +120,7 @@ pub(crate) struct TaskCtx {
     pub(crate) max_turns: u32,
     pub(crate) output_cap_tokens: u64,
     pub(crate) max_parallel_tools: usize,
+    pub(crate) price: Option<crate::ModelPrice>,
     pub(crate) journal: Arc<Journal>,
     pub(crate) approvals: Arc<Approvals>,
     pub(crate) questions: Arc<Questions>,
@@ -393,7 +394,7 @@ async fn run_turns(ctx: &TaskCtx, segment: &mut SegmentContext, mut round: Optio
         ctx.note(Event::Usage {
             task: ctx.task,
             usage: reply.usage,
-            cost_micros: 0,
+            cost_micros: ctx.price.map_or(0, |p| p.cost_micros(&reply.usage)),
         })
         .await;
         let stop = reply.stop.unwrap_or_else(|| StopReason::Other {

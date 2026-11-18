@@ -719,6 +719,41 @@ impl SnapshotStore for SqliteStore {
             paths,
         }))
     }
+
+    async fn session_snapshots(&self, session: SessionId) -> Result<Vec<Snapshot>, StoreError> {
+        self.read(move |conn| first_snapshots(conn, session)).await
+    }
+}
+
+/// Reads the first snapshot of each path in a session.
+fn first_snapshots(conn: &Connection, session: SessionId) -> Result<Vec<Snapshot>, StoreError> {
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT s.path, s.blob_hash FROM snapshots s
+             WHERE s.session_id = ?1
+               AND s.seq = (SELECT MIN(seq) FROM snapshots t WHERE t.session_id = s.session_id AND t.path = s.path)
+             ORDER BY s.path",
+        )
+        .map_err(backend)?;
+    let rows: Vec<(String, Option<String>)> = stmt
+        .query_map([session.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(backend)?
+        .collect::<Result<_, _>>()
+        .map_err(backend)?;
+    rows.into_iter()
+        .map(|(path, hash)| {
+            let before = hash
+                .map(|h| {
+                    h.parse()
+                        .map_err(|_| StoreError::Corrupt(format!("bad blob hash {h:?}")))
+                })
+                .transpose()?;
+            Ok(Snapshot {
+                path: PathBuf::from(path),
+                before,
+            })
+        })
+        .collect()
 }
 
 /// Puts each snapshot's contents back (or removes files the turn created).

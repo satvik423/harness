@@ -322,7 +322,7 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
   <h1>Building Harness</h1>
   <p class="sub">The complete plan for a general-purpose, persona-driven agent harness written in Rust. It combines the best ideas from Claude Code, Codex CLI and Hermes, and adds a context engine that never loses details. This one document is enough to build the whole project.</p>
   <div class="docctl">
-    <div><span>Version</span>1.3 · updated after Phases 0–3 (v0.1 released)</div>
+    <div><span>Version</span>1.4 · updated after Phases 0–4 (v0.1 released)</div>
     <div><span>Date</span>17 Nov 2026</div>
     <div><span>Status</span>Approved for build</div>
     <div><span>Working name</span><code>harness</code> (rename freely)</div>
@@ -400,6 +400,11 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
     <tr><td class="id">1.3</td><td><code>FileSnapshots</code> in <code>ToolCtx</code>, <code>SnapshotStore</code>, <code>Op::Undo</code>; the undo "turn" is the assistant message whose calls ran</td><td>3.3, 3.5, 3.14</td><td>ADR-034</td></tr>
     <tr><td class="id">1.3</td><td>Fork (FR-SES-06) moves from Phase 3 to Phase 5, with compaction</td><td>1.7, 3.14, Ph 3, Ph 5</td><td>ADR-035</td></tr>
     <tr><td class="id">1.3</td><td>One active task per session; new input supersedes a paused task; recovery fails a task whose input was never saved and completes one whose final reply was saved</td><td>3.14</td><td>ADR-036</td></tr>
+    <tr><td class="id">1.4</td><td>The TUI's input box uses <code>ratatui-textarea</code> (the maintained continuation; <code>tui-textarea</code> stops at ratatui 0.29)</td><td>3.1, Ph 4</td><td>ADR-037</td></tr>
+    <tr><td class="id">1.4</td><td><code>/model</code> and <code>/effort</code> start a new session until Phase 5 compaction allows switching inside one</td><td>3.16, Ph 4, Ph 5</td><td>ADR-038</td></tr>
+    <tr><td class="id">1.4</td><td>Attached files become a reference note (path, size, kind) until Phase 11 ingest</td><td>3.15, Ph 4, Ph 11</td><td>ADR-039</td></tr>
+    <tr><td class="id">1.4</td><td>Costs computed in the runtime from <code>[pricing]</code>; <code>harness debug</code> rebuilds request bodies from the log; <code>/diff</code> compares first snapshots with files now; the TUI talks to the core through a <code>Backend</code> trait</td><td>2.4, 3.12, 3.16</td><td>ADR-040</td></tr>
+    <tr><td class="id">1.4</td><td>Phase 4 exit criterion (a working day) is checked by the user after automated and live checks</td><td>Ph 4</td><td>Phase 4 report</td></tr>
   </tbody></table></div>
 </section>
 
@@ -1107,7 +1112,7 @@ stateDiagram-v2
     <tr><td>Serialisation</td><td><code>serde</code>, <code>serde_json</code>, <code>toml</code></td><td>TOML for config and persona frontmatter</td><td></td></tr>
     <tr><td>YAML frontmatter</td><td>A maintained YAML crate (check at start)</td><td>Only for <code>SKILL.md</code> compatibility</td><td><code>serde_yaml</code> (archived)</td></tr>
     <tr><td>JSON Schema</td><td><code>jsonschema</code></td><td>Validate tool inputs and output schemas</td><td></td></tr>
-    <tr><td>CLI / TUI</td><td><code>clap</code> (derive), <code>ratatui</code>, <code>crossterm</code>, <code>tui-textarea</code></td><td><code>pulldown-cmark</code> + <code>syntect</code> for markdown and code display</td><td></td></tr>
+    <tr><td>CLI / TUI</td><td><code>clap</code> (derive), <code>ratatui</code>, <code>crossterm</code>, <code>ratatui-textarea</code> (ADR-037)</td><td><code>pulldown-cmark</code> + <code>syntect</code> for markdown and code display</td><td></td></tr>
     <tr><td>Storage</td><td><code>rusqlite</code> (bundled), <code>sqlite-vec</code> (P2)</td><td>Bundled SQLite includes FTS5</td><td>An ORM, a server DB in v1</td></tr>
     <tr><td>IDs / hashing</td><td><code>ulid</code>, <code>blake3</code></td><td>ULIDs sort by time</td><td></td></tr>
     <tr><td>Errors / logs</td><td><code>thiserror</code>, <code>anyhow</code>, <code>tracing</code>, <code>tracing-subscriber</code>, <code>tracing-appender</code></td><td></td><td><code>println!</code> in libraries</td></tr>
@@ -2147,6 +2152,10 @@ theme = "auto"</script></div>
     <div><div class="h"><code>ADR-034</code><b>Snapshots and undo</b><span class="st">accepted</span></div><p><b>Context:</b> the spec names snapshots and <code>/undo</code> but no port or op. <b>Decision:</b> <code>FileSnapshots</code> in <code>ToolCtx</code> (no snapshot, no write), <code>SnapshotStore</code>, <code>Op::Undo</code>; the turn is the assistant message whose calls ran; the model gets a note. <b>Consequences:</b> shell writes are not covered.</p></div>
     <div><div class="h"><code>ADR-035</code><b>Fork in Phase 5</b><span class="st">accepted</span></div><p><b>Context:</b> a mid-segment fork needs a compaction, which arrives in Phase 5. <b>Decision:</b> build fork with compaction in Phase 5. <b>Consequences:</b> FR-SES-06 moves to Phase 5. Approved by the user.</p></div>
     <div><div class="h"><code>ADR-036</code><b>Paused tasks and recovery edges</b><span class="st">accepted</span></div><p><b>Context:</b> the spec does not say what new input does to a paused task, and kill -9 runs found unlisted states. <b>Decision:</b> one active task; new input supersedes a paused task (the CLI refuses); a task with no saved input is failed; one with a saved final reply completes on resume. <b>Consequences:</b> recovery always leaves a usable session; 800 kill runs pass.</p></div>
+    <div><div class="h"><code>ADR-037</code><b>ratatui-textarea</b><span class="st">accepted</span></div><p><b>Context:</b> <code>tui-textarea</code> 0.7 (Oct 2024) only supports ratatui 0.29. <b>Decision:</b> use the ratatui organisation's <code>ratatui-textarea</code> 0.9 with ratatui 0.30. <b>Consequences:</b> current versions; same widget family. Approved by the user.</p></div>
+    <div><div class="h"><code>ADR-038</code><b>/model and /effort start a new session</b><span class="st">accepted</span></div><p><b>Context:</b> a segment's model and effort are frozen; switching mid-segment breaks thinking and the cache. <b>Decision:</b> they pick values for a new session and offer to start it now. <b>Consequences:</b> Phase 5 adds switching via compaction. Approved by the user.</p></div>
+    <div><div class="h"><code>ADR-039</code><b>Attachments as reference notes</b><span class="st">accepted</span></div><p><b>Context:</b> file conversion is Phase 11. <b>Decision:</b> <code>InputItem::File</code> becomes a note with path, size and kind; the model reads the file itself. <b>Consequences:</b> Phase 11 replaces the note with converted content. Approved by the user.</p></div>
+    <div><div class="h"><code>ADR-040</code><b>Costs, debug bodies, session changes</b><span class="st">accepted</span></div><p><b>Context:</b> the spec asks for costs, exact request bodies and <code>/diff</code> without saying how. <b>Decision:</b> the runtime prices each <code>Usage</code>; <code>request_history</code> rebuilds requests from the log and the adapter builds the body; <code>/diff</code> uses each file's first snapshot; the TUI uses a <code>Backend</code> trait. <b>Consequences:</b> costs are stored; nothing extra is recorded for debugging.</p></div>
   </div>
 </section>
 
@@ -2276,7 +2285,7 @@ theme = "auto"</script></div>
     exit:'200 of 200 random-kill runs resume with valid transcripts. Pause followed by a process restart and resume continues correctly. Release v0.1.',learn:'Event sourcing, durability, state machines.',release:true},
    {n:4,t:'Terminal UI',w:2,s:8,goal:'A daily-driver interface built purely on the event stream.',
     reqs:'FR-UI-02, FR-PRV-06',
-    tasks:['ratatui app shell: transcript view, input box (tui-textarea), status bar.','Render events: streaming text, tool cards with live output, diffs (similar), todo checklist.','Approval panel with keyboard shortcuts. Notification when the terminal isn\'t focused.','Slash command framework with /help, /model, /effort, /pause, /resume, /tasks, /diff, /undo, /clear.','Attachment paste and drag (file paths become InputItem::File).','Usage and cost accounting (pricing table) shown in the status bar. /cost and /context views.','Markdown rendering with syntect code highlighting.','harness debug last-request and diff-requests commands.'],
+    tasks:['ratatui app shell: transcript view, input box (ratatui-textarea, ADR-037), status bar.','Render events: streaming text, tool cards with live output, diffs (similar), todo checklist.','Approval panel with keyboard shortcuts. Notification when the terminal isn\'t focused.','Slash command framework with /help, /model, /effort, /pause, /resume, /tasks, /diff, /undo, /clear (/model and /effort start a new session until Phase 5, ADR-038).','Attachment paste and drag (file paths become InputItem::File; a reference note until Phase 11, ADR-039).','Usage and cost accounting (pricing table) shown in the status bar. /cost and /context views.','Markdown rendering with syntect code highlighting.','harness debug last-request and diff-requests commands.'],
     exit:'You use it for a full working day on a real project without falling back to another tool.',learn:'Immediate-mode TUIs, event-driven UIs.'},
    {n:5,t:'Context engine',w:3,s:10,goal:'Long sessions without losing details: anchored compaction, pinned facts, recall.',
     reqs:'FR-CTX-03/04, FR-TOOL-04, FR-SES-06, M1, M2',

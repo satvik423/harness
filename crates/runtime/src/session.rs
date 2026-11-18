@@ -25,11 +25,11 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use crate::ApprovalMode;
 use crate::approval::{Approvals, Questions};
 use crate::journal::Journal;
 use crate::replay::{PausedTask, rebuild, recover};
 use crate::turn::{PauseFlag, Round, Start, StopKind, StopSlot, TaskCtx, TaskResult, run_task};
+use crate::{ApprovalMode, ModelPrice};
 
 /// Errors from starting or talking to a session.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -89,6 +89,8 @@ pub struct SessionConfig {
     pub output_cap_tokens: u64,
     /// Parallel-safe calls run at once, at most (`runtime.max_parallel_tools`).
     pub max_parallel_tools: usize,
+    /// The session model's price, for `Usage` costs (`None`: costs are 0).
+    pub price: Option<ModelPrice>,
 }
 
 /// What resuming a session found.
@@ -434,8 +436,15 @@ impl Actor {
         for item in input {
             match item {
                 InputItem::Text { text } => content.push(ContentBlock::text(text)),
-                InputItem::File { .. } | InputItem::Blob { .. } => {
-                    self.error("unsupported", "attachments arrive in Phase 11".into())
+                InputItem::File { path } => match attachment_note(&path).await {
+                    Ok(note) => content.push(ContentBlock::text(note)),
+                    Err(message) => {
+                        self.error("attachment", message).await;
+                        return;
+                    }
+                },
+                InputItem::Blob { .. } => {
+                    self.error("unsupported", "blob attachments arrive in Phase 11".into())
                         .await;
                     return;
                 }
@@ -490,6 +499,7 @@ impl Actor {
             max_turns: self.config.max_turns,
             output_cap_tokens: self.config.output_cap_tokens,
             max_parallel_tools: self.config.max_parallel_tools,
+            price: self.config.price,
             journal: Arc::clone(&self.journal),
             approvals: Arc::clone(&self.approvals),
             questions: Arc::clone(&self.questions),
@@ -760,6 +770,39 @@ impl Actor {
             )
             .await;
     }
+}
+
+/// The note sent for an attached file (Phase 4): where it is, how big, what
+/// kind. The content is not inlined; the model reads it with `read_file`, and
+/// Phase 11 adds conversion of images, PDFs and documents.
+async fn attachment_note(path: &std::path::Path) -> Result<String, String> {
+    let meta = tokio::fs::metadata(path)
+        .await
+        .map_err(|e| format!("attached file {} not found: {e}", path.display()))?;
+    if !meta.is_file() {
+        return Err(format!("attached path {} is not a file", path.display()));
+    }
+    let kind = match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp") => "image",
+        Some("pdf") => "pdf",
+        Some("md" | "markdown") => "text/markdown",
+        Some("txt" | "log" | "csv" | "json" | "toml" | "yaml" | "yml" | "xml" | "html") => "text",
+        Some(
+            "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "go" | "java" | "c" | "h" | "cpp" | "rb"
+            | "sh" | "sql" | "css",
+        ) => "source code",
+        _ => "file",
+    };
+    let shown = path.display().to_string().replace('"', "'");
+    Ok(format!(
+        "<attachment path=\"{shown}\" bytes=\"{}\" type=\"{kind}\">The user attached this file. Read it with read_file if you need its contents.</attachment>",
+        meta.len()
+    ))
 }
 
 /// Waits for the running task, or forever when idle.

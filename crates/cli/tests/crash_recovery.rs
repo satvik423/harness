@@ -161,6 +161,7 @@ fn config(dir: &Path) -> SessionConfig {
         max_turns: 50,
         output_cap_tokens: 2_000,
         max_parallel_tools: 4,
+        price: None,
     }
 }
 
