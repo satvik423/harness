@@ -10,7 +10,7 @@ L1 front-ends   harness-cli (binary: harness run)        [tui: Phase 4, server: 
 L2 protocol     harness-protocol   Op in → Event out, wrapped in Envelope{seq, ts, session}
 L3 runtime      harness-runtime (session actor, turn engine), harness-context (requests, transcript rules)
 L4 ports        harness-ports      Provider, Tool, ToolRegistry, EventLog, BlobStore, Sandbox, ReadLedger, EventSink, Clock
-L5 adapters     harness-provider-anthropic, harness-provider-openai, harness-tools, harness-policy   [store-sqlite: Phase 3, …]
+L5 adapters     harness-provider-anthropic, harness-provider-openai, harness-tools, harness-policy, harness-store-sqlite   [store-sqlite: Phase 3, …]
 
 shared          harness-types (ids, messages, usage, risk), harness-config (layered config)
 dev only        harness-testkit (FakeProvider, TempProject, FixedClock, layering checks)
@@ -32,25 +32,27 @@ forces a decision about its layer.
 | `harness-config` | types |
 | `harness-context` | types, protocol, ports |
 | `harness-runtime` | types, protocol, ports, context |
-| `harness-tools`, `harness-provider-anthropic`, `harness-provider-openai`, `harness-policy` | anything except runtime, context, front-ends, testkit (`arch::adapter`) |
+| `harness-tools`, `harness-provider-anthropic`, `harness-provider-openai`, `harness-policy`, `harness-store-sqlite` | anything except runtime, context, front-ends, testkit (`arch::adapter`) |
 | `harness-testkit` | types, protocol, ports |
 | `harness-cli` | anything except testkit |
 | adapters *(later)* | anything except runtime, context, front-ends, testkit (`arch::adapter`) |
 
-## Data flow (Phase 2)
+## Data flow (Phase 3)
 
-1. `harness run` picks the provider from the model (`--model` or `default_model`),
-   builds the policy engine (`[policy]`, rules files, flags), builds `RuntimeDeps`
-   (provider, built-in tools, in-memory stores, policy) and calls `spawn_session`.
-2. It sends `Op::Submit`. The session actor opens segment 0 (environment block,
-   AGENTS.md chain) and starts a task on its own tokio task.
-3. The turn engine streams replies through `dyn Provider`, judges each tool call
-   with `dyn Policy` (asking via `ApprovalRequested` / `Op::Approve` when told to),
-   runs it through `dyn Tool` (parallel-safe reads together), caps each result once
-   when recording it, and appends every message through `SegmentContext`, which
-   enforces I1 and I2. `ask_user` reaches the user via `QuestionAsked` / `Op::Answer`.
-4. Every event is broadcast as an `Envelope`; the CLI renders it.
-5. From Phase 3, persisted events are also written to the `EventLog` first.
+1. The CLI opens `.harness/state.db` (`SqliteStore`), builds the provider and the
+   policy, and builds `RuntimeDeps` (provider, tools, store as event log, blob store,
+   session store and snapshot store, policy). It takes the session's lock.
+2. `spawn_session` registers a new session; `resume_session` rebuilds a stored one from
+   its events (the frozen segment frame, then the messages) and recovers a task that
+   was running when harness stopped.
+3. The session actor runs one task at a time. Every persisted event goes through the
+   `Journal`: numbered, committed to the event log, then broadcast (NFR-03).
+4. The turn engine streams replies through `dyn Provider`, judges each tool call with
+   `dyn Policy`, snapshots files before tools write them, runs the calls (parallel-safe
+   reads together), caps each result once, and appends every message through
+   `SegmentContext` (I1, I2). Pause requests take effect at safe points.
+5. The CLI renders events, answers prompts from stdin, and other terminals can leave
+   pause, resume or cancel requests in the store.
 
 ## Cross-cutting rules already in code
 

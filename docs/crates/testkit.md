@@ -7,10 +7,11 @@ Test support. Dev-dependency only; production crates must not depend on it
 
 | Item | Purpose |
 |---|---|
-| `FakeProvider` | Scripted `Provider`: `with_text_turn`, `with_tool_call_turn`, `with_tool_calls_turn`, `with_turn`; emits `BlockComplete` like a real provider; records every `ModelRequest` (`requests()`); honours cancellation; deterministic `count_tokens` (chars ÷ 4, rounded up) |
+| `FakeProvider` | Scripted `Provider`: `with_text_turn`, `with_tool_call_turn`, `with_tool_calls_turn`, `with_turn`, `skip_turn`; emits `BlockComplete` like a real provider; records every `ModelRequest` (`requests()`); honours cancellation; deterministic `count_tokens` (chars ÷ 4, rounded up) |
 | `TempProject` | Temp project dir with `with_file` (rejects paths escaping the project) and `harness_dir` |
 | `FixedClock` | `Clock` you can `set_ms` / `advance_ms` |
-| `RecordingSink` | `EventSink` that keeps every event (`emit_with` numbers events by position) |
+| `RecordingSink` | `EventSink` that keeps every event |
+| `MemoryStore` | In-memory `EventLog`, `SessionStore`, `SnapshotStore` and `BlobStore` with the SQLite store's rules (gapless numbers, task view, undo restores real files) |
 | `AskForChanges` | Minimal `Policy`: reads allowed, everything else asks, `"deny": true` inputs denied; remembers grants (`grants()`) |
 | `invariants::check_all` | Append-only (I1), tool pairing (I2) and no-prefill checks over recorded requests |
 | `arch::DependencyGraph` | Workspace dependency graph from `cargo metadata` (normal deps only) |

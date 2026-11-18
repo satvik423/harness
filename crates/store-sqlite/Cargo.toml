@@ -1,0 +1,28 @@
+[package]
+name = "harness-store-sqlite"
+description = "SQLite event log, blob store, session catalogue and snapshots for the harness."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+blake3.workspace = true
+harness-ports.workspace = true
+harness-protocol.workspace = true
+harness-types.workspace = true
+nix.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync"] }
+
+[lints]
+workspace = true

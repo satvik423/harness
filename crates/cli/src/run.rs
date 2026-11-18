@@ -1,4 +1,10 @@
-//! `harness run`: one prompt, headless, through a real session.
+//! Driving a session from the terminal: `harness run`, `harness session
+//! resume|undo` and `harness task resume|cancel` all go through [`execute`].
+//!
+//! The driver sends one action, renders events, answers approval prompts and
+//! questions from stdin, handles Ctrl-C, and works out the exit code. Stdin is
+//! read by a background task, so a prompt never blocks the event loop: if the
+//! task is paused or cancelled from another terminal, the prompt is dropped.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -6,16 +12,18 @@ use std::sync::Arc;
 
 use harness_config::{AnthropicConfig, MismatchBehavior, OpenAiConfig, ServerFallbacks};
 use harness_context::ActivePersona;
-use harness_protocol::{Decision, Event, InputItem, Op};
+use harness_protocol::{Decision, Envelope, Event, InputItem, Op, TaskState};
 use harness_provider_anthropic::{AnthropicSettings, ThinkingMismatch};
 use harness_provider_openai::OpenAiSettings;
-use harness_runtime::{ApprovalMode, RuntimeDeps, SessionConfig, spawn_session};
-use harness_types::TaskId;
+use harness_runtime::{
+    ApprovalMode, Resumed, RuntimeDeps, SessionConfig, SessionHandle, resume_session, spawn_session,
+};
+use harness_types::{QuestionId, SessionId, TaskId};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
-use tokio::sync::{Notify, broadcast};
+use tokio::sync::{Notify, broadcast, mpsc};
 
 use crate::prompt::{APPROVAL_CHOICES, parse_answer, parse_decision};
-use crate::render::{Outcome, Renderer};
+use crate::render::{Outcome, Renderer, exit};
 
 /// Approval policy flag of `harness run`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -26,14 +34,12 @@ pub enum ApprovalArg {
     Never,
 }
 
-/// Options for one `harness run`.
+/// Options for driving a session.
 #[derive(Debug, Clone)]
 pub struct RunOptions {
-    /// The prompt.
-    pub prompt: String,
     /// Print every event as a JSON line instead of human output.
     pub json: bool,
-    /// Maximum model calls.
+    /// Maximum model calls per task run.
     pub max_turns: u32,
     /// Tool output cap in estimated tokens (`context.output_cap_tokens`).
     pub output_cap_tokens: u64,
@@ -44,6 +50,32 @@ pub struct RunOptions {
     /// Working directory.
     pub cwd: PathBuf,
 }
+
+/// Which session to drive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    /// Start a new session.
+    New,
+    /// Reopen a stored session (recovering it if the harness stopped mid-task).
+    Existing(SessionId),
+}
+
+/// What to do in the session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    /// Submit a prompt as a new task.
+    Prompt(String),
+    /// Resume the session's paused task (if `Some`, only that task).
+    Resume(Option<TaskId>),
+    /// Cancel the session's paused task.
+    Cancel(TaskId),
+    /// Restore the files changed by the last turn.
+    Undo,
+}
+
+/// Takes a session's lock; the guard is held until the run ends. Called before
+/// an existing session is reopened, and right after a new one is created.
+pub type Locker = dyn Fn(SessionId) -> Result<Box<dyn std::any::Any + Send>, String> + Send + Sync;
 
 /// Terminal streams, injectable for tests.
 pub struct Io {
@@ -82,217 +114,358 @@ pub fn openai_settings(config: &OpenAiConfig) -> OpenAiSettings {
     }
 }
 
-/// Runs one prompt to completion and returns the exit code.
+/// Opens the session and performs `action`, driving it until the task it
+/// concerns completes, fails, pauses or is cancelled. Returns the exit code.
 ///
-/// `interrupt` is notified on Ctrl-C; the task is interrupted and the run ends with
-/// [`crate::render::exit::INTERRUPTED`].
+/// `interrupt` is notified on Ctrl-C: the task is interrupted and the run ends
+/// with [`exit::INTERRUPTED`].
 ///
 /// # Errors
-/// Only I/O errors writing output; task failures are reported through the exit code.
-pub async fn run_session(
-    options: RunOptions,
+/// Only I/O errors writing output; everything else is reported on `io.err` and
+/// through the exit code.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute(
+    options: &RunOptions,
     deps: RuntimeDeps,
     persona: ActivePersona,
+    target: Target,
+    action: Action,
+    locker: &Locker,
     io: &mut Io,
     interrupt: Arc<Notify>,
 ) -> std::io::Result<u8> {
-    let approval = match options.approval {
-        ApprovalArg::OnRequest => ApprovalMode::Ask,
-        ApprovalArg::Never => ApprovalMode::Never,
-    };
     let config = SessionConfig {
         cwd: options.cwd.clone(),
         persona,
-        approval,
+        approval: match options.approval {
+            ApprovalArg::OnRequest => ApprovalMode::Ask,
+            ApprovalArg::Never => ApprovalMode::Never,
+        },
         max_turns: options.max_turns,
         output_cap_tokens: options.output_cap_tokens,
         max_parallel_tools: options.max_parallel_tools,
     };
-    let (handle, mut events) = spawn_session(deps, config);
-    let mut renderer = Renderer::new(options.json);
-    let mut outcome = Outcome::default();
-    let mut answers = (&mut io.input).lines();
-    let mut task: Option<TaskId> = None;
-    let mut interrupted = false;
-
-    handle
-        .send(Op::Submit {
-            session: handle.id(),
-            input: vec![InputItem::Text {
-                text: options.prompt.clone(),
-            }],
-        })
-        .await
-        .map_err(std::io::Error::other)?;
-
-    loop {
-        let received = tokio::select! {
-            received = events.recv() => received,
-            () = interrupt.notified(), if !interrupted => {
-                interrupted = true;
-                if let Some(task) = task {
-                    let _ = handle.send(Op::Interrupt { task }).await;
-                }
-                continue;
+    // Another process must not recover or run the same session meanwhile.
+    let mut guard = None;
+    if let Target::Existing(id) = target {
+        match locker(id) {
+            Ok(g) => guard = Some(g),
+            Err(e) => {
+                writeln!(io.err, "error: {e}")?;
+                return Ok(exit::ERROR);
             }
-        };
-        let envelope = match received {
-            Ok(envelope) => envelope,
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                writeln!(
-                    io.err,
-                    "warning: the display fell behind; {n} events were skipped"
-                )?;
-                continue;
-            }
-            Err(broadcast::error::RecvError::Closed) => break,
-        };
-        renderer.render(&envelope, &mut *io.out, &mut *io.err)?;
-        outcome.observe(&envelope.event);
-        match &envelope.event {
-            Event::UserInput { task: t, .. } => {
-                task = Some(*t);
-                if interrupted {
-                    let _ = handle.send(Op::Interrupt { task: *t }).await;
-                }
-            }
-            Event::ApprovalRequested { id, reason, .. } => {
-                let prompt =
-                    (!options.json).then(|| format!("Allow {reason}? {APPROVAL_CHOICES}: "));
-                match read_answer(
-                    &mut *io.err,
-                    &mut answers,
-                    prompt,
-                    io.echo_input,
-                    &interrupt,
-                )
-                .await?
-                {
-                    Answer::Line(line) => {
-                        let decision = parse_decision(&line);
-                        let _ = handle
-                            .send(Op::Approve {
-                                request: *id,
-                                decision,
-                            })
-                            .await;
-                    }
-                    Answer::Closed => {
-                        let _ = handle
-                            .send(Op::Approve {
-                                request: *id,
-                                decision: Decision::Deny {
-                                    reason: Some("no answer (input closed)".into()),
-                                },
-                            })
-                            .await;
-                    }
-                    Answer::Interrupted => {
-                        interrupted = true;
-                        if let Some(task) = task {
-                            let _ = handle.send(Op::Interrupt { task }).await;
-                        }
-                    }
-                }
-            }
-            Event::QuestionAsked {
-                id,
-                question,
-                options: choices,
-                multi,
-                ..
-            } => {
-                let prompt = (!options.json).then(|| {
-                    let mut text = format!("? {question}\n");
-                    for (i, choice) in choices.iter().enumerate() {
-                        text.push_str(&format!("  {}. {choice}\n", i + 1));
-                    }
-                    text.push_str(match (choices.is_empty(), multi) {
-                        (true, _) => "answer: ",
-                        (false, false) => "answer (a number, or your own words): ",
-                        (false, true) => "answer (numbers like 1,3, or your own words): ",
-                    });
-                    text
-                });
-                let answer = match read_answer(
-                    &mut *io.err,
-                    &mut answers,
-                    prompt,
-                    io.echo_input,
-                    &interrupt,
-                )
-                .await?
-                {
-                    Answer::Line(line) => parse_answer(&line, choices, *multi),
-                    Answer::Closed => "(no answer: the input was closed)".into(),
-                    Answer::Interrupted => {
-                        interrupted = true;
-                        if let Some(task) = task {
-                            let _ = handle.send(Op::Interrupt { task }).await;
-                        }
-                        continue;
-                    }
-                };
-                let _ = handle
-                    .send(Op::Answer {
-                        request: *id,
-                        answer,
-                    })
-                    .await;
-            }
-            _ => {}
-        }
-        if outcome.finished() {
-            break;
         }
     }
+    let opened = match target {
+        Target::New => spawn_session(deps, config).await.map(|(h, rx)| {
+            (
+                h,
+                rx,
+                Resumed {
+                    paused: None,
+                    recovered: false,
+                },
+            )
+        }),
+        Target::Existing(id) => resume_session(deps, config, id).await,
+    };
+    let (handle, mut events, resumed) = match opened {
+        Ok(opened) => opened,
+        Err(e) => {
+            writeln!(io.err, "error: {e}")?;
+            return Ok(exit::ERROR);
+        }
+    };
+    if guard.is_none() {
+        match locker(handle.id()) {
+            Ok(g) => guard = Some(g),
+            Err(e) => writeln!(io.err, "warning: {e}")?,
+        }
+    }
+    let _guard = guard;
+    let session = handle.id();
+    let mut renderer = Renderer::new(options.json);
+    // Events already sent (session opened, recovery) are shown, not judged.
+    while let Ok(envelope) = events.try_recv() {
+        renderer.render(&envelope, &mut *io.out, &mut *io.err)?;
+    }
+    if resumed.recovered && !options.json {
+        writeln!(
+            io.err,
+            "harness stopped while this session was working; its task was recovered and is paused"
+        )?;
+    }
+
+    let mut outcome = Outcome::default();
+    let first = match (&action, resumed.paused) {
+        (Action::Prompt(_), Some(task)) => {
+            writeln!(
+                io.err,
+                "error: task {task} in this session is paused. Continue it with `harness session resume {session}`, or cancel it with `harness task cancel {task}`."
+            )?;
+            let _ = handle.send(Op::Shutdown).await;
+            return Ok(exit::ERROR);
+        }
+        (Action::Prompt(text), None) => Op::Submit {
+            session,
+            input: vec![InputItem::Text { text: text.clone() }],
+        },
+        (Action::Resume(wanted), Some(task)) if wanted.is_none_or(|w| w == task) => {
+            outcome.watch(task);
+            Op::Resume { task }
+        }
+        (Action::Cancel(wanted), Some(task)) if *wanted == task => {
+            outcome.watch(task);
+            Op::Cancel { task }
+        }
+        (Action::Resume(_) | Action::Cancel(_), _) => {
+            writeln!(
+                io.err,
+                "nothing to do: no matching task is paused in session {session}"
+            )?;
+            let _ = handle.send(Op::Shutdown).await;
+            return Ok(exit::OK);
+        }
+        (Action::Undo, _) => {
+            let code = undo(&handle, &mut events, &mut renderer, io).await?;
+            let _ = handle.send(Op::Shutdown).await;
+            return Ok(code);
+        }
+    };
+    handle.send(first).await.map_err(std::io::Error::other)?;
+    let mut code = drive(
+        &handle,
+        &mut events,
+        &mut renderer,
+        &mut outcome,
+        options,
+        io,
+        &interrupt,
+    )
+    .await?;
+    // Cancelling was the point: success, not an interruption.
+    if matches!(action, Action::Cancel(_)) && outcome.final_state() == Some(TaskState::Cancelled) {
+        code = exit::OK;
+    }
     let _ = handle.send(Op::Shutdown).await;
+    if !options.json {
+        match outcome.final_state() {
+            Some(TaskState::Paused) => writeln!(
+                io.err,
+                "paused. Continue with: harness session resume {session}"
+            )?,
+            _ => writeln!(io.err, "session {session}")?,
+        }
+    }
+    Ok(code)
+}
+
+/// A prompt waiting for a line of input.
+enum Pending {
+    Approval(harness_types::ApprovalId),
+    Question {
+        id: QuestionId,
+        options: Vec<String>,
+        multi: bool,
+    },
+}
+
+/// Reads lines from `input` in the background; the channel closes at end of input.
+fn spawn_line_reader(input: Box<dyn AsyncBufRead + Unpin + Send>) -> mpsc::Receiver<String> {
+    let (tx, rx) = mpsc::channel(16);
+    tokio::spawn(async move {
+        let mut lines = input.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if tx.send(line).await.is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+/// Renders events and answers prompts until the watched task ends.
+async fn drive(
+    handle: &SessionHandle,
+    events: &mut broadcast::Receiver<Envelope>,
+    renderer: &mut Renderer,
+    outcome: &mut Outcome,
+    options: &RunOptions,
+    io: &mut Io,
+    interrupt: &Notify,
+) -> std::io::Result<u8> {
+    let input = std::mem::replace(
+        &mut io.input,
+        Box::new(tokio::io::BufReader::new(tokio::io::empty())),
+    );
+    let mut lines = spawn_line_reader(input);
+    let mut input_open = true;
+    let mut pending: Option<Pending> = None;
+    let mut interrupted = false;
+    loop {
+        tokio::select! {
+            received = events.recv() => {
+                let envelope = match received {
+                    Ok(envelope) => envelope,
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        writeln!(io.err, "warning: the display fell behind; {n} events were skipped")?;
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
+                renderer.render(&envelope, &mut *io.out, &mut *io.err)?;
+                outcome.observe(&envelope.event);
+                match &envelope.event {
+                    Event::UserInput { task, .. } if interrupted => {
+                        let _ = handle.send(Op::Interrupt { task: *task }).await;
+                    }
+                    Event::ApprovalRequested { id, reason, .. } => {
+                        if !options.json {
+                            write!(io.err, "Allow {reason}? {APPROVAL_CHOICES}: ")?;
+                            io.err.flush()?;
+                        }
+                        pending = Some(Pending::Approval(*id));
+                    }
+                    Event::QuestionAsked { id, question, options: choices, multi, .. } => {
+                        if !options.json {
+                            writeln!(io.err, "? {question}")?;
+                            for (i, choice) in choices.iter().enumerate() {
+                                writeln!(io.err, "  {}. {choice}", i + 1)?;
+                            }
+                            write!(io.err, "{}", match (choices.is_empty(), multi) {
+                                (true, _) => "answer: ",
+                                (false, false) => "answer (a number, or your own words): ",
+                                (false, true) => "answer (numbers like 1,3, or your own words): ",
+                            })?;
+                            io.err.flush()?;
+                        }
+                        pending = Some(Pending::Question { id: *id, options: choices.clone(), multi: *multi });
+                    }
+                    // The task left the prompt behind (paused or cancelled elsewhere).
+                    Event::TaskState { from: TaskState::AwaitingApproval, to, .. }
+                        if *to != TaskState::Running && pending.take().is_some() && !options.json =>
+                    {
+                        writeln!(io.err)?;
+                    }
+                    _ => {}
+                }
+                if outcome.finished() {
+                    break;
+                }
+                // With the input closed, answer at once instead of waiting.
+                if !input_open && let Some(p) = pending.take() {
+                    answer(handle, p, None, options, io).await?;
+                }
+            }
+            line = lines.recv(), if pending.is_some() && input_open => {
+                if line.is_none() {
+                    input_open = false;
+                }
+                if let Some(p) = pending.take() {
+                    answer(handle, p, line, options, io).await?;
+                }
+            }
+            () = interrupt.notified(), if !interrupted => {
+                interrupted = true;
+                pending = None;
+                if let Some(task) = outcome.task() {
+                    let _ = handle.send(Op::Interrupt { task }).await;
+                }
+            }
+        }
+    }
     Ok(outcome.exit_code())
 }
 
-/// What came back from a prompt.
-enum Answer {
-    /// A line of input.
-    Line(String),
-    /// The input was closed (end of a pipe).
-    Closed,
-    /// Ctrl-C while waiting.
-    Interrupted,
+/// Sends the answer to a prompt; `None` means the input was closed.
+async fn answer(
+    handle: &SessionHandle,
+    pending: Pending,
+    line: Option<String>,
+    options: &RunOptions,
+    io: &mut Io,
+) -> std::io::Result<()> {
+    if !options.json {
+        match &line {
+            // A terminal echoes what was typed; piped input does not.
+            Some(line) if io.echo_input => writeln!(io.err, "{line}")?,
+            None => writeln!(io.err)?,
+            Some(_) => {}
+        }
+    }
+    let op = match pending {
+        Pending::Approval(request) => Op::Approve {
+            request,
+            decision: match &line {
+                Some(line) => parse_decision(line),
+                None => Decision::Deny {
+                    reason: Some("no answer (input closed)".into()),
+                },
+            },
+        },
+        Pending::Question { id, options, multi } => Op::Answer {
+            request: id,
+            answer: match &line {
+                Some(line) => parse_answer(line, &options, multi),
+                None => "(no answer: the input was closed)".into(),
+            },
+        },
+    };
+    let _ = handle.send(op).await;
+    Ok(())
 }
 
-/// Shows `prompt` (if any) and reads one line, echoing it when `echo` is set.
-async fn read_answer<R: AsyncBufRead + Unpin>(
-    err: &mut dyn Write,
-    answers: &mut tokio::io::Lines<R>,
-    prompt: Option<String>,
-    echo: bool,
-    interrupt: &Notify,
-) -> std::io::Result<Answer> {
-    let shown = prompt.is_some();
-    if let Some(prompt) = prompt {
-        write!(err, "{prompt}")?;
-        err.flush()?;
-    }
-    let line = tokio::select! {
-        line = answers.next_line() => line?,
-        () = interrupt.notified() => return Ok(Answer::Interrupted),
-    };
-    match line {
-        Some(line) => {
-            // A terminal echoes what the user typed, including the newline;
-            // piped input does not, so print it to keep the output readable.
-            if shown && echo {
-                writeln!(err, "{line}")?;
-            }
-            Ok(Answer::Line(line))
-        }
-        None => {
-            if shown {
-                writeln!(err)?;
-            }
-            Ok(Answer::Closed)
+/// Runs `Op::Undo` and reports what was restored.
+async fn undo(
+    handle: &SessionHandle,
+    events: &mut broadcast::Receiver<Envelope>,
+    renderer: &mut Renderer,
+    io: &mut Io,
+) -> std::io::Result<u8> {
+    let _ = handle
+        .send(Op::Undo {
+            session: handle.id(),
+        })
+        .await;
+    loop {
+        let Ok(envelope) = events.recv().await else {
+            return Ok(exit::ERROR);
+        };
+        renderer.render(&envelope, &mut *io.out, &mut *io.err)?;
+        match &envelope.event {
+            Event::UndoApplied { .. } => return Ok(exit::OK),
+            Event::Warning { kind, .. } if kind == "nothing_to_undo" => return Ok(exit::OK),
+            Event::Error { .. } => return Ok(exit::ERROR),
+            _ => {}
         }
     }
+}
+
+/// Runs one prompt in a new session and returns the exit code (the
+/// `harness run` path; see [`execute`] for the general one).
+///
+/// # Errors
+/// Only I/O errors writing output.
+pub async fn run_session(
+    options: RunOptions,
+    deps: RuntimeDeps,
+    persona: ActivePersona,
+    prompt: String,
+    io: &mut Io,
+    interrupt: Arc<Notify>,
+) -> std::io::Result<u8> {
+    let no_lock = |_: SessionId| Ok(Box::new(()) as Box<dyn std::any::Any + Send>);
+    execute(
+        &options,
+        deps,
+        persona,
+        Target::New,
+        Action::Prompt(prompt),
+        &no_lock,
+        io,
+        interrupt,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -301,7 +474,7 @@ mod tests {
     use crate::render::exit;
     use harness_ports::{SystemClock, ToolRegistry};
     use harness_testkit::FakeProvider;
-    use harness_tools::{MemoryBlobStore, MemoryReadLedger, Unsandboxed};
+    use harness_tools::{MemoryReadLedger, Unsandboxed};
     use serde_json::json;
     use std::sync::Mutex;
 
@@ -360,14 +533,18 @@ mod tests {
         answers: &str,
         dir: &std::path::Path,
     ) -> (u8, Outputs) {
+        let store = Arc::new(harness_store_sqlite::SqliteStore::open(dir).unwrap());
         let deps = RuntimeDeps {
             provider: Arc::new(fake),
             tools: harness_tools::builtin_registry().unwrap_or_else(|_| ToolRegistry::new()),
             clock: Arc::new(SystemClock),
             sandbox: Arc::new(Unsandboxed),
-            blobs: Arc::new(MemoryBlobStore::default()),
+            blobs: Arc::clone(&store) as _,
             ledger: Arc::new(MemoryReadLedger::default()),
             policy: test_policy(dir, approval),
+            log: Arc::clone(&store) as _,
+            sessions: Arc::clone(&store) as _,
+            snapshots: Arc::clone(&store) as _,
         };
         let (out, err) = (Buffer::default(), Buffer::default());
         let mut io = Io {
@@ -377,7 +554,6 @@ mod tests {
             echo_input: true,
         };
         let options = RunOptions {
-            prompt: "go".into(),
             json,
             max_turns: 10,
             output_cap_tokens: 2_000,
@@ -389,6 +565,7 @@ mod tests {
             options,
             deps,
             harness_context::builtin_default(),
+            "go".into(),
             &mut io,
             Arc::new(Notify::new()),
         )

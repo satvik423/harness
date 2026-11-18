@@ -1,32 +1,51 @@
 //! The session actor and its public handle.
+//!
+//! One actor owns a session: its segment, its event numbering (through the
+//! [`Journal`]) and its one active task. A task is either running on its own
+//! tokio task, or paused (kept here with its unanswered tool round) until it is
+//! resumed or cancelled. While a task is active the actor also checks the
+//! store for control requests from other processes (`harness task pause ID`).
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use harness_context::{
     ActivePersona, Environment, SegmentContext, SegmentSpec, load_project_instructions,
 };
 use harness_ports::{
-    BlobStore, Clock, EventSink, Policy, Provider, ReadLedger, Sandbox, ToolRegistry,
+    BlobStore, Clock, EventLog, Policy, Provider, ReadLedger, Sandbox, SessionRecord,
+    SessionStatus, SessionStore, SnapshotStore, StoreError, TaskControl, ToolRegistry,
 };
 use harness_protocol::{Envelope, Event, InputItem, Op, TaskState};
-use harness_types::{ContentBlock, SessionId, TaskId};
+use harness_types::{ContentBlock, Message, SessionId, TaskId};
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
+use crate::ApprovalMode;
 use crate::approval::{Approvals, Questions};
-use crate::turn::{StopKind, StopSlot, TaskCtx, run_task};
-use crate::{ApprovalMode, BroadcastSink};
+use crate::journal::Journal;
+use crate::replay::{PausedTask, rebuild, recover};
+use crate::turn::{PauseFlag, Round, Start, StopKind, StopSlot, TaskCtx, TaskResult, run_task};
 
-/// Errors from talking to a session.
+/// Errors from starting or talking to a session.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RuntimeError {
     /// The session actor has stopped.
     #[error("the session has stopped")]
     Closed,
+    /// No session with this id is stored.
+    #[error("no session {0} in this project")]
+    NotFound(SessionId),
+    /// The store failed.
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    /// The stored events do not form a valid session.
+    #[error("the stored session is inconsistent: {0}")]
+    Corrupt(String),
 }
 
 /// The adapters a session uses, all behind ports.
@@ -46,6 +65,12 @@ pub struct RuntimeDeps {
     pub ledger: Arc<dyn ReadLedger>,
     /// Decides allow, ask or deny for every tool call.
     pub policy: Arc<dyn Policy>,
+    /// The append-only event log (source of truth).
+    pub log: Arc<dyn EventLog>,
+    /// The session catalogue and task-control mailbox.
+    pub sessions: Arc<dyn SessionStore>,
+    /// File snapshots for undo.
+    pub snapshots: Arc<dyn SnapshotStore>,
 }
 
 /// Per-session settings.
@@ -53,17 +78,27 @@ pub struct RuntimeDeps {
 pub struct SessionConfig {
     /// Project directory.
     pub cwd: PathBuf,
-    /// The persona for every task in this session.
+    /// The persona for new segments in this session.
     pub persona: ActivePersona,
     /// How calls needing approval are answered.
     pub approval: ApprovalMode,
-    /// Maximum model calls per task.
+    /// Maximum model calls per task run.
     pub max_turns: u32,
     /// Tool output cap in estimated tokens, unless a tool sets its own
     /// (`context.output_cap_tokens`, default 2,000).
     pub output_cap_tokens: u64,
     /// Parallel-safe calls run at once, at most (`runtime.max_parallel_tools`).
     pub max_parallel_tools: usize,
+}
+
+/// What resuming a session found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Resumed {
+    /// The session's paused task, if it has one; send `Op::Resume` to continue it.
+    pub paused: Option<TaskId>,
+    /// `true` if that task was running when the harness last stopped and has
+    /// just been recovered (Tech spec 3.14).
+    pub recovered: bool,
 }
 
 /// A cloneable handle for sending ops to a session.
@@ -100,48 +135,101 @@ impl SessionHandle {
 const OP_CAPACITY: usize = 64;
 /// Capacity of each session's event channel; lagging subscribers miss events.
 const EVENT_CAPACITY: usize = 1024;
+/// How often an active task's session checks for control requests.
+const CONTROL_POLL: Duration = Duration::from_millis(250);
 
-/// Starts a session actor on the current tokio runtime.
+/// Starts a new session: registers it in the store, records `SessionOpened`,
+/// and starts its actor on the current tokio runtime.
 ///
-/// Returns the handle and a receiver subscribed before the first event, so the
-/// caller sees `SessionOpened` and everything after it.
-#[must_use]
-pub fn spawn_session(
+/// Returns the handle and a receiver subscribed before the first event.
+///
+/// # Errors
+/// [`RuntimeError::Store`] if the session cannot be registered.
+pub async fn spawn_session(
     deps: RuntimeDeps,
     config: SessionConfig,
-) -> (SessionHandle, broadcast::Receiver<Envelope>) {
+) -> Result<(SessionHandle, broadcast::Receiver<Envelope>), RuntimeError> {
     let id = SessionId::new();
-    let (ops_tx, ops_rx) = mpsc::channel(OP_CAPACITY);
+    deps.sessions
+        .create_session(SessionRecord {
+            id,
+            created_at: deps.clock.now_ms(),
+            title: None,
+            persona: config.persona.name.clone(),
+            cwd: config.cwd.clone(),
+            status: SessionStatus::Open,
+            parent: None,
+            forked_at: None,
+            current_segment: 0,
+        })
+        .await?;
     let (events_tx, events_rx) = broadcast::channel(EVENT_CAPACITY);
-    let sink: Arc<dyn EventSink> = Arc::new(BroadcastSink::new(
+    let journal = Arc::new(Journal::new(
         id,
+        Arc::clone(&deps.log),
         Arc::clone(&deps.clock),
         events_tx.clone(),
+        None,
+        0,
     ));
-    sink.emit(Event::SessionOpened {
-        persona: config.persona.name.clone(),
-        segment: 0,
-    });
-    let actor = Actor {
+    journal
+        .record(
+            None,
+            Event::SessionOpened {
+                persona: config.persona.name.clone(),
+                segment: 0,
+            },
+        )
+        .await?;
+    let handle = start(Actor::new(id, deps, config, journal, None, None), events_tx);
+    Ok((handle, events_rx))
+}
+
+/// Opens a stored session: rebuilds it from its events, recovers a task that
+/// was running when the harness stopped, and starts its actor.
+///
+/// The receiver is subscribed before recovery, so it sees the recovery events.
+///
+/// # Errors
+/// [`RuntimeError::NotFound`] for an unknown session, [`RuntimeError::Corrupt`]
+/// if its events are inconsistent, or [`RuntimeError::Store`].
+pub async fn resume_session(
+    deps: RuntimeDeps,
+    config: SessionConfig,
+    id: SessionId,
+) -> Result<(SessionHandle, broadcast::Receiver<Envelope>, Resumed), RuntimeError> {
+    if deps.sessions.session(id).await?.is_none() {
+        return Err(RuntimeError::NotFound(id));
+    }
+    let mut rebuilt = rebuild(deps.log.as_ref(), deps.blobs.as_ref(), id).await?;
+    let (events_tx, events_rx) = broadcast::channel(EVENT_CAPACITY);
+    let segment_no = rebuilt.segment.as_ref().map_or(0, SegmentContext::segment);
+    let journal = Arc::new(Journal::new(
         id,
-        deps,
-        config,
-        sink,
-        ops: ops_rx,
-        segment: None,
-        approvals: Arc::default(),
-        questions: Arc::default(),
-        running: None,
+        Arc::clone(&deps.log),
+        Arc::clone(&deps.clock),
+        events_tx.clone(),
+        rebuilt.last_seq,
+        segment_no,
+    ));
+    let paused = recover(&journal, &mut rebuilt).await?;
+    let resumed = Resumed {
+        paused: paused.as_ref().map(|p| p.task),
+        recovered: paused.as_ref().is_some_and(|p| p.recovered),
     };
-    tokio::spawn(actor.run());
-    (
-        SessionHandle {
-            id,
-            ops: ops_tx,
-            events: events_tx,
-        },
-        events_rx,
-    )
+    let actor = Actor::new(id, deps, config, journal, rebuilt.segment, paused);
+    Ok((start(actor, events_tx), events_rx, resumed))
+}
+
+fn start(actor: Actor, events: broadcast::Sender<Envelope>) -> SessionHandle {
+    let id = actor.id;
+    let (ops_tx, ops_rx) = mpsc::channel(OP_CAPACITY);
+    tokio::spawn(actor.run(ops_rx));
+    SessionHandle {
+        id,
+        ops: ops_tx,
+        events,
+    }
 }
 
 /// A task currently running on its own tokio task.
@@ -149,36 +237,76 @@ struct Running {
     task: TaskId,
     cancel: CancellationToken,
     stop: StopSlot,
-    join: JoinHandle<SegmentContext>,
+    pause: Arc<PauseFlag>,
+    finishing: Arc<std::sync::atomic::AtomicBool>,
+    join: JoinHandle<TaskResult>,
+}
+
+/// A paused task waiting for `Op::Resume` or `Op::Cancel`.
+struct Paused {
+    task: TaskId,
+    round: Option<Round>,
 }
 
 /// What woke the actor up.
 enum Wake {
     Op(Option<Op>),
-    TaskDone(Result<SegmentContext, tokio::task::JoinError>),
+    TaskDone(Result<TaskResult, tokio::task::JoinError>),
+    Tick,
 }
 
 struct Actor {
     id: SessionId,
     deps: RuntimeDeps,
     config: SessionConfig,
-    sink: Arc<dyn EventSink>,
-    ops: mpsc::Receiver<Op>,
-    /// The current segment while idle; moved into the running task while busy.
+    journal: Arc<Journal>,
+    /// The current segment while no task runs; moved into the running task.
     segment: Option<SegmentContext>,
     approvals: Arc<Approvals>,
     questions: Arc<Questions>,
     running: Option<Running>,
+    paused: Option<Paused>,
+    /// Parent of every task's cancellation token.
+    root: CancellationToken,
 }
 
 impl Actor {
-    async fn run(mut self) {
+    fn new(
+        id: SessionId,
+        deps: RuntimeDeps,
+        config: SessionConfig,
+        journal: Arc<Journal>,
+        segment: Option<SegmentContext>,
+        paused: Option<PausedTask>,
+    ) -> Self {
+        Self {
+            id,
+            deps,
+            config,
+            journal,
+            segment,
+            approvals: Arc::default(),
+            questions: Arc::default(),
+            running: None,
+            paused: paused.map(|p| Paused {
+                task: p.task,
+                round: p.round,
+            }),
+            root: CancellationToken::new(),
+        }
+    }
+
+    async fn run(mut self, mut ops: mpsc::Receiver<Op>) {
+        let mut tick = tokio::time::interval(CONTROL_POLL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             // Compute what happened first, then act on it, so the select's
             // borrows of `self` end before the handlers run.
+            let active = self.running.is_some() || self.paused.is_some();
             let wake = tokio::select! {
-                op = self.ops.recv() => Wake::Op(op),
+                op = ops.recv() => Wake::Op(op),
                 joined = join_running(&mut self.running) => Wake::TaskDone(joined),
+                _ = tick.tick(), if active => Wake::Tick,
             };
             match wake {
                 Wake::Op(None | Some(Op::Shutdown)) => {
@@ -187,49 +315,99 @@ impl Actor {
                 }
                 Wake::Op(Some(op)) => self.handle(op).await,
                 Wake::TaskDone(joined) => {
-                    self.running = None;
-                    match joined {
-                        Ok(segment) => self.segment = Some(segment),
-                        Err(e) => {
-                            self.warn(
-                                "internal",
-                                format!(
-                                    "the task stopped unexpectedly ({e}); starting a fresh segment"
-                                ),
-                            );
-                            self.segment = None;
-                        }
+                    if let Some(running) = self.running.take() {
+                        self.task_done(running.task, joined).await;
                     }
                 }
+                Wake::Tick => self.poll_controls().await,
             }
         }
     }
 
+    async fn task_done(
+        &mut self,
+        task: TaskId,
+        joined: Result<TaskResult, tokio::task::JoinError>,
+    ) {
+        match joined {
+            Ok(result) => {
+                if result.state == TaskState::Paused {
+                    self.paused = Some(Paused {
+                        task,
+                        round: result.round,
+                    });
+                }
+                self.segment = Some(result.segment);
+            }
+            Err(e) => {
+                self.warn(
+                    "internal",
+                    format!("the task stopped unexpectedly ({e}); starting a fresh segment"),
+                )
+                .await;
+                self.segment = None;
+            }
+        }
+    }
+
+    /// Collects a task that has already finished but whose end the actor has
+    /// not processed yet: it records its final state just before its handle
+    /// completes, so an op can arrive in between.
+    async fn reap_finished(&mut self) {
+        let finished = |r: &Running| {
+            r.join.is_finished() || r.finishing.load(std::sync::atomic::Ordering::SeqCst)
+        };
+        if self.running.as_ref().is_some_and(finished)
+            && let Some(running) = self.running.take()
+        {
+            let joined = running.join.await;
+            self.task_done(running.task, joined).await;
+        }
+    }
+
     async fn handle(&mut self, op: Op) {
+        self.reap_finished().await;
         match op {
             Op::Submit { session, input } => self.submit(session, input).await,
             Op::Approve { request, decision } => {
                 if !self.approvals.resolve(&request, decision) {
-                    self.warn("unknown_approval", format!("no pending approval {request}"));
+                    self.warn("unknown_approval", format!("no pending approval {request}"))
+                        .await;
                 }
             }
             Op::Answer { request, answer } => {
                 if !self.questions.resolve(&request, answer) {
-                    self.warn("unknown_question", format!("no pending question {request}"));
+                    self.warn("unknown_question", format!("no pending question {request}"))
+                        .await;
                 }
             }
-            Op::Interrupt { task } => self.stop_task(task, StopKind::Interrupt),
-            Op::Cancel { task } => self.stop_task(task, StopKind::Cancel),
-            Op::Pause { .. } | Op::Resume { .. } => self.warn(
-                "unsupported",
-                "pause and resume arrive in Phase 3; use interrupt".into(),
-            ),
-            Op::Compact { .. } => self.warn("unsupported", "compaction arrives in Phase 5".into()),
+            Op::Interrupt { task } => self.stop_task(task, StopKind::Interrupt).await,
+            Op::Cancel { task } => self.cancel(task).await,
+            Op::Pause { task } => self.pause(task).await,
+            Op::Resume { task } => self.resume(task).await,
+            Op::Undo { session } => self.undo(session).await,
+            Op::Compact { .. } => {
+                self.warn("unsupported", "compaction arrives in Phase 5".into())
+                    .await;
+            }
             Op::SwitchPersona { .. } => {
                 self.warn("unsupported", "persona switching arrives in Phase 6".into())
+                    .await;
             }
-            Op::Fork { .. } | Op::CreateSession { .. } | Op::ResumeSession { .. } => {
-                self.warn("unsupported", "session storage arrives in Phase 3".into());
+            Op::Fork { .. } => {
+                self.warn(
+                    "unsupported",
+                    "fork arrives with compaction in Phase 5".into(),
+                )
+                .await;
+            }
+            Op::CreateSession { .. } | Op::ResumeSession { .. } => {
+                self.warn(
+                    "unsupported",
+                    "one actor runs one session; create or resume sessions through the front-end"
+                        .into(),
+                )
+                .await;
             }
             Op::Shutdown => {}
         }
@@ -240,14 +418,16 @@ impl Actor {
             self.error(
                 "unknown_session",
                 format!("this is session {}, not {session}", self.id),
-            );
+            )
+            .await;
             return;
         }
         if self.running.is_some() {
             self.error(
                 "busy",
                 "a task is already running; wait for it, interrupt it, or cancel it".into(),
-            );
+            )
+            .await;
             return;
         }
         let mut content = Vec::new();
@@ -255,28 +435,52 @@ impl Actor {
             match item {
                 InputItem::Text { text } => content.push(ContentBlock::text(text)),
                 InputItem::File { .. } | InputItem::Blob { .. } => {
-                    self.error("unsupported", "attachments arrive in Phase 11".into());
+                    self.error("unsupported", "attachments arrive in Phase 11".into())
+                        .await;
                     return;
                 }
             }
         }
         if content.is_empty() {
-            self.error("empty_input", "nothing to send".into());
+            self.error("empty_input", "nothing to send".into()).await;
             return;
+        }
+        // New input supersedes a paused task (typically one just interrupted):
+        // close it as cancelled, answering any unanswered calls, then start anew.
+        if let Some(paused) = self.paused.take()
+            && let Some(segment) = self.segment.take()
+        {
+            self.start_task(paused.task, segment, Start::Cancel(paused.round));
+            if let Some(running) = self.running.take() {
+                let joined = running.join.await;
+                self.task_done(running.task, joined).await;
+                if self.segment.is_none() {
+                    return;
+                }
+            }
         }
         let segment = match self.segment.take() {
             Some(segment) => segment,
             None => match self.open_segment().await {
                 Ok(segment) => segment,
                 Err(message) => {
-                    self.error("segment", message);
+                    self.error("segment", message).await;
                     return;
                 }
             },
         };
-        let task = TaskId::new();
-        let cancel = CancellationToken::new();
+        self.start_task(TaskId::new(), segment, Start::New(content));
+    }
+
+    fn start_task(&mut self, task: TaskId, segment: SegmentContext, start: Start) {
+        let cancel = self.root.child_token();
         let stop: StopSlot = Arc::default();
+        let pause: Arc<PauseFlag> = Arc::default();
+        let finishing: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+        let initial = match start {
+            Start::New(_) => TaskState::Queued,
+            Start::Continue(_) | Start::Cancel(_) => TaskState::Paused,
+        };
         let ctx = TaskCtx {
             session: self.id,
             task,
@@ -286,27 +490,30 @@ impl Actor {
             max_turns: self.config.max_turns,
             output_cap_tokens: self.config.output_cap_tokens,
             max_parallel_tools: self.config.max_parallel_tools,
-            sink: Arc::clone(&self.sink),
+            journal: Arc::clone(&self.journal),
             approvals: Arc::clone(&self.approvals),
             questions: Arc::clone(&self.questions),
             cancel: cancel.clone(),
             stop: Arc::clone(&stop),
-            state: Arc::new(std::sync::Mutex::new(TaskState::Queued)),
+            pause: Arc::clone(&pause),
+            state: Arc::new(std::sync::Mutex::new(initial)),
+            finishing: Arc::clone(&finishing),
         };
-        let persona = self.config.persona.clone();
         let span = tracing::info_span!("task", session = %self.id, task = %task);
-        let join = tokio::spawn(
-            async move { run_task(ctx, segment, content, &persona).await }.instrument(span),
-        );
+        let join =
+            tokio::spawn(async move { run_task(ctx, segment, start).await }.instrument(span));
         self.running = Some(Running {
             task,
             cancel,
             stop,
+            pause,
+            finishing,
             join,
         });
     }
 
-    /// Opens segment 0: gathers the environment and AGENTS.md off the async workers.
+    /// Opens segment 0: gathers the environment and AGENTS.md off the async
+    /// workers, stores the frozen frame as a blob and records `SegmentOpened`.
     async fn open_segment(&self) -> Result<SegmentContext, String> {
         let cwd = self.config.cwd.clone();
         let now = self.deps.clock.now_ms();
@@ -323,16 +530,37 @@ impl Actor {
         environment
             .notes
             .push(approval_note(self.config.approval).into());
-        Ok(SegmentContext::open(SegmentSpec {
+        let segment = SegmentContext::open(SegmentSpec {
             persona: self.config.persona.clone(),
             tools: self.deps.tools.specs(),
             instructions: instructions.render(),
             environment: environment.render(),
             segment: 0,
-        }))
+        });
+        let frame = serde_json::to_vec(segment.frame())
+            .map_err(|e| format!("cannot encode the segment frame: {e}"))?;
+        let frame = self
+            .deps
+            .blobs
+            .put(frame, "application/json", Some("segment-frame.json"))
+            .await
+            .map_err(|e| format!("cannot store the segment frame: {e}"))?;
+        self.journal.set_segment(segment.segment());
+        self.journal
+            .record(
+                None,
+                Event::SegmentOpened {
+                    segment: segment.segment(),
+                    opener: Message::user_text(segment.frame().opener.clone()),
+                    frame,
+                },
+            )
+            .await
+            .map_err(|e| format!("cannot record the new segment: {e}"))?;
+        Ok(segment)
     }
 
-    fn stop_task(&self, task: TaskId, kind: StopKind) {
+    async fn stop_task(&self, task: TaskId, kind: StopKind) {
         match &self.running {
             Some(running) if running.task == task => {
                 *running
@@ -341,7 +569,155 @@ impl Actor {
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(kind);
                 running.cancel.cancel();
             }
-            _ => self.warn("no_such_task", format!("task {task} is not running")),
+            _ => {
+                self.warn("no_such_task", format!("task {task} is not running"))
+                    .await;
+            }
+        }
+    }
+
+    async fn pause(&self, task: TaskId) {
+        match &self.running {
+            Some(running) if running.task == task => running.pause.request(),
+            _ => {
+                self.warn("no_such_task", format!("task {task} is not running"))
+                    .await;
+            }
+        }
+    }
+
+    async fn resume(&mut self, task: TaskId) {
+        match self.paused.take() {
+            Some(paused) if paused.task == task => {
+                let Some(segment) = self.segment.take() else {
+                    self.error("internal", "the paused task has no segment".into())
+                        .await;
+                    return;
+                };
+                self.start_task(task, segment, Start::Continue(paused.round));
+            }
+            other => {
+                self.paused = other;
+                self.warn("no_such_task", format!("task {task} is not paused"))
+                    .await;
+            }
+        }
+    }
+
+    async fn cancel(&mut self, task: TaskId) {
+        if self.running.as_ref().is_some_and(|r| r.task == task) {
+            self.stop_task(task, StopKind::Cancel).await;
+            return;
+        }
+        match self.paused.take() {
+            Some(paused) if paused.task == task => match self.segment.take() {
+                Some(segment) => self.start_task(task, segment, Start::Cancel(paused.round)),
+                None => {
+                    self.error("internal", "the paused task has no segment".into())
+                        .await;
+                }
+            },
+            other => {
+                self.paused = other;
+                self.warn(
+                    "no_such_task",
+                    format!("task {task} is not running or paused"),
+                )
+                .await;
+            }
+        }
+    }
+
+    /// Applies control requests left by other processes.
+    async fn poll_controls(&mut self) {
+        let controls = match self.deps.sessions.take_controls(self.id).await {
+            Ok(controls) => controls,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read task control requests");
+                return;
+            }
+        };
+        for (task, control) in controls {
+            tracing::info!(%task, ?control, "control request from another process");
+            match control {
+                TaskControl::Pause => self.pause(task).await,
+                TaskControl::Resume => self.resume(task).await,
+                TaskControl::Cancel => self.cancel(task).await,
+            }
+        }
+    }
+
+    /// Restores the files of the last turn that changed any, records
+    /// `UndoApplied`, and queues a note so the model learns what was reverted.
+    async fn undo(&mut self, session: SessionId) {
+        if session != self.id {
+            self.error(
+                "unknown_session",
+                format!("this is session {}, not {session}", self.id),
+            )
+            .await;
+            return;
+        }
+        if self.running.is_some() {
+            self.error(
+                "busy",
+                "a task is running; wait for it or interrupt it before undoing".into(),
+            )
+            .await;
+            return;
+        }
+        let undone = match self.deps.snapshots.undo_last_turn(self.id).await {
+            Ok(Some(undone)) => undone,
+            Ok(None) => {
+                self.warn("nothing_to_undo", "no file changes left to undo".into())
+                    .await;
+                return;
+            }
+            Err(e) => {
+                self.error("undo", format!("undo failed: {e}")).await;
+                return;
+            }
+        };
+        let task = match self.deps.log.range(self.id, undone.turn, undone.turn).await {
+            Ok(events) => events.first().and_then(|e| e.task),
+            Err(_) => None,
+        };
+        let Some(task) = task else {
+            self.error(
+                "undo",
+                format!("event #{} does not belong to a task", undone.turn.0),
+            )
+            .await;
+            return;
+        };
+        let paths: Vec<String> = undone
+            .paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        let note = format!(
+            "The user reverted these files to their state before your changes in event #{}: {}. Re-read them before editing.",
+            undone.turn.0,
+            paths.join(", ")
+        );
+        let _ = self
+            .journal
+            .record(Some(task), Event::UndoApplied { task, paths })
+            .await;
+        if self
+            .journal
+            .record(
+                Some(task),
+                Event::SystemNote {
+                    task,
+                    text: note.clone(),
+                },
+            )
+            .await
+            .is_ok()
+            && let Some(segment) = &mut self.segment
+        {
+            segment.push_note(note);
         }
     }
 
@@ -353,30 +729,41 @@ impl Actor {
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(StopKind::Cancel);
             running.cancel.cancel();
             // Give the task a moment to record its final state.
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), running.join).await;
+            let _ = tokio::time::timeout(Duration::from_secs(5), running.join).await;
         }
+        self.root.cancel();
     }
 
-    fn warn(&self, kind: &str, message: String) {
-        self.sink.emit(Event::Warning {
-            kind: kind.into(),
-            message,
-        });
+    async fn warn(&self, kind: &str, message: String) {
+        let _ = self
+            .journal
+            .record(
+                None,
+                Event::Warning {
+                    kind: kind.into(),
+                    message,
+                },
+            )
+            .await;
     }
 
-    fn error(&self, kind: &str, message: String) {
-        self.sink.emit(Event::Error {
-            kind: kind.into(),
-            message,
-            hint: None,
-        });
+    async fn error(&self, kind: &str, message: String) {
+        let _ = self
+            .journal
+            .record(
+                None,
+                Event::Error {
+                    kind: kind.into(),
+                    message,
+                    hint: None,
+                },
+            )
+            .await;
     }
 }
 
 /// Waits for the running task, or forever when idle.
-async fn join_running(
-    running: &mut Option<Running>,
-) -> Result<SegmentContext, tokio::task::JoinError> {
+async fn join_running(running: &mut Option<Running>) -> Result<TaskResult, tokio::task::JoinError> {
     match running {
         Some(r) => (&mut r.join).await,
         None => std::future::pending().await,

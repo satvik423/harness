@@ -7,18 +7,26 @@ The `harness` binary. Wires the adapters into the runtime and hosts the commands
 | Command | What it does |
 |---|---|
 | `harness` | Prints help |
-| `harness run PROMPT [--json] [--model provider/model] [--max-turns N] [--approval on-request\|never] [--dangerously-full-access]` | Runs one prompt headless (Anthropic or OpenAI) and exits. `--approval` overrides the profile's approval policy; the `full` profile needs `--dangerously-full-access` |
+| `harness run PROMPT [--session ID] [--json] [--model provider/model] [--max-turns N] [--approval on-request\|never] [--dangerously-full-access]` | Runs one prompt headless in a new session (or an existing one) and exits |
+| `harness session list` | Sessions of this project, newest first, with their last task state |
+| `harness session show ID` | A session's tasks and events |
+| `harness session resume ID [run flags]` | Continues the paused (or recovered) task |
+| `harness session export ID [--format md\|jsonl] [--output FILE]` | Writes the session (default `.harness/exports/ID.md`) |
+| `harness session undo ID` | Restores the files changed by the last turn |
+| `harness task list [--session ID]` | Tasks with state and reason |
+| `harness task pause\|resume\|cancel ID` | Leaves a request for the process running the session, or acts directly when none does (ADR-031) |
 
-See the [running guide](../guides/running.md) for setup and examples.
+Ids accept any unique prefix. See the [sessions guide](../guides/sessions.md).
 
 ## Library modules
 
 | Module | Purpose |
 |---|---|
-| `run` | `run_session`: drives a session, renders events, asks approvals, handles Ctrl-C; `anthropic_settings` maps config to adapter settings |
+| `run` | `execute(options, deps, persona, Target, Action, locker, io, interrupt)`: opens a new or stored session (taking its lock), performs a prompt, resume, cancel or undo, renders events, answers prompts from a background stdin reader (a pause elsewhere drops a waiting prompt), handles Ctrl-C; `run_session` for a plain prompt |
 | `render` | `Renderer` (human: answer → stdout, activity → stderr; `--json`: one envelope per line) and `Outcome` (exit codes) |
 | `secrets` | `resolve_key(KeyFor::…)`: keyring entry (service `harness`), then the provider's environment variable; errors never show the key and include the `secret-tool` command |
-| `wiring` | `build_provider`: Anthropic or OpenAI adapter for the chosen model; `build_policy`: the policy engine from `[policy]`, the rules files and the flags |
+| `wiring` | `build_provider`; `build_policy`; `session_model` (a stored session's model, from its frame); `Offline` (provider for commands that never call a model) |
+| `sessions` | `session_table`, `task_table`, `event_line`, `export_markdown`, `export_jsonl`, `resolve_session` / `resolve_task` (unique prefixes), `format_time` |
 | `prompt` | `parse_decision` (approval answers: y, s, a, p, n + reason) and `parse_answer` (question answers: option numbers or free text) |
 | `telemetry` | Daily-rotated log file filtered by `HARNESS_LOG` |
 

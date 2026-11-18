@@ -1,7 +1,7 @@
 //! Storage ports: the [`EventLog`] (source of truth) and the [`BlobStore`].
 
 use async_trait::async_trait;
-use harness_protocol::{Envelope, Event};
+use harness_protocol::Envelope;
 use harness_types::{BlobRef, Seq, SessionId, TaskId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -18,6 +18,9 @@ pub enum StoreError {
     /// No such session, event or blob.
     #[error("not found: {0}")]
     NotFound(String),
+    /// The write conflicts with what is stored (for example a sequence gap).
+    #[error("conflict: {0}")]
+    Conflict(String),
     /// Stored data failed to decode.
     #[error("corrupt data: {0}")]
     Corrupt(String),
@@ -26,27 +29,19 @@ pub enum StoreError {
     Backend(String),
 }
 
-/// A request to append one event.
+/// An event as stored: its envelope plus routing data.
+///
+/// The session's single writer builds the whole envelope, including the
+/// sequence number, so an event can refer to its own number (for example the
+/// recall footer of a capped tool result). The log only checks that numbers
+/// are gapless.
 #[derive(Debug, Clone, PartialEq)]
-pub struct AppendRequest {
-    /// The session.
-    pub session: SessionId,
+pub struct LoggedEvent {
+    /// The envelope: sequence number, timestamp, session and event.
+    pub envelope: Envelope,
     /// The task the event belongs to, if any.
     pub task: Option<TaskId>,
     /// The segment the event belongs to.
-    pub segment: u32,
-    /// The event; must satisfy [`Event::is_persisted`].
-    pub event: Event,
-}
-
-/// An event as stored: its envelope plus routing data.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LoggedEvent {
-    /// The envelope with the assigned sequence number and timestamp.
-    pub envelope: Envelope,
-    /// The task, if any.
-    pub task: Option<TaskId>,
-    /// The segment.
     pub segment: u32,
 }
 
@@ -69,17 +64,27 @@ pub struct SearchHit {
 /// callers can perform side effects that depend on it (NFR-03).
 #[async_trait]
 pub trait EventLog: Send + Sync {
-    /// Appends an event and returns it with its assigned [`Seq`] and timestamp.
+    /// Appends one event. Its sequence number must be exactly one more than the
+    /// session's last (or [`Seq::FIRST`] for a session's first event).
     ///
     /// # Errors
-    /// [`StoreError::NotPersistable`] for streaming deltas, [`StoreError::Closed`]
+    /// [`StoreError::NotPersistable`] for streaming deltas,
+    /// [`StoreError::Conflict`] for a gap or a duplicate number,
+    /// [`StoreError::NotFound`] for an unknown session, [`StoreError::Closed`]
     /// after shutdown, or [`StoreError::Backend`] on write failure.
-    async fn append(&self, request: AppendRequest) -> Result<LoggedEvent, StoreError>;
+    async fn append(&self, event: LoggedEvent) -> Result<(), StoreError>;
+
+    /// The session's last sequence number, or `None` if it has no events.
+    ///
+    /// # Errors
+    /// Returns a backend error if the lookup fails.
+    async fn last_seq(&self, session: SessionId) -> Result<Option<Seq>, StoreError>;
 
     /// Returns events `from..=to` of a session, in order.
     ///
     /// # Errors
-    /// [`StoreError::NotFound`] for an unknown session, or a backend error.
+    /// Returns a backend error, or [`StoreError::Corrupt`] if a stored event
+    /// cannot be decoded.
     async fn range(
         &self,
         session: SessionId,

@@ -13,12 +13,13 @@ members = [
     "crates/provider-anthropic",
     "crates/provider-openai",
     "crates/policy",
+    "crates/store-sqlite",
 ]
 # Needs nightly (cargo +nightly fuzz run apply_patch); has its own lockfile.
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.100"
 license = "MIT OR Apache-2.0"
@@ -30,6 +31,7 @@ harness-types = { path = "crates/types" }
 harness-protocol = { path = "crates/protocol" }
 harness-ports = { path = "crates/ports" }
 harness-policy = { path = "crates/policy" }
+harness-store-sqlite = { path = "crates/store-sqlite" }
 harness-config = { path = "crates/config" }
 harness-context = { path = "crates/context" }
 harness-provider-anthropic = { path = "crates/provider-anthropic" }
@@ -51,9 +53,10 @@ grep-regex = "0.1.14"
 grep-searcher = { version = "0.1.17", default-features = false }
 ignore = "0.4.34"
 keyring-core = "1.0.1"
-nix = { version = "0.32.0", default-features = false, features = ["signal"] }
+nix = { version = "0.32.0", default-features = false, features = ["signal", "fs"] }
 pty-process = { version = "0.5.4", default-features = false, features = ["async"] }
 regex = { version = "1.13.1", default-features = false, features = ["std", "perf", "unicode"] }
+rusqlite = { version = "0.43.0", features = ["bundled"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream", "json", "http2", "system-proxy"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

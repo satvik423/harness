@@ -81,11 +81,17 @@ system prompt.
 Logs go to `~/.local/share/harness/logs/harness.YYYY-MM-DD.log`. Use
 `HARNESS_LOG=harness=debug,info` for more detail.
 
-## Current limits (Phase 2)
+## Sessions
+
+Each run is saved; the last line shows its session id. Continue it with
+`harness run --session ID "…"`, list sessions with `harness session list`, and see the
+[sessions guide](sessions.md) for resume, pause, undo and export.
+
+## Current limits (Phase 3)
 
 - Tools: files (`read_file`, `write_file`, `edit_file`, `apply_patch`), search (`glob`,
   `grep`), `shell`, PTY programs (`pty_start`, `pty_write`, `pty_read`, `pty_kill`),
   `todo` and `ask_user`. Web tools arrive later.
 - No sandbox yet: commands run as you, which is why they need approval.
-- Sessions are not saved; resume and pause arrive in Phase 3.
+- Fork arrives with compaction in Phase 5.
 - Text input only; attachments arrive in Phase 11.

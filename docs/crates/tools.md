@@ -26,7 +26,8 @@ one `PtyManager` (at most 8 programs; 1 MiB of unread output each).
 
 ## Modules
 
-- `fs_write`: the shared read-before-edit guard (`check_fresh`), atomic writes
+- `fs_write`: the shared read-before-edit guard (`check_fresh`), the snapshot
+  before each write (`ToolCtx::snapshots`, for undo; no snapshot, no write), atomic writes
   (temp file in the same directory, then rename, keeping permissions) and the
   ledger update after a write, so the model can keep editing a file it wrote.
 - `patch` (public): `parse_patch` → `Patch`, `plan(&Patch, &dyn PatchFs)` → the

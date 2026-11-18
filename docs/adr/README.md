@@ -33,4 +33,10 @@ Each record states the context, the decision and its consequences. Records 0001â
 | [ADR-027](0027-pty-process.md) | PTY tools on `pty-process` (user-approved change from the spec) | Accepted |
 | [ADR-028](0028-ask-user-protocol.md) | `ask_user` events and the `UserChannel` port | Accepted |
 | [ADR-029](0029-policy-port-and-rule-semantics.md) | The policy port and rule semantics | Accepted |
-| [ADR-030](0030-event-sink-emit-with.md) | `EventSink::emit_with` for self-referencing events | Accepted |
+| [ADR-030](0030-event-sink-emit-with.md) | `EventSink::emit_with` for self-referencing events | Superseded by ADR-033 |
+| [ADR-031](0031-task-control-and-session-locks.md) | Task control between processes, and session locks (user decision) | Accepted |
+| [ADR-032](0032-segment-frame.md) | A segment's frozen prefix is stored as a frame | Accepted |
+| [ADR-033](0033-session-writer-numbers-events.md) | The session's writer numbers events; the journal replaces `emit_with` | Accepted |
+| [ADR-034](0034-snapshots-and-undo.md) | Snapshot ports and the undo op | Accepted |
+| [ADR-035](0035-fork-in-phase-5.md) | Fork moves to Phase 5 (user decision) | Accepted |
+| [ADR-036](0036-paused-tasks-and-recovery-edges.md) | Paused tasks, new input, and recovery edge cases | Accepted |

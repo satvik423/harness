@@ -7,12 +7,14 @@ context only (ADR-001, ADR-016).
 
 | Item | Purpose |
 |---|---|
-| `spawn_session(deps, config)` | Starts an actor; returns a `SessionHandle` and an event receiver subscribed before the first event |
+| `spawn_session(deps, config)` | Registers a new session, records `SessionOpened`, starts its actor; returns a `SessionHandle` and an event receiver subscribed before the first event |
+| `resume_session(deps, config, id)` | Rebuilds a stored session from its events, recovers a task that was running when harness stopped, starts its actor; returns `Resumed { paused, recovered }` |
 | `SessionHandle` | `id()`, `send(Op)`, `subscribe()` |
-| `RuntimeDeps` | Provider, tools, clock, sandbox, blob store, read ledger, policy (all `Arc<dyn Port>`) |
-| `SessionConfig` | Working directory, persona, approval mode, max model calls per task, output cap, parallel-call limit |
+| `RuntimeDeps` | Provider, tools, clock, sandbox, blob store, read ledger, policy, event log, session store, snapshot store (all `Arc<dyn Port>`) |
+| `SessionConfig` | Working directory, persona, approval mode, max model calls per task run, output cap, parallel-call limit |
 | `ApprovalMode` | `Ask` (someone can answer prompts) or `Never` (headless: asks become denials, `ask_user` gets "no user available") |
-| `BroadcastSink` | Assigns sequence numbers and timestamps under one lock, broadcasts envelopes; `emit_with` builds an event from its own number (ADR-030) |
+| `RuntimeError` | `Closed`, `NotFound`, `Store`, `Corrupt` |
+| `OUTCOME_UNKNOWN` | The result given to a call that was running when harness stopped |
 
 ## The loop (one task)
 
@@ -37,15 +39,42 @@ context only (ADR-001, ADR-016).
 
 ## Ops handled
 
-`Submit`, `Approve`, `Answer` (for `ask_user`, ADR-028), `Interrupt` (→ Paused),
-`Cancel` (→ Cancelled), `Shutdown`.
+`Submit`, `Approve`, `Answer` (for `ask_user`, ADR-028), `Interrupt` (→ Paused at once),
+`Pause` (→ Paused at the next safe point), `Resume`, `Cancel` (running or paused),
+`Undo` (ADR-034), `Shutdown`. `Fork` answers that it arrives in Phase 5 (ADR-035).
+
+## Durability, resume and recovery (Phase 3)
+
+- **Journal:** every persisted event is numbered by the session's single writer,
+  committed to the event log, then broadcast (ADR-033). The loop waits for the commit
+  before the side effect that depends on it: `TurnStarted` before the model call,
+  `AssistantMessage` before its tools, `ToolStarted` before a tool runs. If the log
+  refuses a write, the task fails before doing anything unsaved.
+- **Frame:** opening a segment stores its frozen prefix as a blob referenced by
+  `SegmentOpened` (ADR-032); resuming rebuilds the segment from it.
+- **Pause:** safe points are before each model call, after each tool (before the next),
+  and after an approval decision; pausing while waiting for approval drops the request
+  (asked again on resume). A paused task keeps its unanswered round and resumes only
+  the calls without results.
+- **Recovery (Tech spec 3.14):** a task found `Running`/`AwaitingApproval` becomes
+  `Recovering`; calls that started but never finished get `OUTCOME_UNKNOWN` and are
+  never re-run; unstarted calls go through the policy again on resume; the task ends
+  `Paused` ("recovered"). Edge cases from ADR-036: a task whose final reply was saved
+  completes on resume without a model call; a task whose input was never saved is failed.
+- **Controls:** while a task is active, the actor takes control requests from the
+  session store every 250 ms (ADR-031).
+- **Undo:** restores the last turn's snapshotted files, records `UndoApplied` and a
+  `SystemNote` sent with the next user message (ADR-034).
+- **New input while paused** supersedes the paused task (cancelled, its open calls
+  answered) (ADR-036).
 `Pause`, `Resume`, `Compact`, `SwitchPersona`, `Fork`, `CreateSession` and
 `ResumeSession` answer with an `unsupported` warning naming the phase that adds them.
 
 ## Design notes
 
 - The actor never blocks: each task runs on its own tokio task, and the actor
-  keeps receiving `Approve`/`Interrupt` while it runs.
+  keeps receiving ops while it runs. Cancellation tokens form a tree: session root,
+  task, call.
 - Interrupting a tool round still appends an error result for every call
   ("not run: the task was interrupted"), so the next input is always valid.
 - AGENTS.md and git are read via `spawn_blocking`, off the async workers.

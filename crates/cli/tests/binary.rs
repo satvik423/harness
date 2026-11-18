@@ -6,10 +6,12 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-/// Runs the binary with HOME pointed at `home` so nothing touches the real user dirs.
+/// Runs the binary with HOME and the working directory in `home`, so nothing
+/// touches the real user dirs or creates `.harness/` inside the repository.
 fn run(home: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_harness"));
     cmd.args(args)
+        .current_dir(home)
         .env("HOME", home)
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("XDG_DATA_HOME")
@@ -135,4 +137,217 @@ fn openai_without_a_key_explains_how_to_store_one() {
         err.contains("no OpenAI API key found") && err.contains("username openai"),
         "{err}"
     );
+}
+
+// ---------- session and task commands (P3-T8) ----------
+
+mod stored {
+    use std::sync::Arc;
+
+    use harness_ports::{
+        BlobStore, EventLog, LoggedEvent, SessionRecord, SessionStatus, SessionStore,
+    };
+    use harness_protocol::{Envelope, Event, TaskState};
+    use harness_store_sqlite::SqliteStore;
+    use harness_types::{ContentBlock, Message, Risk, Role, Seq, SessionId, TaskId};
+
+    /// A project whose session died while a tool call was running.
+    pub(super) fn crashed_project(dir: &std::path::Path) -> (SessionId, TaskId) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let store = Arc::new(SqliteStore::open(dir).unwrap());
+            let id = SessionId::new();
+            let task = TaskId::new();
+            store
+                .create_session(SessionRecord {
+                    id,
+                    created_at: 0,
+                    title: None,
+                    persona: "default".into(),
+                    cwd: dir.into(),
+                    status: SessionStatus::Open,
+                    parent: None,
+                    forked_at: None,
+                    current_segment: 0,
+                })
+                .await
+                .unwrap();
+            let mut persona = harness_context::builtin_default();
+            persona.model = "openai/gpt-test".parse().unwrap();
+            let mut segment = harness_context::SegmentContext::open(harness_context::SegmentSpec {
+                persona,
+                tools: harness_tools::builtin_registry().unwrap().specs(),
+                instructions: None,
+                environment: "<environment>test</environment>".into(),
+                segment: 0,
+            });
+            let frame = store
+                .put(
+                    serde_json::to_vec(segment.frame()).unwrap(),
+                    "application/json",
+                    None,
+                )
+                .await
+                .unwrap();
+            segment
+                .push_user(vec![ContentBlock::text("count the files")])
+                .unwrap();
+            let assistant = Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolCall {
+                    id: "c1".into(),
+                    name: "shell".into(),
+                    input: serde_json::json!({"command": "ls | wc -l"}),
+                }],
+            );
+            let events = vec![
+                Event::SessionOpened {
+                    persona: "default".into(),
+                    segment: 0,
+                },
+                Event::SegmentOpened {
+                    segment: 0,
+                    opener: Message::user_text("<environment>test</environment>"),
+                    frame,
+                },
+                Event::TaskState {
+                    task,
+                    from: TaskState::Queued,
+                    to: TaskState::Running,
+                    reason: "started".into(),
+                },
+                Event::UserInput {
+                    task,
+                    message: segment.messages()[0].clone(),
+                },
+                Event::AssistantMessage {
+                    task,
+                    message: assistant,
+                },
+                Event::ToolCall {
+                    task,
+                    id: "c1".into(),
+                    name: "shell".into(),
+                    input: serde_json::json!({"command": "ls | wc -l"}),
+                    risk: Risk::Exec {
+                        command: "ls | wc -l".into(),
+                    },
+                },
+                Event::ToolStarted {
+                    call_id: "c1".into(),
+                },
+            ];
+            for (n, event) in events.into_iter().enumerate() {
+                store
+                    .append(LoggedEvent {
+                        envelope: Envelope {
+                            seq: Seq(n as u64 + 1),
+                            ts: 0,
+                            session: id,
+                            event,
+                        },
+                        task: Some(task),
+                        segment: 0,
+                    })
+                    .await
+                    .unwrap();
+            }
+            (id, task)
+        })
+    }
+}
+
+#[test]
+fn session_list_in_an_empty_project_says_how_to_start() {
+    let home = tempfile::tempdir().unwrap();
+    let out = run(home.path(), &["session", "list"], &[]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("No sessions"));
+    assert!(
+        !home.path().join(".harness").exists(),
+        "looking must not create state"
+    );
+}
+
+#[test]
+fn stored_sessions_can_be_listed_shown_and_exported_by_prefix() {
+    let home = tempfile::tempdir().unwrap();
+    let (session, task) = stored::crashed_project(home.path());
+    let id = session.to_string();
+
+    let list = run(home.path(), &["session", "list"], &[]);
+    let text = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        text.contains(&id) && text.contains("count the files") && text.contains("running"),
+        "{text}"
+    );
+
+    let show = run(home.path(), &["session", "show", &id[..20]], &[]);
+    let text = String::from_utf8_lossy(&show.stdout);
+    assert!(show.status.success(), "{show:?}");
+    assert!(
+        text.contains("tool_started") && text.contains("shell: ls | wc -l"),
+        "{text}"
+    );
+
+    let export = run(
+        home.path(),
+        &["session", "export", &id, "--format", "jsonl"],
+        &[],
+    );
+    assert!(export.status.success(), "{export:?}");
+    let file = home.path().join(format!(".harness/exports/{id}.jsonl"));
+    assert_eq!(std::fs::read_to_string(file).unwrap().lines().count(), 7);
+
+    let tasks = run(home.path(), &["task", "list"], &[]);
+    assert!(String::from_utf8_lossy(&tasks.stdout).contains(&task.to_string()));
+}
+
+#[test]
+fn pausing_a_task_that_no_process_runs_explains_recovery() {
+    let home = tempfile::tempdir().unwrap();
+    let (_, task) = stored::crashed_project(home.path());
+    let out = run(home.path(), &["task", "pause", &task.to_string()], &[]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("recovered as paused"));
+}
+
+#[test]
+fn cancelling_a_crashed_task_recovers_it_then_cancels_it_without_a_model() {
+    let home = tempfile::tempdir().unwrap();
+    let (session, task) = stored::crashed_project(home.path());
+    let out = run(home.path(), &["task", "cancel", &task.to_string()], &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let tasks = run(
+        home.path(),
+        &["task", "list", "--session", &session.to_string()],
+        &[],
+    );
+    assert!(String::from_utf8_lossy(&tasks.stdout).contains("cancelled"));
+    // The unfinished call was reported, not re-run.
+    let show = run(home.path(), &["session", "show", &session.to_string()], &[]);
+    let text = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        text.contains("c1 failed The harness stopped while this was running"),
+        "{text}"
+    );
+}
+
+#[test]
+fn unknown_or_ambiguous_ids_are_errors() {
+    let home = tempfile::tempdir().unwrap();
+    let out = run(home.path(), &["session", "show", "ZZZZ"], &[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no sessions in this project"));
+    stored::crashed_project(home.path());
+    let out = run(home.path(), &["session", "show", "ZZZZ"], &[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no session starts with"));
 }

@@ -1,6 +1,7 @@
 //! The context engine (Phase 1 subset): builds every model request.
 //!
-//! - [`SegmentContext`]: frozen system prompt and tools, plus an append-only
+//! - [`SegmentContext`], [`SegmentFrame`]: frozen system prompt and tools (storable
+//!   so a segment can be resumed exactly), plus an append-only
 //!   transcript that refuses appends breaking invariants I1 and I2
 //! - [`ActivePersona`], [`builtin_default`]: the persona settings used by a task
 //! - [`load_project_instructions`]: the `AGENTS.md` chain (system slot 5)
@@ -48,4 +49,4 @@ pub use instructions::{
 };
 pub use persona::{ActivePersona, builtin_default};
 pub use prompt::{BASE_PROMPT, BASE_PROMPT_VERSION, DEFAULT_SOUL};
-pub use segment::{SegmentContext, SegmentSpec};
+pub use segment::{SegmentContext, SegmentFrame, SegmentSpec};

@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use harness_ports::{LedgerCheck, ReadLedger, ToolError};
+use harness_ports::{LedgerCheck, ReadLedger, ToolCtx, ToolError};
 use harness_types::TaskId;
 
 use crate::support::stamp_of;
@@ -106,6 +106,27 @@ pub(crate) async fn write_atomic(
         let _ = tokio::fs::remove_file(&tmp).await;
     }
     result
+}
+
+/// Records `path`'s current contents for undo, before a write (FR-SES-05).
+///
+/// # Errors
+/// [`ToolError::Failed`] if the snapshot cannot be stored; the caller must not
+/// write then.
+pub(crate) async fn snapshot(
+    ctx: &ToolCtx,
+    path: &Path,
+    current: Option<&[u8]>,
+    shown: &str,
+) -> Result<(), ToolError> {
+    ctx.snapshots
+        .before_write(path, current)
+        .await
+        .map_err(|e| {
+            ToolError::Failed(format!(
+                "cannot save {shown} for undo ({e}); nothing was changed"
+            ))
+        })
 }
 
 /// Name of the temporary file used to replace `name` atomically.
@@ -244,5 +265,101 @@ mod tests {
         assert_eq!(line_count(""), 0);
         assert_eq!(line_count("a"), 1);
         assert_eq!(line_count("a\nb\n"), 2);
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use std::sync::Arc;
+
+    use serde_json::json;
+
+    use crate::test_support::{RecordedSnapshots, ctx};
+    use crate::{ApplyPatch, EditFile, ReadFile, WriteFile};
+    use harness_ports::{Tool, ToolError};
+
+    fn setup(
+        fail: bool,
+    ) -> (
+        tempfile::TempDir,
+        harness_ports::ToolCtx,
+        Arc<RecordedSnapshots>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut c, _, _) = ctx(dir.path());
+        let snaps = Arc::new(RecordedSnapshots {
+            fail,
+            ..RecordedSnapshots::default()
+        });
+        c.snapshots = snaps.clone();
+        (dir, c, snaps)
+    }
+
+    #[tokio::test]
+    async fn write_and_edit_snapshot_the_previous_contents_first() {
+        let (dir, c, snaps) = setup(false);
+        std::fs::write(dir.path().join("a.txt"), "one").unwrap();
+        WriteFile
+            .run(json!({"path": "new.txt", "content": "x"}), c.clone())
+            .await
+            .unwrap();
+        ReadFile
+            .run(json!({"path": "a.txt"}), c.clone())
+            .await
+            .unwrap();
+        EditFile
+            .run(
+                json!({"path": "a.txt", "old": "one", "new": "two"}),
+                c.clone(),
+            )
+            .await
+            .unwrap();
+        let seen = snaps.seen.lock().unwrap().clone();
+        assert_eq!(seen[0], (dir.path().join("new.txt"), None));
+        assert_eq!(seen[1], (dir.path().join("a.txt"), Some(b"one".to_vec())));
+    }
+
+    #[tokio::test]
+    async fn a_patch_snapshots_every_file_it_changes() {
+        let (dir, c, snaps) = setup(false);
+        std::fs::write(dir.path().join("old.txt"), "bye\n").unwrap();
+        ApplyPatch
+            .run(
+                json!({"patch": "*** Begin Patch\n*** Add File: n.txt\n+1\n*** Delete File: old.txt\n*** End Patch"}),
+                c,
+            )
+            .await
+            .unwrap();
+        let seen = snaps.seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            [
+                (dir.path().join("n.txt"), None),
+                (dir.path().join("old.txt"), Some(b"bye\n".to_vec()))
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn no_file_is_written_when_its_snapshot_fails() {
+        let (dir, c, _) = setup(true);
+        let err = WriteFile
+            .run(json!({"path": "a.txt", "content": "x"}), c.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ToolError::Failed(m) if m.contains("for undo")),
+            "{err}"
+        );
+        assert!(!dir.path().join("a.txt").exists());
+        let err = ApplyPatch
+            .run(
+                json!({"patch": "*** Begin Patch\n*** Add File: b.txt\n+1\n*** End Patch"}),
+                c,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Failed(_)));
+        assert!(!dir.path().join("b.txt").exists());
     }
 }

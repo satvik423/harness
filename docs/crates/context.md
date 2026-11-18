@@ -7,7 +7,8 @@ transcript invariants. Depends only on types and ports.
 
 | Item | Purpose |
 |---|---|
-| `SegmentContext` | Frozen system prompt and tools plus an append-only transcript |
+| `SegmentContext` | Frozen system prompt and tools plus an append-only transcript; `replay_user` rebuilds from stored messages, `push_note` queues a system note for the next user message, `ends_with_reply` |
+| `SegmentFrame` | Everything frozen when a segment opens (provider, model, system, tools, limits, opener); stored as a blob so a resumed segment sends the same prefix (ADR-032) |
 | `SegmentSpec` | Inputs to open a segment (persona, tools, instructions, environment, number) |
 | `ActivePersona`, `builtin_default()` | Persona settings; the built-in `default` uses Claude Opus 5.5 at high effort, 64k output |
 | `load_project_instructions`, `find_git_root` | The `AGENTS.md` chain from the git root down to the working directory, capped at 32 KiB |

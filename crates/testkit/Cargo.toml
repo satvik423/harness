@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+blake3.workspace = true
 futures.workspace = true
 harness-ports.workspace = true
 harness-protocol.workspace = true

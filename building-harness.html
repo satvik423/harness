@@ -322,7 +322,7 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
   <h1>Building Harness</h1>
   <p class="sub">The complete plan for a general-purpose, persona-driven agent harness written in Rust. It combines the best ideas from Claude Code, Codex CLI and Hermes, and adds a context engine that never loses details. This one document is enough to build the whole project.</p>
   <div class="docctl">
-    <div><span>Version</span>1.2 · updated after Phases 0–2</div>
+    <div><span>Version</span>1.3 · updated after Phases 0–3 (v0.1 released)</div>
     <div><span>Date</span>17 Nov 2026</div>
     <div><span>Status</span>Approved for build</div>
     <div><span>Working name</span><code>harness</code> (rename freely)</div>
@@ -393,7 +393,13 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
     <tr><td class="id">1.2</td><td>PTY tools use <code>pty-process</code> instead of <code>portable-pty</code> (unmaintained since Feb 2025); <code>pty_read</code> and <code>pty_kill</code> are read-only</td><td>3.1, 3.5, Ph 2</td><td>ADR-027</td></tr>
     <tr><td class="id">1.2</td><td><code>ask_user</code> reaches the user through <code>QuestionAsked</code> / <code>QuestionAnswered</code> events, <code>Op::Answer</code> and a <code>UserChannel</code> port in <code>ToolCtx</code></td><td>3.3, 3.5</td><td>ADR-028</td></tr>
     <tr><td class="id">1.2</td><td>The <code>Policy</code> port (<code>evaluate</code>, <code>remember</code>) and rule details: remembered commands match exactly, an <code>allow</code> rule with a <code>path</code> must cover every path, built-in deny paths apply to all tools</td><td>2.4, 3.6</td><td>ADR-029</td></tr>
-    <tr><td class="id">1.2</td><td><code>EventSink::emit_with</code>: an event can name its own sequence number (the capped output's recall footer)</td><td>3.5</td><td>ADR-030</td></tr>
+    <tr><td class="id">1.2</td><td><code>EventSink::emit_with</code>: an event can name its own sequence number (the capped output's recall footer)</td><td>3.5</td><td>ADR-030 (superseded by ADR-033)</td></tr>
+    <tr><td class="id">1.3</td><td>Task control between processes: <code>harness task pause|resume|cancel</code> leaves a request in <code>state.db</code> (new <code>task_controls</code> table) that the running process applies at a safe point; one process per session (lock file)</td><td>3.12, 3.16</td><td>ADR-031</td></tr>
+    <tr><td class="id">1.3</td><td>A segment's frozen prefix (provider, model, system, tools, limits, opener) is stored as a blob referenced by <code>SegmentOpened.frame</code>; resume uses it</td><td>3.3, 3.13</td><td>ADR-032</td></tr>
+    <tr><td class="id">1.3</td><td>The session's writer numbers events and commits before broadcasting; <code>EventLog::append</code> takes a numbered event and enforces gapless numbers; <code>EventSink::emit_with</code> removed</td><td>2.3, 3.12</td><td>ADR-033</td></tr>
+    <tr><td class="id">1.3</td><td><code>FileSnapshots</code> in <code>ToolCtx</code>, <code>SnapshotStore</code>, <code>Op::Undo</code>; the undo "turn" is the assistant message whose calls ran</td><td>3.3, 3.5, 3.14</td><td>ADR-034</td></tr>
+    <tr><td class="id">1.3</td><td>Fork (FR-SES-06) moves from Phase 3 to Phase 5, with compaction</td><td>1.7, 3.14, Ph 3, Ph 5</td><td>ADR-035</td></tr>
+    <tr><td class="id">1.3</td><td>One active task per session; new input supersedes a paused task; recovery fails a task whose input was never saved and completes one whose final reply was saved</td><td>3.14</td><td>ADR-036</td></tr>
   </tbody></table></div>
 </section>
 
@@ -592,7 +598,7 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
     <tr><td class="id">FR-SES-03</td><td>Pause at the next safe point and resume later, even after restarting the program.</td><td><span class="pr p1">P1</span></td><td><span class="ph">Ph 3</span></td></tr>
     <tr><td class="id">FR-SES-04</td><td>Crash recovery: no acknowledged event is lost, and interrupted tool calls are reported to the model, never silently re-run.</td><td><span class="pr p1">P1</span></td><td><span class="ph">Ph 3</span></td></tr>
     <tr><td class="id">FR-SES-05</td><td>File snapshots before every write. <code>/undo</code> restores the files changed by the last turn.</td><td><span class="pr p1">P1</span></td><td><span class="ph">Ph 3</span></td></tr>
-    <tr><td class="id">FR-SES-06</td><td>Fork a session at any event.</td><td><span class="pr p2">P2</span></td><td><span class="ph">Ph 3</span></td></tr>
+    <tr><td class="id">FR-SES-06</td><td>Fork a session at any event.</td><td><span class="pr p2">P2</span></td><td><span class="ph">Ph 5</span> <em>(ADR-035)</em></td></tr>
     <tr><td class="id">FR-CTX-01</td><td>Every input and output is stored in the event log, including full tool outputs and raw provider blocks.</td><td><span class="pr p0">P0</span></td><td><span class="ph">Ph 3</span></td></tr>
     <tr><td class="id">FR-CTX-02</td><td>Transcripts sent to a model are append-only within a segment (ADR-003).</td><td><span class="pr p0">P0</span></td><td><span class="ph">Ph 1</span></td></tr>
     <tr><td class="id">FR-CTX-03</td><td>Anchored compaction into a new segment: summary, pinned facts kept verbatim, descriptive anchors.</td><td><span class="pr p1">P1</span></td><td><span class="ph">Ph 5</span></td></tr>
@@ -1220,6 +1226,7 @@ pub enum Risk { ReadOnly { paths: Vec<PathBuf> }, Write { paths: Vec<PathBuf> },
     Approve  { request: ApprovalId, decision: Decision },
     Answer   { request: QuestionId, answer: String },             // ask_user (ADR-028)
     Compact  { session: SessionId, focus: Option<String> },
+    Undo     { session: SessionId },                               // ADR-034
     SwitchPersona { session: SessionId, persona: String },
     Fork     { session: SessionId, at: Seq },
     Shutdown,
@@ -1251,7 +1258,7 @@ pub enum Event {
     HookRan    { hook: String, event: String, outcome: HookOutcome },
     CompactionStarted { segment: u32 },                          // ADR-015
     Compacted  { from_segment: u32, to_segment: u32, anchors: u32, before: u64, after: u64 },
-    SegmentOpened { segment: u32, opener: Message },             // ADR-015
+    SegmentOpened { segment: u32, opener: Message, frame: BlobRef }, // ADR-015, ADR-032
     Recalled   { anchor: Option<String>, tokens: u64, auto: bool },
     SubagentSpawned { parent: TaskId, child: TaskId, persona: String },
     UndoApplied { task: TaskId, paths: Vec<String> },            // ADR-015
@@ -1787,6 +1794,9 @@ CREATE TABLE memories (
 );
 CREATE VIRTUAL TABLE memories_fts USING fts5(title, body, tokenize = 'porter unicode61');
 -- P2: CREATE VIRTUAL TABLE memories_vec USING vec0(embedding float[384]);
+-- 0002 (ADR-031): task control requests from other processes
+CREATE TABLE task_controls (id INTEGER PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id),
+  task_id TEXT NOT NULL, control TEXT NOT NULL, created_at INTEGER NOT NULL);
 -- P2 (optional graph): CREATE TABLE edges(src TEXT, rel TEXT, dst TEXT, PRIMARY KEY(src,rel,dst));</script></div>
   <div class="call tip"><span class="lbl">Write path</span><p>The writer thread receives batches of envelopes, writes <code>events</code> and <code>events_fts</code> in one transaction, commits, and only then acknowledges to the runtime. Side effects (running a tool, calling a model) happen only after the acknowledgement. That one rule gives you NFR-03.</p></div>
 </section>
@@ -1887,11 +1897,12 @@ CREATE VIRTUAL TABLE memories_fts USING fts5(title, body, tokenize = 'porter uni
       <li>For a <code>ToolCall</code> that never started: re-run it if it is ReadOnly. Otherwise put it back through policy (it may ask again).</li>
       <li>For a <code>TurnStarted</code> without <code>AssistantMessage</code>: discard the partial reply. The next resume calls the model again.</li>
       <li>Set the state to Paused with reason <code>recovered</code> and tell the user.</li>
+      <li>Edge cases (ADR-036): if the task's input never reached the log, mark it Failed ("submit it again"); if its final reply did, resuming completes it without a model call.</li>
     </ol></div>
   </div>
   <div class="grid2">
-    <div class="card"><h4>Fork</h4><p><code>Op::Fork{session, at}</code> creates a new session with <code>parent_id</code> and <code>forked_at_seq</code>. Events up to <code>at</code> are read through the parent (not copied). New events go to the child. If <code>at</code> falls mid-segment, the fork starts a new segment with a compaction of the parent's segment up to <code>at</code>, because the old thinking blocks belong to the parent's conversation.</p></div>
-    <div class="card"><h4>Undo</h4><p>Before any write, the tool snapshots each target file (its blob hash, or NULL if it didn't exist). <code>/undo</code> restores every file touched by the last turn and appends an <code>UndoApplied</code> event plus a system note telling the model which files were reverted.</p></div>
+    <div class="card"><h4>Fork</h4><p><code>Op::Fork{session, at}</code> creates a new session with <code>parent_id</code> and <code>forked_at_seq</code>. Events up to <code>at</code> are read through the parent (not copied). New events go to the child. If <code>at</code> falls mid-segment, the fork starts a new segment with a compaction of the parent's segment up to <code>at</code>, because the old thinking blocks belong to the parent's conversation. Built in Phase 5 with compaction (ADR-035).</p></div>
+    <div class="card"><h4>Undo</h4><p>Before any write, the tool snapshots each target file (its blob hash, or NULL if it didn't exist). <code>/undo</code> restores every file touched by the last turn and appends an <code>UndoApplied</code> event plus a system note telling the model which files were reverted. The "turn" is the assistant message whose calls ran; snapshots arrive through <code>ToolCtx::snapshots</code> and a second undo goes one turn further back (ADR-034).</p></div>
   </div>
 </section>
 
@@ -2129,7 +2140,13 @@ theme = "auto"</script></div>
     <div><div class="h"><code>ADR-027</code><b>PTY tools on pty-process</b><span class="st">accepted</span></div><p><b>Context:</b> <code>portable-pty</code> had no release since Feb 2025, drags in an old <code>nix</code> and four more crates, and needs a blocking thread per program. <b>Decision:</b> use <code>pty-process</code> (Oct 2026, one dependency, tokio-native); programs are session leaders so a kill stops the whole group; <code>pty_read</code> and <code>pty_kill</code> are read-only. <b>Consequences:</b> PTY tools are Unix-only, like <code>shell</code>; Windows (P2) needs ConPTY later. Approved by the user.</p></div>
     <div><div class="h"><code>ADR-028</code><b>ask_user events and the UserChannel port</b><span class="st">accepted</span></div><p><b>Context:</b> <code>ask_user</code> must block like an approval, but the protocol had no question event. <b>Decision:</b> <code>QuestionId</code>, <code>Event::QuestionAsked</code> / <code>QuestionAnswered</code>, <code>Op::Answer</code>, and a <code>UserChannel</code> in <code>ToolCtx</code>; headless sessions answer "no user available". <b>Consequences:</b> front-ends render questions and send answers.</p></div>
     <div><div class="h"><code>ADR-029</code><b>The policy port and rule semantics</b><span class="st">accepted</span></div><p><b>Context:</b> the spec gives the rules format and order but not the port or the edge cases. <b>Decision:</b> <code>Policy::evaluate</code> → <code>Verdict</code> (allow, ask, deny with <code>approval_required</code>) and <code>Policy::remember</code>; every call is evaluated; remembered shell commands match exactly; an allow rule with a path must cover every path; built-in deny paths apply to all tools, shell arguments included. <b>Consequences:</b> the runtime holds no rule logic.</p></div>
-    <div><div class="h"><code>ADR-030</code><b>EventSink::emit_with</b><span class="st">accepted</span></div><p><b>Context:</b> the capped output's footer names the sequence number of the event that contains it. <b>Decision:</b> <code>emit_with(|seq| event)</code> assigns the number and builds the event under one lock. <b>Consequences:</b> events reach subscribers in sequence order; the Phase 3 event log keeps the same guarantee.</p></div>
+    <div><div class="h"><code>ADR-030</code><b>EventSink::emit_with</b><span class="st">superseded by ADR-033</span></div><p><b>Context:</b> the capped output's footer names the sequence number of the event that contains it. <b>Decision:</b> <code>emit_with(|seq| event)</code> assigns the number and builds the event under one lock. <b>Consequences:</b> events reach subscribers in sequence order; the Phase 3 event log keeps the same guarantee.</p></div>
+    <div><div class="h"><code>ADR-031</code><b>Task control between processes</b><span class="st">accepted</span></div><p><b>Context:</b> <code>harness task pause ID</code> must reach a task running in another terminal, and there is no server yet. <b>Decision:</b> requests in a <code>task_controls</code> table, taken by the running process every 250 ms and applied at a safe point; an <code>flock</code> per session keeps it to one process. <b>Consequences:</b> portable and testable; up to 250 ms delay. Approved by the user.</p></div>
+    <div><div class="h"><code>ADR-032</code><b>Segment frame</b><span class="st">accepted</span></div><p><b>Context:</b> rebuilding a segment's prefix from the current files could change it and break the cache and thinking. <b>Decision:</b> the frozen prefix is a blob referenced by <code>SegmentOpened.frame</code>; resume uses it, and the CLI builds the provider from it. <b>Consequences:</b> new instructions or tools apply from the next segment.</p></div>
+    <div><div class="h"><code>ADR-033</code><b>The session writer numbers events</b><span class="st">accepted</span></div><p><b>Context:</b> a persisted event must be committed before it is broadcast and before dependent side effects. <b>Decision:</b> the runtime's journal numbers, commits, then broadcasts; the log enforces gapless numbers; <code>emit_with</code> is removed. <b>Consequences:</b> every broadcast persisted event is durable; a refused append stops the task first.</p></div>
+    <div><div class="h"><code>ADR-034</code><b>Snapshots and undo</b><span class="st">accepted</span></div><p><b>Context:</b> the spec names snapshots and <code>/undo</code> but no port or op. <b>Decision:</b> <code>FileSnapshots</code> in <code>ToolCtx</code> (no snapshot, no write), <code>SnapshotStore</code>, <code>Op::Undo</code>; the turn is the assistant message whose calls ran; the model gets a note. <b>Consequences:</b> shell writes are not covered.</p></div>
+    <div><div class="h"><code>ADR-035</code><b>Fork in Phase 5</b><span class="st">accepted</span></div><p><b>Context:</b> a mid-segment fork needs a compaction, which arrives in Phase 5. <b>Decision:</b> build fork with compaction in Phase 5. <b>Consequences:</b> FR-SES-06 moves to Phase 5. Approved by the user.</p></div>
+    <div><div class="h"><code>ADR-036</code><b>Paused tasks and recovery edges</b><span class="st">accepted</span></div><p><b>Context:</b> the spec does not say what new input does to a paused task, and kill -9 runs found unlisted states. <b>Decision:</b> one active task; new input supersedes a paused task (the CLI refuses); a task with no saved input is failed; one with a saved final reply completes on resume. <b>Consequences:</b> recovery always leaves a usable session; 800 kill runs pass.</p></div>
   </div>
 </section>
 
@@ -2255,15 +2272,15 @@ theme = "auto"</script></div>
     exit:'Fixes a seeded bug in a fixture project with fewer than 3 approvals. A deny rule on **/.env* is respected. Patch fuzzing runs 10 minutes clean.',learn:'Policy engines, safe parsing, process control.'},
    {n:3,t:'Store & sessions',w:2,s:6,goal:'Nothing is ever lost. Pause, resume, interrupt, crash recovery and undo all work.',
     reqs:'FR-SES-01..06, FR-CTX-01, FR-IN-03, NFR-03',
-    tasks:['store-sqlite: migrations from 3.12, a writer thread with batched transactions, acknowledge-after-commit.','Blob store (blake3, sharded folders) and blob references in events.','Rebuild a session from events: replay to transcript, current segment, task states.','Task manager with the state machine (2.8, 3.14), safe points, pause flag, CancellationToken tree.','Interrupt: abort the stream, kill the tool process group, AssistantAborted event, error tool_result.','Crash recovery algorithm (3.14), with a kill -9 test harness (200 random runs).','Snapshots before writes. /undo restores the last turn\'s files.','CLI: session list/show/resume/export, task list/pause/resume/cancel. Fork (P2) if time allows.','.harness/.gitignore created automatically on first run.'],
+    tasks:['store-sqlite: migrations from 3.12, a writer thread with batched transactions, acknowledge-after-commit.','Blob store (blake3, sharded folders) and blob references in events.','Rebuild a session from events: replay to transcript, current segment, task states.','Task manager with the state machine (2.8, 3.14), safe points, pause flag, CancellationToken tree.','Interrupt: abort the stream, kill the tool process group, AssistantAborted event, error tool_result.','Crash recovery algorithm (3.14), with a kill -9 test harness (200 random runs).','Snapshots before writes. /undo restores the last turn\'s files.','CLI: session list/show/resume/export/undo, task list/pause/resume/cancel (requests between processes, ADR-031). Fork moved to Phase 5 (ADR-035).','.harness/.gitignore created automatically on first run.'],
     exit:'200 of 200 random-kill runs resume with valid transcripts. Pause followed by a process restart and resume continues correctly. Release v0.1.',learn:'Event sourcing, durability, state machines.',release:true},
    {n:4,t:'Terminal UI',w:2,s:8,goal:'A daily-driver interface built purely on the event stream.',
     reqs:'FR-UI-02, FR-PRV-06',
     tasks:['ratatui app shell: transcript view, input box (tui-textarea), status bar.','Render events: streaming text, tool cards with live output, diffs (similar), todo checklist.','Approval panel with keyboard shortcuts. Notification when the terminal isn\'t focused.','Slash command framework with /help, /model, /effort, /pause, /resume, /tasks, /diff, /undo, /clear.','Attachment paste and drag (file paths become InputItem::File).','Usage and cost accounting (pricing table) shown in the status bar. /cost and /context views.','Markdown rendering with syntect code highlighting.','harness debug last-request and diff-requests commands.'],
     exit:'You use it for a full working day on a real project without falling back to another tool.',learn:'Immediate-mode TUIs, event-driven UIs.'},
    {n:5,t:'Context engine',w:3,s:10,goal:'Long sessions without losing details: anchored compaction, pinned facts, recall.',
-    reqs:'FR-CTX-03/04, FR-TOOL-04, M1, M2',
-    tasks:['Token budgeting: track usage.input, estimate appended content, count_tokens near the threshold.','Compaction trigger logic: preferred at a turn boundary, emergency after a tool round, never mid-call (I4).','Compaction request with the structured output schema (3.13). Segment rendering with event numbers.','Validation: verify pinned quotes, anchor coverage and gap filling, superseded pins.','Segment opener template: environment + summary + pinned facts + anchor index.','recall tool: by anchor, by range, by FTS query, with token paging.','/compact [focus] and /recall commands. Compacted and Recalled events in the TUI.','Needle eval: plant facts, run 200 scripted turns with 2+ compactions, score exact answers. Baseline: server compaction.','Fidelity eval: 50 compactions, pinned facts byte-identical (M2).','Optional Anthropic preserved-thinking live smoke test with prefix_mismatch_behavior "error".'],
+    reqs:'FR-CTX-03/04, FR-TOOL-04, FR-SES-06, M1, M2',
+    tasks:['Token budgeting: track usage.input, estimate appended content, count_tokens near the threshold.','Compaction trigger logic: preferred at a turn boundary, emergency after a tool round, never mid-call (I4).','Compaction request with the structured output schema (3.13). Segment rendering with event numbers.','Validation: verify pinned quotes, anchor coverage and gap filling, superseded pins.','Segment opener template: environment + summary + pinned facts + anchor index.','recall tool: by anchor, by range, by FTS query, with token paging.','/compact [focus] and /recall commands. Compacted and Recalled events in the TUI.','Fork at any event (FR-SES-06, moved from Phase 3, ADR-035): child session reads the parent up to at; mid-segment forks start with a compaction.','Needle eval: plant facts, run 200 scripted turns with 2+ compactions, score exact answers. Baseline: server compaction.','Fidelity eval: 50 compactions, pinned facts byte-identical (M2).','Optional Anthropic preserved-thinking live smoke test with prefix_mismatch_behavior "error".'],
     exit:'Needle accuracy at least 95% (M1), clearly above the baseline. Pinned fidelity 100% (M2). The invariant tests pass across compactions. Release v0.3.',learn:'Context engineering, structured outputs, evals.',release:true},
    {n:6,t:'Personas',w:1,s:13,goal:'Personas as the unit of configuration.',
     reqs:'FR-PER-01..05, FR-SAFE-05',

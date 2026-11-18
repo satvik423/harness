@@ -1,9 +1,11 @@
 //! The `harness` binary's library half.
 //!
-//! Wires the adapters (provider, tools, in-memory stores) into the runtime and
-//! hosts the CLI commands:
+//! Wires the adapters (provider, tools, policy, SQLite store) into the runtime
+//! and hosts the CLI commands:
 //!
-//! - [`run`]: `harness run PROMPT` (headless, approvals on the terminal)
+//! - [`run`]: driving a session from the terminal (`run`, `session resume|undo`,
+//!   `task resume|cancel`): approvals, questions, Ctrl-C, exit codes
+//! - [`sessions`]: tables, event lines, exports and id prefixes for `session` and `task`
 //! - [`prompt`]: parsing approval and question answers
 //! - [`render`]: human and JSON output, exit codes
 //! - [`secrets`]: API keys from the keyring or environment
@@ -22,5 +24,6 @@ pub mod prompt;
 pub mod render;
 pub mod run;
 pub mod secrets;
+pub mod sessions;
 pub mod telemetry;
 pub mod wiring;

@@ -130,6 +130,12 @@ impl FakeProvider {
         self.lock_script().len()
     }
 
+    /// Drops the next scripted turn without serving it (for continuing a
+    /// script in a second process after some turns were used).
+    pub fn skip_turn(&mut self) {
+        self.lock_script().pop_front();
+    }
+
     /// Every request received so far, in order.
     #[must_use]
     pub fn requests(&self) -> Vec<ModelRequest> {

@@ -6,7 +6,7 @@ use harness_types::{ContentBlock, Risk};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::fs_write::{Existing, check_fresh, record_written, write_atomic};
+use crate::fs_write::{Existing, check_fresh, record_written, snapshot, write_atomic};
 use crate::read_file::resolve;
 
 /// Lines of context shown around the first change in the result.
@@ -112,6 +112,7 @@ impl Tool for EditFile {
         } else {
             text.replacen(&input.old, &input.new, 1)
         };
+        snapshot(&ctx, &path, Some(text.as_bytes()), &input.path).await?;
         write_atomic(&path, updated.as_bytes(), &input.path, ctx.task).await?;
         record_written(ctx.ledger.as_ref(), &path).await;
         let replaced = if input.replace_all { count } else { 1 };

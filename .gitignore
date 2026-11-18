@@ -6,5 +6,7 @@ lcov.info
 .harness/state.db*
 .harness/blobs/
 .harness/exports/
+.harness/locks/
+**/.harness/
 .env
 .env.*

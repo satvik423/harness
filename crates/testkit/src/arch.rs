@@ -228,6 +228,7 @@ pub fn harness_rules() -> Vec<LayerRule> {
         adapter("harness-provider-anthropic"),
         adapter("harness-provider-openai"),
         adapter("harness-policy"),
+        adapter("harness-store-sqlite"),
         LayerRule {
             krate: "harness-cli",
             allowed: Allowed::AllExcept(&["harness-testkit"]),

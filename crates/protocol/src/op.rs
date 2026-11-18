@@ -85,6 +85,11 @@ pub enum Op {
         /// Last event included in the fork.
         at: Seq,
     },
+    /// Restore the files changed by the session's last turn (`/undo`).
+    Undo {
+        /// Target session.
+        session: SessionId,
+    },
     /// Shut the core down cleanly.
     Shutdown,
 }
@@ -206,6 +211,9 @@ mod tests {
             Op::Fork {
                 session: s,
                 at: Seq(42),
+            },
+            Op::Undo {
+                session: SessionId::new(),
             },
             Op::Shutdown,
         ]

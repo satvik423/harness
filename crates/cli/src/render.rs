@@ -3,7 +3,7 @@
 use std::io::{self, Write};
 
 use harness_protocol::{Envelope, Event, TaskState};
-use harness_types::{ContentBlock, StopReason};
+use harness_types::{ContentBlock, StopReason, TaskId};
 use serde_json::Value;
 
 /// Exit codes of `harness run` (Tech spec 3.16).
@@ -23,8 +23,13 @@ pub mod exit {
 }
 
 /// Watches events and works out the exit code.
+///
+/// It follows one task: the one passed to [`Outcome::watch`] (resume, cancel),
+/// or else the first task whose state changes (a new prompt). Events of other
+/// tasks do not end the run.
 #[derive(Debug, Default)]
 pub struct Outcome {
+    task: Option<TaskId>,
     final_state: Option<TaskState>,
     task_started: bool,
     refused: bool,
@@ -33,10 +38,30 @@ pub struct Outcome {
 }
 
 impl Outcome {
+    /// Follows `task` from now on.
+    pub fn watch(&mut self, task: TaskId) {
+        self.task = Some(task);
+    }
+
+    /// The task being followed, once known.
+    #[must_use]
+    pub fn task(&self) -> Option<TaskId> {
+        self.task
+    }
+
+    /// The state the followed task ended in, once it has.
+    #[must_use]
+    pub fn final_state(&self) -> Option<TaskState> {
+        self.final_state
+    }
+
     /// Records one event.
     pub fn observe(&mut self, event: &Event) {
         match event {
-            Event::TaskState { to, .. } => {
+            Event::TaskState { task, to, .. } => {
+                if *self.task.get_or_insert(*task) != *task {
+                    return;
+                }
                 self.task_started = true;
                 if matches!(
                     to,
@@ -54,7 +79,7 @@ impl Outcome {
                 ..
             } => self.refused = true,
             Event::Warning { kind, .. } if kind == "approval_denied" => {
-                self.denied_without_asking = true
+                self.denied_without_asking = true;
             }
             // An error before any task started (busy, bad input) ends the run.
             Event::Error { .. } if !self.task_started => self.error_before_task = true,
@@ -147,6 +172,9 @@ impl Renderer {
                 writeln!(err, "  {} {}", if *ok { "✓" } else { "✗" }, last_line(sent))?;
             }
             Event::Warning { message, .. } => writeln!(err, "warning: {message}")?,
+            Event::UndoApplied { paths, .. } => {
+                writeln!(err, "↺ restored {}", paths.join(", "))?;
+            }
             Event::Error { message, hint, .. } => {
                 self.end_line(out)?;
                 writeln!(err, "error: {message}")?;
@@ -157,6 +185,8 @@ impl Renderer {
             Event::TaskState { to, reason, .. } => match to {
                 TaskState::Failed => writeln!(err, "task failed: {reason}")?,
                 TaskState::BudgetExhausted => writeln!(err, "stopped: {reason}")?,
+                // A requested pause is reported by the driver, with how to resume.
+                TaskState::Paused if reason == "paused" => {}
                 TaskState::Paused => writeln!(err, "interrupted")?,
                 TaskState::Cancelled => writeln!(err, "cancelled")?,
                 _ => {}
@@ -474,6 +504,42 @@ mod tests {
     }
 
     #[test]
+    fn a_requested_pause_is_not_called_an_interruption() {
+        let paused = |reason: &str| Event::TaskState {
+            task: TaskId::new(),
+            from: TaskState::Running,
+            to: TaskState::Paused,
+            reason: reason.into(),
+        };
+        let (_, err) = render(&mut Renderer::new(false), vec![paused("paused")]);
+        assert_eq!(err, "");
+        let (_, err) = render(&mut Renderer::new(false), vec![paused("interrupted")]);
+        assert_eq!(err, "interrupted\n");
+    }
+
+    #[test]
+    fn only_the_watched_task_ends_the_run() {
+        let mut o = Outcome::default();
+        let mine = TaskId::new();
+        o.watch(mine);
+        o.observe(&Event::TaskState {
+            task: TaskId::new(),
+            from: TaskState::Paused,
+            to: TaskState::Cancelled,
+            reason: String::new(),
+        });
+        assert!(!o.finished());
+        o.observe(&Event::TaskState {
+            task: mine,
+            from: TaskState::Running,
+            to: TaskState::Paused,
+            reason: String::new(),
+        });
+        assert_eq!(o.final_state(), Some(TaskState::Paused));
+        assert_eq!(o.exit_code(), exit::INTERRUPTED);
+    }
+
+    #[test]
     fn finished_after_a_terminal_state_or_an_early_error() {
         let mut o = Outcome::default();
         o.observe(&Event::AssistantMessage {
@@ -481,14 +547,16 @@ mod tests {
             message: Message::new(Role::Assistant, vec![]),
         });
         assert!(!o.finished());
-        o.observe(&Event::TaskState {
-            task: TaskId::new(),
+        let task = TaskId::new();
+        let to = |to| Event::TaskState {
+            task,
             from: TaskState::Running,
-            to: TaskState::AwaitingApproval,
+            to,
             reason: String::new(),
-        });
+        };
+        o.observe(&to(TaskState::AwaitingApproval));
         assert!(!o.finished());
-        o.observe(&state(TaskState::Completed));
+        o.observe(&to(TaskState::Completed));
         assert!(o.finished());
         let mut early = Outcome::default();
         early.observe(&Event::Error {

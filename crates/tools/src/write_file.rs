@@ -6,7 +6,7 @@ use harness_types::{ContentBlock, Risk};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::fs_write::{Existing, check_fresh, line_count, record_written, write_atomic};
+use crate::fs_write::{Existing, check_fresh, line_count, record_written, snapshot, write_atomic};
 use crate::read_file::resolve;
 
 #[derive(Debug, Deserialize)]
@@ -69,6 +69,11 @@ impl Tool for WriteFile {
                 touched: Vec::new(),
             });
         }
+        let before = match &existing {
+            Existing::File(bytes) => Some(bytes.as_slice()),
+            Existing::Missing => None,
+        };
+        snapshot(&ctx, &path, before, &input.path).await?;
         write_atomic(&path, input.content.as_bytes(), &input.path, ctx.task).await?;
         record_written(ctx.ledger.as_ref(), &path).await;
         let verb = match existing {

@@ -1,6 +1,6 @@
 # ADR-030: `EventSink::emit_with` for events that name their own sequence number
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-033 (the journal assigns numbers and commits before broadcasting)
 - **Date:** 2026-11-17
 - **Source:** Phase 2 (P2-T3); needed by Tech spec 3.5 output capping
 

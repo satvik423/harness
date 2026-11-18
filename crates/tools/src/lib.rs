@@ -116,7 +116,33 @@ pub(crate) mod test_support {
             events: sink.clone(),
             writable_roots: vec![dir.to_path_buf()],
             user: Arc::new(harness_ports::NoUser),
+            snapshots: Arc::new(harness_ports::NoSnapshots),
         };
         (ctx, sink, ledger)
+    }
+
+    /// Records every `before_write` call; fails them all when `fail` is set.
+    #[derive(Default)]
+    pub(crate) struct RecordedSnapshots {
+        pub(crate) seen: std::sync::Mutex<Vec<(std::path::PathBuf, Option<Vec<u8>>)>>,
+        pub(crate) fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl harness_ports::FileSnapshots for RecordedSnapshots {
+        async fn before_write(
+            &self,
+            path: &Path,
+            current: Option<&[u8]>,
+        ) -> Result<(), harness_ports::StoreError> {
+            if self.fail {
+                return Err(harness_ports::StoreError::Backend("disk full".into()));
+            }
+            self.seen
+                .lock()
+                .unwrap()
+                .push((path.to_path_buf(), current.map(<[u8]>::to_vec)));
+            Ok(())
+        }
     }
 }

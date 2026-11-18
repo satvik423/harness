@@ -8,11 +8,13 @@ Port traits (SDD layer L4). The runtime depends only on these; adapters implemen
 |---|---|---|
 | `Provider` | One streamed model call (`stream`, `capabilities`, `count_tokens`) | `provider-anthropic` (Phase 1), `provider-openai` (Phase 12), `testkit::FakeProvider` |
 | `Tool` | Something the model can call (`spec`, `risk`, `run`) | `tools`, `mcp` |
-| `EventLog` | Append-only source of truth (`append`, `range`, `search`) | `store-sqlite` (Phase 3) |
-| `BlobStore` | Content-addressed bytes | `store-sqlite` (Phase 3) |
+| `EventLog` | Append-only source of truth (`append` a numbered `LoggedEvent`, `last_seq`, `range`, `search`); gapless numbers (ADR-033) | `store-sqlite`, `testkit::MemoryStore` |
+| `BlobStore` | Content-addressed bytes | `store-sqlite`, `testkit::MemoryStore` |
+| `SessionStore` | Sessions, tasks (kept from `TaskState` events), task control requests (ADR-031) | `store-sqlite`, `testkit::MemoryStore` |
+| `SnapshotStore`, `FileSnapshots` | File snapshots before writes and undo (ADR-034); `NoSnapshots` outside a session | `store-sqlite`, `runtime` |
 | `Sandbox` | Rewrites a `CommandSpec` to run sandboxed | `sandbox` (Phase 13) |
 | `ReadLedger` | Read-before-edit guard records | `tools` (Phase 2) |
-| `EventSink` | Non-blocking live events; `emit_with` builds an event from its own sequence number (ADR-030) | `runtime`, `testkit::RecordingSink` |
+| `EventSink` | Non-blocking live (non-persisted) events from tools | `runtime`, `testkit::RecordingSink` |
 | `Clock` | Injectable time; `SystemClock` provided | `testkit::FixedClock` for tests |
 | `Policy` | `evaluate` a call → `Verdict` (allow, ask, deny); `remember` approvals (ADR-029) | `policy`, `testkit::AskForChanges` |
 | `UserChannel` | A tool asks the user a question (`ask_user`); `NoUser` for headless (ADR-028) | `runtime` |
@@ -25,12 +27,12 @@ Ports for hooks and memory are added in Phases 7 and 14.
   spec 2.6), `CachePlan`, `Effort`, `Capabilities`, `CacheStyle`, `ProviderEvent`,
   `ProviderError` (`is_retryable`, `retry_after`).
 - Tools: `ToolName` (validated `[A-Za-z0-9_-]{1,64}`), `ToolSpec`, `ToolCtx`
-  (including the `call_id` of the call being run), `RiskCtx`, `ToolOutput`,
+  (including the `call_id` of the call being run, `user` for `ask_user` and `snapshots` for undo), `RiskCtx`, `ToolOutput`,
   `ToolError`, and `ToolRegistry` (tools by name; specs sorted by name).
 - Streaming: `ProviderEvent::BlockComplete` carries each finished content block
   exactly as the model produced it. The runtime builds the transcript only from
   these; deltas and `ToolCallStart`/`ToolCallInputDelta` are for live display.
-- Storage: `AppendRequest`, `LoggedEvent`, `SearchHit`, `BlobMeta`, `StoreError`.
+- Storage: `LoggedEvent`, `SearchHit`, `BlobMeta`, `SessionRecord`, `SessionStatus`, `TaskRecord`, `TaskControl`, `Snapshot`, `Undone`, `StoreError` (incl. `Conflict`).
 - Ledger: `FileStamp`, `LedgerCheck::compare` (content hash decides, mtime alone does not).
 - Policy: `PolicyCall`, `Verdict`, `GrantScope` (session, user, project), `PolicyError`.
 - `wrap_untrusted(source, text)`: wraps file, web and MCP content in

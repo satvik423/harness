@@ -11,6 +11,8 @@
 //! | [`Tool`] | something the model can call | `tools`, `mcp` (Phase 1+) |
 //! | [`EventLog`] | append-only source of truth | `store-sqlite` (Phase 3) |
 //! | [`BlobStore`] | content-addressed bytes | `store-sqlite` (Phase 3) |
+//! | [`SessionStore`] | sessions, tasks, task controls | `store-sqlite` (Phase 3) |
+//! | [`SnapshotStore`], [`FileSnapshots`] | file snapshots for undo | `store-sqlite`, `runtime` (Phase 3) |
 //! | [`Sandbox`] | wraps process execution | `sandbox` (Phase 13) |
 //! | [`ReadLedger`] | read-before-edit guard | `tools` (Phase 2) |
 //! | [`EventSink`], [`Clock`] | live events, injectable time | `runtime`, `testkit` |
@@ -36,6 +38,8 @@ mod registry;
 mod retry;
 mod runtime;
 mod sandbox;
+mod session_store;
+mod snapshot;
 mod store;
 mod tool;
 mod untrusted;
@@ -52,7 +56,9 @@ pub use registry::{DuplicateTool, ToolRegistry};
 pub use retry::{MAX_BACKOFF, MAX_RETRY_AFTER, backoff_delay};
 pub use runtime::{Clock, EventSink, SystemClock};
 pub use sandbox::{CommandSpec, Sandbox, SandboxError, SandboxMode};
-pub use store::{AppendRequest, BlobMeta, BlobStore, EventLog, LoggedEvent, SearchHit, StoreError};
+pub use session_store::{SessionRecord, SessionStatus, SessionStore, TaskControl, TaskRecord};
+pub use snapshot::{FileSnapshots, NoSnapshots, Snapshot, SnapshotStore, Undone};
+pub use store::{BlobMeta, BlobStore, EventLog, LoggedEvent, SearchHit, StoreError};
 pub use tool::{
     InvalidToolName, RiskCtx, Tool, ToolCtx, ToolError, ToolName, ToolOutput, ToolSpec,
 };
@@ -79,5 +85,8 @@ mod object_safety {
         assert_dyn_compatible::<dyn Clock>();
         assert_dyn_compatible::<dyn UserChannel>();
         assert_dyn_compatible::<dyn Policy>();
+        assert_dyn_compatible::<dyn SessionStore>();
+        assert_dyn_compatible::<dyn SnapshotStore>();
+        assert_dyn_compatible::<dyn FileSnapshots>();
     }
 }

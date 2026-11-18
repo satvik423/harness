@@ -4,7 +4,6 @@ use std::sync::{Mutex, PoisonError};
 
 use harness_ports::EventSink;
 use harness_protocol::Event;
-use harness_types::Seq;
 
 /// Collects emitted events in order.
 ///
@@ -39,13 +38,5 @@ impl EventSink for RecordingSink {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(event);
-    }
-
-    /// Sequence numbers are positions in the recording, starting at 1.
-    fn emit_with(&self, build: &mut dyn FnMut(Seq) -> Event) -> Seq {
-        let mut events = self.events.lock().unwrap_or_else(PoisonError::into_inner);
-        let seq = Seq(events.len() as u64 + 1);
-        events.push(build(seq));
-        seq
     }
 }

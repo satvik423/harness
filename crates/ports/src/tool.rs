@@ -11,7 +11,7 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use crate::{BlobStore, EventSink, ReadLedger, Sandbox, UserChannel};
+use crate::{BlobStore, EventSink, FileSnapshots, ReadLedger, Sandbox, UserChannel};
 
 /// Error returned when a [`ToolName`] is invalid.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -136,6 +136,8 @@ pub struct ToolCtx {
     pub writable_roots: Vec<PathBuf>,
     /// Asks the user a question (`ask_user`); [`crate::NoUser`] when headless.
     pub user: Arc<dyn UserChannel>,
+    /// Records files before they are written, for undo; [`crate::NoSnapshots`] outside a session.
+    pub snapshots: Arc<dyn FileSnapshots>,
 }
 
 impl fmt::Debug for ToolCtx {

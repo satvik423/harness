@@ -1,23 +1,37 @@
 //! The agent loop for one task: stream a reply, run its tool calls, repeat.
+//!
+//! Every persisted event goes through the [`Journal`] and is committed before
+//! anything that depends on it happens (NFR-03): `TurnStarted` before the model
+//! call, `AssistantMessage` before its tools run, `ToolStarted` before a tool
+//! starts, `ToolFinished` before the next model call.
+//!
+//! A pause request takes effect at a safe point (Tech spec 3.14): before each
+//! model call, after each tool finishes before the next starts, and after an
+//! approval decision. A running tool or model stream is never cut by a pause;
+//! an interrupt does that.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use futures::StreamExt;
-use harness_context::{ActivePersona, SegmentContext, cap_output};
+use harness_context::{SegmentContext, cap_output};
 use harness_ports::{
-    EventSink, GrantScope, PolicyCall, ProviderError, ProviderEvent, ProviderStream, RiskCtx,
-    ToolCtx, ToolError, Verdict,
+    GrantScope, PolicyCall, ProviderError, ProviderEvent, ProviderStream, RiskCtx, Tool, ToolCtx,
+    ToolError, ToolOutput, Verdict,
 };
 use harness_protocol::{BlobOrText, Decision, Event, RuleScope, TaskState};
 use harness_types::{
-    ApprovalId, ContentBlock, Message, Risk, Role, SessionId, StopReason, TaskId, Usage,
+    ApprovalId, ContentBlock, Message, Risk, Role, Seq, SessionId, StopReason, TaskId, Usage,
 };
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::approval::{Approvals, Questions};
+use crate::journal::Journal;
+use crate::snapshots::TurnSnapshots;
 use crate::user::{SessionUser, transition};
 use crate::{ApprovalMode, RuntimeDeps};
 
@@ -33,6 +47,69 @@ pub(crate) enum StopKind {
 /// Shared slot telling a running task why it was cancelled.
 pub(crate) type StopSlot = Arc<Mutex<Option<StopKind>>>;
 
+/// A pause request (`Op::Pause`), honoured at the next safe point.
+#[derive(Debug, Default)]
+pub(crate) struct PauseFlag {
+    requested: AtomicBool,
+    notify: Notify,
+}
+
+impl PauseFlag {
+    /// Asks the task to pause at its next safe point.
+    pub(crate) fn request(&self) {
+        self.requested.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    fn is_requested(&self) -> bool {
+        self.requested.load(Ordering::SeqCst)
+    }
+
+    /// Resolves once a pause is requested.
+    async fn wait(&self) {
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        // Register before checking, so a request between the two is not missed.
+        notified.as_mut().enable();
+        if self.is_requested() {
+            return;
+        }
+        notified.await;
+    }
+}
+
+/// The results recorded so far for the tool calls of one assistant message.
+/// Kept when a task pauses in the middle of a round, so resuming runs only the
+/// calls that have no result yet.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Round {
+    /// The `AssistantMessage` event whose calls these are; also the key of the
+    /// files snapshotted while they run.
+    pub(crate) assistant_seq: Seq,
+    /// Results by call id.
+    pub(crate) done: BTreeMap<String, ContentBlock>,
+}
+
+/// How a task run begins.
+pub(crate) enum Start {
+    /// New user input.
+    New(Vec<ContentBlock>),
+    /// Continue a paused task.
+    Continue(Option<Round>),
+    /// Cancel a paused task, closing its unanswered round.
+    Cancel(Option<Round>),
+}
+
+/// What a task run leaves behind.
+pub(crate) struct TaskResult {
+    /// The segment, possibly extended.
+    pub(crate) segment: SegmentContext,
+    /// The state the task ended in.
+    pub(crate) state: TaskState,
+    /// The unanswered round, when it paused mid-round.
+    pub(crate) round: Option<Round>,
+}
+
 /// Everything a running task needs.
 pub(crate) struct TaskCtx {
     pub(crate) session: SessionId,
@@ -43,13 +120,21 @@ pub(crate) struct TaskCtx {
     pub(crate) max_turns: u32,
     pub(crate) output_cap_tokens: u64,
     pub(crate) max_parallel_tools: usize,
-    pub(crate) sink: Arc<dyn EventSink>,
+    pub(crate) journal: Arc<Journal>,
     pub(crate) approvals: Arc<Approvals>,
     pub(crate) questions: Arc<Questions>,
     pub(crate) cancel: CancellationToken,
     pub(crate) stop: StopSlot,
+    pub(crate) pause: Arc<PauseFlag>,
     pub(crate) state: Arc<Mutex<TaskState>>,
+    /// Set just before the final state is recorded: from then on the task does
+    /// nothing else, so the actor may wait for it instead of calling it busy.
+    pub(crate) finishing: Arc<AtomicBool>,
 }
+
+/// The event log refused a write: the task must stop before any side effect.
+#[derive(Debug)]
+struct LogFailed;
 
 /// How the loop ended.
 enum End {
@@ -57,6 +142,18 @@ enum End {
     Failed(String),
     Budget,
     Stopped,
+    Paused(Option<Round>),
+    LogFailed,
+}
+
+/// How a tool round ended.
+enum RoundEnd {
+    /// Every call has a result, in call order.
+    Answered(Vec<ContentBlock>),
+    /// Interrupted or cancelled: unrun calls got error results, in call order.
+    Stopped(Vec<ContentBlock>),
+    /// Paused at a safe point; some calls have no result yet.
+    Paused(Round),
 }
 
 /// The collected reply of one model call.
@@ -74,72 +171,202 @@ enum Approval {
     Granted,
     Denied(String),
     Stopped,
+    Paused,
 }
 
 impl TaskCtx {
-    fn emit(&self, event: Event) {
-        self.sink.emit(event);
+    /// Records an event for this task.
+    async fn record(&self, event: Event) -> Result<Seq, LogFailed> {
+        self.journal
+            .record(Some(self.task), event)
+            .await
+            .map_err(|_| LogFailed)
     }
 
-    /// Moves the task to `to`, emitting the transition from the current state.
-    fn set_state(&self, to: TaskState, reason: impl Into<String>) {
-        transition(self.sink.as_ref(), self.task, &self.state, to, reason);
+    /// Records an event whose failure needs no immediate handling (the next
+    /// safe point stops the task anyway).
+    async fn note(&self, event: Event) {
+        let _ = self.record(event).await;
+    }
+
+    /// Moves the task to `to`, recording the transition.
+    async fn set_state(&self, to: TaskState, reason: impl Into<String>) {
+        let _ = transition(&self.journal, self.task, &self.state, to, reason).await;
     }
 
     fn stop_kind(&self) -> Option<StopKind> {
         *self.stop.lock().unwrap_or_else(PoisonError::into_inner)
     }
+
+    async fn internal_error(&self, message: String) {
+        self.note(Event::Error {
+            kind: "internal".into(),
+            message,
+            hint: None,
+        })
+        .await;
+    }
 }
 
-/// Runs one task to its end and returns the (possibly extended) segment.
+/// Runs a task until it completes, fails, stops or pauses.
 pub(crate) async fn run_task(
     ctx: TaskCtx,
     mut segment: SegmentContext,
-    input: Vec<ContentBlock>,
-    persona: &ActivePersona,
-) -> SegmentContext {
-    ctx.set_state(
-        TaskState::Running,
-        format!("started with persona {}", persona.name),
-    );
-    if let Err(e) = segment.push_user(input) {
-        ctx.emit(Event::Error {
-            kind: "internal".into(),
-            message: e.to_string(),
-            hint: None,
-        });
-        ctx.set_state(TaskState::Failed, "could not record the input");
-        return segment;
-    }
-    if let Some(message) = segment.messages().last() {
-        ctx.emit(Event::UserInput {
-            task: ctx.task,
-            message: message.clone(),
-        });
-    }
-    tracing::info!(persona = %persona.name, model = %persona.model, "task started");
-    let end = run_turns(&ctx, &mut segment).await;
-    match end {
-        End::Completed => ctx.set_state(TaskState::Completed, "done"),
-        End::Failed(reason) => ctx.set_state(TaskState::Failed, reason),
-        End::Budget => ctx.set_state(
-            TaskState::BudgetExhausted,
-            format!("reached the limit of {} model calls", ctx.max_turns),
-        ),
-        End::Stopped => match ctx.stop_kind() {
-            Some(StopKind::Cancel) => ctx.set_state(TaskState::Cancelled, "cancelled"),
-            _ => ctx.set_state(TaskState::Paused, "interrupted"),
-        },
-    }
-    segment
+    start: Start,
+) -> TaskResult {
+    let round = match start {
+        Start::New(input) => {
+            let persona = segment.frame().persona.clone();
+            ctx.set_state(
+                TaskState::Running,
+                format!("started with persona {persona}"),
+            )
+            .await;
+            if let Err(e) = segment.push_user(input) {
+                ctx.internal_error(e.to_string()).await;
+                return finish(
+                    &ctx,
+                    segment,
+                    End::Failed("could not record the input".into()),
+                )
+                .await;
+            }
+            let message = segment.messages().last().cloned();
+            if let Some(message) = message
+                && ctx
+                    .record(Event::UserInput {
+                        task: ctx.task,
+                        message,
+                    })
+                    .await
+                    .is_err()
+            {
+                return finish(&ctx, segment, End::LogFailed).await;
+            }
+            tracing::info!(persona = %persona, "task started");
+            None
+        }
+        Start::Continue(round) => {
+            ctx.set_state(TaskState::Running, "resumed").await;
+            round
+        }
+        Start::Cancel(round) => {
+            let end = cancel_round(&ctx, &mut segment, round).await;
+            return finish(&ctx, segment, end).await;
+        }
+    };
+    let end = run_turns(&ctx, &mut segment, round).await;
+    finish(&ctx, segment, end).await
 }
 
-async fn run_turns(ctx: &TaskCtx, segment: &mut SegmentContext) -> End {
-    for turn in 1..=ctx.max_turns {
-        ctx.emit(Event::TurnStarted {
-            task: ctx.task,
-            turn,
-        });
+/// Records the final state of a run.
+async fn finish(ctx: &TaskCtx, segment: SegmentContext, end: End) -> TaskResult {
+    let (state, reason, round) = match end {
+        End::Completed => (TaskState::Completed, "done".to_owned(), None),
+        End::Failed(reason) => (TaskState::Failed, reason, None),
+        End::LogFailed => (
+            TaskState::Failed,
+            "the event log refused a write; stopped before doing anything that would not be saved"
+                .to_owned(),
+            None,
+        ),
+        End::Budget => (
+            TaskState::BudgetExhausted,
+            format!("reached the limit of {} model calls", ctx.max_turns),
+            None,
+        ),
+        End::Paused(round) => (TaskState::Paused, "paused".to_owned(), round),
+        End::Stopped => match ctx.stop_kind() {
+            Some(StopKind::Cancel) => (TaskState::Cancelled, "cancelled".to_owned(), None),
+            _ => (TaskState::Paused, "interrupted".to_owned(), None),
+        },
+    };
+    ctx.finishing.store(true, Ordering::SeqCst);
+    ctx.set_state(state, reason).await;
+    TaskResult {
+        segment,
+        state,
+        round,
+    }
+}
+
+/// Answers a paused task's unanswered calls with "cancelled" so the transcript
+/// stays valid, then ends the task as cancelled.
+async fn cancel_round(ctx: &TaskCtx, segment: &mut SegmentContext, round: Option<Round>) -> End {
+    *ctx.stop.lock().unwrap_or_else(PoisonError::into_inner) = Some(StopKind::Cancel);
+    let calls = segment.pending_tool_calls();
+    if calls.is_empty() {
+        return End::Stopped;
+    }
+    let mut done = round.map(|r| r.done).unwrap_or_default();
+    for (id, _, _) in &calls {
+        if !done.contains_key(id) {
+            match error_result(ctx, id, "not run: the task was cancelled").await {
+                Ok(block) => {
+                    done.insert(id.clone(), block);
+                }
+                Err(LogFailed) => return End::LogFailed,
+            }
+        }
+    }
+    let results = in_call_order(&calls, &mut done);
+    if let Err(e) = segment.push_tool_results(results) {
+        ctx.internal_error(e.to_string()).await;
+        return End::Failed("could not record the tool results".into());
+    }
+    End::Stopped
+}
+
+async fn run_turns(ctx: &TaskCtx, segment: &mut SegmentContext, mut round: Option<Round>) -> End {
+    let mut turns = 0;
+    loop {
+        // Finish an unanswered tool round first (a fresh reply, or a resumed task).
+        let calls = segment.pending_tool_calls();
+        if !calls.is_empty() {
+            let current = round.take().unwrap_or_else(|| Round {
+                assistant_seq: Seq(0),
+                done: BTreeMap::new(),
+            });
+            let (results, stopped) = match run_calls(ctx, &calls, current).await {
+                Ok(RoundEnd::Answered(results)) => (results, false),
+                Ok(RoundEnd::Stopped(results)) => (results, true),
+                Ok(RoundEnd::Paused(round)) => return End::Paused(Some(round)),
+                Err(LogFailed) => return End::LogFailed,
+            };
+            if let Err(e) = segment.push_tool_results(results) {
+                ctx.internal_error(e.to_string()).await;
+                return End::Failed("could not record the tool results".into());
+            }
+            if stopped {
+                return End::Stopped;
+            }
+        }
+        // A resumed task whose final reply was already recorded (the harness
+        // stopped just before marking it completed) has nothing left to do.
+        if segment.ends_with_reply() {
+            return End::Completed;
+        }
+        // Safe point: before each model call.
+        if ctx.cancel.is_cancelled() {
+            return End::Stopped;
+        }
+        if ctx.pause.is_requested() {
+            return End::Paused(None);
+        }
+        if turns >= ctx.max_turns {
+            return End::Budget;
+        }
+        turns += 1;
+        if ctx
+            .record(Event::TurnStarted {
+                task: ctx.task,
+                turn: turns,
+            })
+            .await
+            .is_err()
+        {
+            return End::LogFailed;
+        }
         let stream = match ctx
             .deps
             .provider
@@ -148,24 +375,27 @@ async fn run_turns(ctx: &TaskCtx, segment: &mut SegmentContext) -> End {
         {
             Ok(stream) => stream,
             Err(_) if ctx.cancel.is_cancelled() => return End::Stopped,
-            Err(e) => return provider_failure(ctx, &e),
+            Err(e) => return provider_failure(ctx, &e).await,
         };
         let reply = collect_reply(ctx, stream).await;
         if ctx.cancel.is_cancelled() || reply.error == Some(ProviderError::Cancelled) {
-            ctx.emit(Event::AssistantAborted {
+            // The partial reply is logged but never enters the transcript.
+            ctx.note(Event::AssistantAborted {
                 task: ctx.task,
                 partial_text: reply.partial_text,
-            });
+            })
+            .await;
             return End::Stopped;
         }
         if let Some(e) = reply.error {
-            return provider_failure(ctx, &e);
+            return provider_failure(ctx, &e).await;
         }
-        ctx.emit(Event::Usage {
+        ctx.note(Event::Usage {
             task: ctx.task,
             usage: reply.usage,
             cost_micros: 0,
-        });
+        })
+        .await;
         let stop = reply.stop.unwrap_or_else(|| StopReason::Other {
             raw: "stream ended without a stop reason".into(),
         });
@@ -173,24 +403,31 @@ async fn run_turns(ctx: &TaskCtx, segment: &mut SegmentContext) -> End {
         if !reply.blocks.is_empty() {
             let message = Message::new(Role::Assistant, reply.blocks);
             if let Err(e) = segment.push_assistant(message.clone()) {
-                ctx.emit(Event::Error {
-                    kind: "internal".into(),
-                    message: e.to_string(),
-                    hint: None,
-                });
+                ctx.internal_error(e.to_string()).await;
                 return End::Failed("could not record the reply".into());
             }
-            ctx.emit(Event::AssistantMessage {
-                task: ctx.task,
-                message,
+            let has_calls = !message.tool_call_ids().is_empty();
+            let Ok(seq) = ctx
+                .record(Event::AssistantMessage {
+                    task: ctx.task,
+                    message,
+                })
+                .await
+            else {
+                return End::LogFailed;
+            };
+            round = has_calls.then(|| Round {
+                assistant_seq: seq,
+                done: BTreeMap::new(),
             });
         }
-        ctx.emit(Event::TurnFinished {
+        ctx.note(Event::TurnFinished {
             task: ctx.task,
             stop: stop.clone(),
-        });
+        })
+        .await;
 
-        let calls = segment.pending_tool_calls();
+        let pending = !segment.pending_tool_calls().is_empty();
         match &stop {
             StopReason::Refusal { category } => {
                 return End::Failed(format!(
@@ -201,40 +438,28 @@ async fn run_turns(ctx: &TaskCtx, segment: &mut SegmentContext) -> End {
                         .unwrap_or_default()
                 ));
             }
-            StopReason::MaxTokens if calls.is_empty() => {
+            StopReason::MaxTokens if !pending => {
                 return End::Failed("the reply hit the output limit before finishing".into());
             }
             // Only server-side tools pause a turn, and none are used yet. Continuing
             // would mean sending an assistant-final request, so end the task instead.
-            StopReason::PauseTurn if calls.is_empty() => {
-                ctx.emit(Event::Warning {
+            StopReason::PauseTurn if !pending => {
+                ctx.note(Event::Warning {
                     kind: "pause_turn".into(),
                     message: "the provider paused the turn; continuing paused turns arrives with server-side tools".into(),
-                });
+                })
+                .await;
                 return End::Completed;
             }
             _ => {}
         }
-        if calls.is_empty() {
+        if !pending {
             return End::Completed;
         }
-        let (results, stopped) = run_calls(ctx, &calls).await;
-        if let Err(e) = segment.push_tool_results(results) {
-            ctx.emit(Event::Error {
-                kind: "internal".into(),
-                message: e.to_string(),
-                hint: None,
-            });
-            return End::Failed("could not record the tool results".into());
-        }
-        if stopped {
-            return End::Stopped;
-        }
     }
-    End::Budget
 }
 
-/// Reads the provider stream to its end, emitting live deltas.
+/// Reads the provider stream to its end, broadcasting live deltas.
 async fn collect_reply(ctx: &TaskCtx, mut stream: ProviderStream) -> Reply {
     let mut reply = Reply::default();
     loop {
@@ -249,15 +474,17 @@ async fn collect_reply(ctx: &TaskCtx, mut stream: ProviderStream) -> Reply {
             None => break,
             Some(Ok(ProviderEvent::TextDelta { text })) => {
                 reply.partial_text.push_str(&text);
-                ctx.emit(Event::TextDelta {
+                ctx.journal.live(Event::TextDelta {
                     task: ctx.task,
                     text,
                 });
             }
-            Some(Ok(ProviderEvent::ThinkingDelta { text })) => ctx.emit(Event::ThinkingDelta {
-                task: ctx.task,
-                text,
-            }),
+            Some(Ok(ProviderEvent::ThinkingDelta { text })) => {
+                ctx.journal.live(Event::ThinkingDelta {
+                    task: ctx.task,
+                    text,
+                });
+            }
             Some(Ok(
                 ProviderEvent::ToolCallStart { .. } | ProviderEvent::ToolCallInputDelta { .. },
             )) => {}
@@ -265,10 +492,11 @@ async fn collect_reply(ctx: &TaskCtx, mut stream: ProviderStream) -> Reply {
             Some(Ok(ProviderEvent::Usage { usage })) => reply.usage = usage,
             Some(Ok(ProviderEvent::Stop { reason })) => reply.stop = Some(reason),
             Some(Ok(ProviderEvent::Notice { message })) => {
-                ctx.emit(Event::Warning {
+                ctx.note(Event::Warning {
                     kind: "provider_notice".into(),
                     message,
-                });
+                })
+                .await;
             }
             Some(Err(e)) => {
                 reply.error = Some(e);
@@ -282,22 +510,19 @@ async fn collect_reply(ctx: &TaskCtx, mut stream: ProviderStream) -> Reply {
 /// How the policy and the user ruled on one call, before it runs.
 enum Assessed {
     /// Run it; `parallel` if it may run alongside other parallel-safe calls.
-    Run {
-        tool: Arc<dyn harness_ports::Tool>,
-        parallel: bool,
-    },
+    Run { tool: Arc<dyn Tool>, parallel: bool },
     /// Do not run it; report this message to the model as an error result.
     /// `true` if it was refused only because nobody can approve it.
     Refused(String, bool),
     /// The policy wants the user's approval first.
     Ask {
-        tool: Arc<dyn harness_ports::Tool>,
+        tool: Arc<dyn Tool>,
         call: PolicyCall,
         reason: String,
     },
 }
 
-/// Judges one call with the policy. Pure: emits nothing and asks nobody.
+/// Judges one call with the policy. Pure: records nothing and asks nobody.
 fn assess(
     ctx: &TaskCtx,
     risk_ctx: &RiskCtx,
@@ -335,40 +560,65 @@ fn assess(
     (assessed, Some(risk))
 }
 
-/// Runs the calls of one assistant message. Returns one result per call, in
-/// call order (I2), and whether the task was stopped along the way.
+/// Takes the results of `calls` out of `done`, in call order.
+fn in_call_order(
+    calls: &[(String, String, serde_json::Value)],
+    done: &mut BTreeMap<String, ContentBlock>,
+) -> Vec<ContentBlock> {
+    calls
+        .iter()
+        .filter_map(|(id, _, _)| done.remove(id))
+        .collect()
+}
+
+/// Runs the calls of one assistant message that have no result yet.
 ///
 /// Calls are judged and approved one at a time, in order. A run of consecutive
-/// parallel-safe, allowed calls executes together (at most
-/// `max_parallel_tools` at once); every other call runs on its own.
+/// parallel-safe, allowed calls executes together (at most `max_parallel_tools`
+/// at once); every other call runs on its own. Results always keep call order (I2).
 async fn run_calls(
     ctx: &TaskCtx,
     calls: &[(String, String, serde_json::Value)],
-) -> (Vec<ContentBlock>, bool) {
+    round: Round,
+) -> Result<RoundEnd, LogFailed> {
     let risk_ctx = RiskCtx {
         cwd: ctx.cwd.clone(),
         writable_roots: vec![ctx.cwd.clone()],
     };
-    let mut results = Vec::with_capacity(calls.len());
+    let turn = round.assistant_seq;
+    let mut done = round.done;
     let mut stopped = false;
     let mut i = 0;
     while i < calls.len() {
         let (id, name, input) = &calls[i];
-        if stopped || ctx.cancel.is_cancelled() {
-            stopped = true;
-            results.push(error_result(ctx, id, "not run: the task was interrupted"));
+        if done.contains_key(id) {
             i += 1;
             continue;
         }
+        if stopped || ctx.cancel.is_cancelled() {
+            stopped = true;
+            let block = error_result(ctx, id, "not run: the task was interrupted").await?;
+            done.insert(id.clone(), block);
+            i += 1;
+            continue;
+        }
+        // Safe point: after a tool finishes, before the next one starts.
+        if ctx.pause.is_requested() {
+            return Ok(RoundEnd::Paused(Round {
+                assistant_seq: turn,
+                done,
+            }));
+        }
         let (assessed, risk) = assess(ctx, &risk_ctx, name, input);
         if let Some(risk) = &risk {
-            ctx.emit(Event::ToolCall {
+            ctx.record(Event::ToolCall {
                 task: ctx.task,
                 id: id.clone(),
                 name: name.clone(),
                 input: input.clone(),
                 risk: risk.clone(),
-            });
+            })
+            .await?;
         }
         match assessed {
             Assessed::Refused(reason, approval_required) => {
@@ -379,25 +629,46 @@ async fn run_calls(
                     } else {
                         "policy_denied"
                     };
-                    ctx.emit(Event::Warning {
+                    ctx.note(Event::Warning {
                         kind: kind.into(),
                         message: format!("{name}: {reason}"),
-                    });
+                    })
+                    .await;
                 }
-                results.push(error_result(ctx, id, &reason));
+                let block = error_result(ctx, id, &reason).await?;
+                done.insert(id.clone(), block);
                 i += 1;
             }
             Assessed::Ask { tool, call, reason } => {
-                match approve(ctx, id, &call, &reason).await {
+                match approve(ctx, id, &call, &reason).await? {
                     Approval::Granted => {
-                        let (block, cancelled) = run_one(ctx, &risk_ctx, tool, id, input).await;
+                        // Safe point: after an approval decision.
+                        if ctx.pause.is_requested() {
+                            return Ok(RoundEnd::Paused(Round {
+                                assistant_seq: turn,
+                                done,
+                            }));
+                        }
+                        let (block, cancelled) =
+                            run_one(ctx, &risk_ctx, tool, id, input, turn).await?;
                         stopped |= cancelled;
-                        results.push(block);
+                        done.insert(id.clone(), block);
                     }
-                    Approval::Denied(reason) => results.push(error_result(ctx, id, &reason)),
+                    Approval::Denied(reason) => {
+                        let block = error_result(ctx, id, &reason).await?;
+                        done.insert(id.clone(), block);
+                    }
                     Approval::Stopped => {
                         stopped = true;
-                        results.push(error_result(ctx, id, "not run: the task was interrupted"));
+                        let block =
+                            error_result(ctx, id, "not run: the task was interrupted").await?;
+                        done.insert(id.clone(), block);
+                    }
+                    Approval::Paused => {
+                        return Ok(RoundEnd::Paused(Round {
+                            assistant_seq: turn,
+                            done,
+                        }));
                     }
                 }
                 i += 1;
@@ -406,18 +677,23 @@ async fn run_calls(
                 tool,
                 parallel: false,
             } => {
-                let (block, cancelled) = run_one(ctx, &risk_ctx, tool, id, input).await;
+                let (block, cancelled) = run_one(ctx, &risk_ctx, tool, id, input, turn).await?;
                 stopped |= cancelled;
-                results.push(block);
+                done.insert(id.clone(), block);
                 i += 1;
             }
             Assessed::Run {
                 tool,
                 parallel: true,
             } => {
-                // Gather the following calls that may also run in parallel.
+                // Gather the following unanswered calls that may also run in parallel.
                 let mut batch = vec![(i, tool)];
-                while let Some((next_id, next_name, next_input)) = calls.get(i + batch.len()) {
+                let mut next = i + 1;
+                while let Some((next_id, next_name, next_input)) = calls.get(next) {
+                    if done.contains_key(next_id) {
+                        next += 1;
+                        continue;
+                    }
                     let (
                         Assessed::Run {
                             tool,
@@ -428,28 +704,36 @@ async fn run_calls(
                     else {
                         break;
                     };
-                    ctx.emit(Event::ToolCall {
+                    ctx.record(Event::ToolCall {
                         task: ctx.task,
                         id: next_id.clone(),
                         name: next_name.clone(),
                         input: next_input.clone(),
                         risk,
-                    });
-                    batch.push((i + batch.len(), tool));
+                    })
+                    .await?;
+                    batch.push((next, tool));
+                    next += 1;
                 }
-                let n = batch.len();
-                let (blocks, cancelled) = run_batch(ctx, &risk_ctx, calls, batch).await;
+                let (blocks, cancelled) = run_batch(ctx, &risk_ctx, calls, batch, turn).await?;
                 stopped |= cancelled;
-                results.extend(blocks);
-                i += n;
+                for (call_id, block) in blocks {
+                    done.insert(call_id, block);
+                }
+                i = next;
             }
         }
     }
-    (results, stopped)
+    let results = in_call_order(calls, &mut done);
+    Ok(if stopped {
+        RoundEnd::Stopped(results)
+    } else {
+        RoundEnd::Answered(results)
+    })
 }
 
 /// Builds the context for one call.
-fn tool_ctx(ctx: &TaskCtx, risk_ctx: &RiskCtx, id: &str) -> ToolCtx {
+fn tool_ctx(ctx: &TaskCtx, risk_ctx: &RiskCtx, id: &str, turn: Seq) -> ToolCtx {
     ToolCtx {
         cwd: ctx.cwd.clone(),
         session: ctx.session,
@@ -459,23 +743,27 @@ fn tool_ctx(ctx: &TaskCtx, risk_ctx: &RiskCtx, id: &str) -> ToolCtx {
         sandbox: Arc::clone(&ctx.deps.sandbox),
         blobs: Arc::clone(&ctx.deps.blobs),
         ledger: Arc::clone(&ctx.deps.ledger),
-        events: Arc::clone(&ctx.sink),
+        events: Arc::clone(&ctx.journal) as _,
         writable_roots: risk_ctx.writable_roots.clone(),
         user: Arc::new(SessionUser {
             task: ctx.task,
             call_id: id.to_owned(),
             mode: ctx.approval,
-            sink: Arc::clone(&ctx.sink),
+            journal: Arc::clone(&ctx.journal),
             questions: Arc::clone(&ctx.questions),
             state: Arc::clone(&ctx.state),
+        }),
+        snapshots: Arc::new(TurnSnapshots {
+            session: ctx.session,
+            turn,
+            blobs: Arc::clone(&ctx.deps.blobs),
+            store: Arc::clone(&ctx.deps.snapshots),
         }),
     }
 }
 
-/// Turns a tool's outcome into result content; `true` if it was interrupted.
-fn outcome(
-    result: Result<harness_ports::ToolOutput, ToolError>,
-) -> (Vec<ContentBlock>, bool, bool) {
+/// Turns a tool's outcome into result content: (content, ok, interrupted).
+fn outcome(result: Result<ToolOutput, ToolError>) -> (Vec<ContentBlock>, bool, bool) {
     match result {
         Ok(output) => (output.content, true, false),
         Err(e) => {
@@ -485,21 +773,26 @@ fn outcome(
     }
 }
 
-/// Runs one call and records its result.
+/// Runs one call and records its result; `true` if it was interrupted.
 async fn run_one(
     ctx: &TaskCtx,
     risk_ctx: &RiskCtx,
-    tool: Arc<dyn harness_ports::Tool>,
+    tool: Arc<dyn Tool>,
     id: &str,
     input: &serde_json::Value,
-) -> (ContentBlock, bool) {
-    ctx.emit(Event::ToolStarted {
+    turn: Seq,
+) -> Result<(ContentBlock, bool), LogFailed> {
+    // Committed before the tool runs, so recovery knows it may have run.
+    ctx.record(Event::ToolStarted {
         call_id: id.to_owned(),
-    });
+    })
+    .await?;
     let cap = tool.output_cap_tokens().unwrap_or(ctx.output_cap_tokens);
-    let (content, ok, cancelled) =
-        outcome(tool.run(input.clone(), tool_ctx(ctx, risk_ctx, id)).await);
-    (record_result(ctx, id, content, ok, cap).await, cancelled)
+    let (content, ok, cancelled) = outcome(
+        tool.run(input.clone(), tool_ctx(ctx, risk_ctx, id, turn))
+            .await,
+    );
+    Ok((record_result(ctx, id, content, ok, cap).await?, cancelled))
 }
 
 /// Runs parallel-safe calls together, at most `max_parallel_tools` at once,
@@ -508,21 +801,23 @@ async fn run_batch(
     ctx: &TaskCtx,
     risk_ctx: &RiskCtx,
     calls: &[(String, String, serde_json::Value)],
-    batch: Vec<(usize, Arc<dyn harness_ports::Tool>)>,
-) -> (Vec<ContentBlock>, bool) {
+    batch: Vec<(usize, Arc<dyn Tool>)>,
+    turn: Seq,
+) -> Result<(Vec<(String, ContentBlock)>, bool), LogFailed> {
     let limit = Arc::new(Semaphore::new(ctx.max_parallel_tools.max(1)));
     let mut set = JoinSet::new();
     let mut caps = Vec::with_capacity(batch.len());
     for (slot, (index, tool)) in batch.into_iter().enumerate() {
         let (id, _, input) = &calls[index];
-        ctx.emit(Event::ToolStarted {
+        ctx.record(Event::ToolStarted {
             call_id: id.clone(),
-        });
+        })
+        .await?;
         caps.push((
             id.clone(),
             tool.output_cap_tokens().unwrap_or(ctx.output_cap_tokens),
         ));
-        let tool_ctx = tool_ctx(ctx, risk_ctx, id);
+        let tool_ctx = tool_ctx(ctx, risk_ctx, id, turn);
         let input = input.clone();
         let limit = Arc::clone(&limit);
         set.spawn(async move {
@@ -531,7 +826,7 @@ async fn run_batch(
             (slot, tool.run(input, tool_ctx).await)
         });
     }
-    let mut finished: Vec<Option<Result<harness_ports::ToolOutput, ToolError>>> =
+    let mut finished: Vec<Option<Result<ToolOutput, ToolError>>> =
         (0..caps.len()).map(|_| None).collect();
     while let Some(joined) = set.join_next().await {
         match joined {
@@ -546,27 +841,29 @@ async fn run_batch(
             .unwrap_or_else(|| Err(ToolError::Failed("the tool stopped unexpectedly".into())));
         let (content, ok, was_cancelled) = outcome(result);
         cancelled |= was_cancelled;
-        blocks.push(record_result(ctx, &id, content, ok, cap).await);
+        let block = record_result(ctx, &id, content, ok, cap).await?;
+        blocks.push((id, block));
     }
-    (blocks, cancelled)
+    Ok((blocks, cancelled))
 }
 
-/// An error result for a call that did not run, reported to the UI as a failed tool.
-fn error_result(ctx: &TaskCtx, id: &str, message: &str) -> ContentBlock {
+/// An error result for a call that did not run, recorded as a failed tool.
+async fn error_result(ctx: &TaskCtx, id: &str, message: &str) -> Result<ContentBlock, LogFailed> {
     let content = vec![ContentBlock::text(message)];
-    ctx.emit(Event::ToolFinished {
+    ctx.record(Event::ToolFinished {
         call_id: id.to_owned(),
         ok: false,
         full: BlobOrText::Text {
             text: message.to_owned(),
         },
         sent: content.clone(),
-    });
-    ContentBlock::ToolResult {
+    })
+    .await?;
+    Ok(ContentBlock::ToolResult {
         call_id: id.to_owned(),
         content,
         is_error: true,
-    }
+    })
 }
 
 /// Full outputs larger than this are stored as a blob instead of inline text.
@@ -584,7 +881,7 @@ async fn record_result(
     content: Vec<ContentBlock>,
     ok: bool,
     cap_tokens: u64,
-) -> ContentBlock {
+) -> Result<ContentBlock, LogFailed> {
     let text = text_of(&content);
     let full = if text.len() > INLINE_FULL_MAX_BYTES {
         match ctx
@@ -603,68 +900,82 @@ async fn record_result(
     } else {
         BlobOrText::Text { text }
     };
-    let mut sent = Vec::new();
-    let mut full = Some(full);
-    ctx.sink.emit_with(&mut |seq| {
-        sent = cap_output(&content, cap_tokens, seq);
-        Event::ToolFinished {
-            call_id: id.to_owned(),
+    let for_event = content.clone();
+    let call_id = id.to_owned();
+    let seq = ctx
+        .journal
+        .record_with(Some(ctx.task), move |seq| Event::ToolFinished {
+            call_id,
             ok,
-            full: full.take().unwrap_or(BlobOrText::Text {
-                text: String::new(),
-            }),
-            sent: sent.clone(),
-        }
-    });
-    ContentBlock::ToolResult {
+            full,
+            sent: cap_output(&for_event, cap_tokens, seq),
+        })
+        .await
+        .map_err(|_| LogFailed)?;
+    // `cap_output` is deterministic: this is exactly what the event holds.
+    Ok(ContentBlock::ToolResult {
         call_id: id.to_owned(),
-        content: sent,
+        content: cap_output(&content, cap_tokens, seq),
         is_error: !ok,
-    }
+    })
 }
 
 /// Asks the user about one call (or refuses under [`ApprovalMode::Never`]), and
 /// remembers session and permanent grants with the policy.
-async fn approve(ctx: &TaskCtx, call_id: &str, call: &PolicyCall, reason: &str) -> Approval {
+async fn approve(
+    ctx: &TaskCtx,
+    call_id: &str,
+    call: &PolicyCall,
+    reason: &str,
+) -> Result<Approval, LogFailed> {
     if ctx.approval == ApprovalMode::Never {
-        ctx.emit(Event::Warning {
+        ctx.note(Event::Warning {
             kind: "approval_denied".into(),
             message: format!("denied without asking: {reason} (approval policy: never)"),
-        });
-        return Approval::Denied(format!(
+        })
+        .await;
+        return Ok(Approval::Denied(format!(
             "Denied: {reason} needs approval, and this session does not ask (approval policy: never). Do not retry; continue without it or explain what you need."
-        ));
+        )));
     }
     let id = ApprovalId::new();
     let rx = ctx.approvals.register(id);
-    ctx.set_state(TaskState::AwaitingApproval, "waiting for approval");
-    ctx.emit(Event::ApprovalRequested {
+    ctx.set_state(TaskState::AwaitingApproval, "waiting for approval")
+        .await;
+    ctx.record(Event::ApprovalRequested {
         id,
         task: ctx.task,
         call_id: call_id.to_owned(),
         reason: reason.to_owned(),
-    });
+    })
+    .await?;
     let decision = tokio::select! {
         decision = rx => decision.ok(),
         () = ctx.cancel.cancelled() => None,
+        () = ctx.pause.wait() => {
+            ctx.approvals.forget(&id);
+            // The call stays unanswered and goes through the policy again on resume.
+            return Ok(Approval::Paused);
+        }
     };
     ctx.approvals.forget(&id);
     let Some(decision) = decision else {
-        return Approval::Stopped;
+        return Ok(Approval::Stopped);
     };
-    ctx.emit(Event::ApprovalResolved {
+    ctx.record(Event::ApprovalResolved {
         id,
         decision: decision.clone(),
-    });
-    ctx.set_state(TaskState::Running, "approval answered");
+    })
+    .await?;
+    ctx.set_state(TaskState::Running, "approval answered").await;
     let scope = match decision {
         Decision::Deny { reason } => {
-            return Approval::Denied(format!(
+            return Ok(Approval::Denied(format!(
                 "The user denied this action{}",
                 reason.map(|r| format!(": {r}")).unwrap_or_default()
-            ));
+            )));
         }
-        Decision::Once => return Approval::Granted,
+        Decision::Once => return Ok(Approval::Granted),
         Decision::ForSession => GrantScope::Session,
         Decision::Always {
             scope: RuleScope::User,
@@ -677,18 +988,22 @@ async fn approve(ctx: &TaskCtx, call_id: &str, call: &PolicyCall, reason: &str) 
     let policy = Arc::clone(&ctx.deps.policy);
     let owned = call.clone();
     let remembered = tokio::task::spawn_blocking(move || policy.remember(&owned, scope)).await;
-    match remembered {
-        Ok(Ok(what)) => tracing::info!(%what, "approval remembered"),
-        Ok(Err(e)) => ctx.emit(Event::Warning {
+    let failure = match remembered {
+        Ok(Ok(what)) => {
+            tracing::info!(%what, "approval remembered");
+            None
+        }
+        Ok(Err(e)) => Some(e.to_string()),
+        Err(e) => Some(e.to_string()),
+    };
+    if let Some(e) = failure {
+        ctx.note(Event::Warning {
             kind: "approval_not_remembered".into(),
             message: format!("approved this once only: {e}"),
-        }),
-        Err(e) => ctx.emit(Event::Warning {
-            kind: "approval_not_remembered".into(),
-            message: format!("approved this once only: {e}"),
-        }),
+        })
+        .await;
     }
-    Approval::Granted
+    Ok(Approval::Granted)
 }
 
 /// Concatenated text of result content.
@@ -704,7 +1019,7 @@ fn text_of(content: &[ContentBlock]) -> String {
 }
 
 /// Reports a provider error and fails the task.
-fn provider_failure(ctx: &TaskCtx, e: &ProviderError) -> End {
+async fn provider_failure(ctx: &TaskCtx, e: &ProviderError) -> End {
     let (kind, hint) = match e {
         ProviderError::Auth(_) => (
             "provider_auth",
@@ -728,10 +1043,11 @@ fn provider_failure(ctx: &TaskCtx, e: &ProviderError) -> End {
         ProviderError::Cancelled => ("cancelled", None),
         ProviderError::Unsupported(_) => ("provider_unsupported", None),
     };
-    ctx.emit(Event::Error {
+    ctx.note(Event::Error {
         kind: kind.into(),
         message: e.to_string(),
         hint: hint.map(str::to_owned),
-    });
+    })
+    .await;
     End::Failed(format!("provider error: {e}"))
 }

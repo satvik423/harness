@@ -283,6 +283,10 @@ pub enum Event {
         segment: u32,
         /// The opener message (environment, summary, pinned facts, anchors).
         opener: Message,
+        /// Blob holding the segment's frozen request prefix (system prompt,
+        /// tools, model settings), so a resumed segment sends exactly the same
+        /// prefix (ADR-032).
+        frame: BlobRef,
     },
     /// Past content was recalled into the transcript.
     Recalled {
@@ -497,6 +501,7 @@ mod tests {
             Event::SegmentOpened {
                 segment: 1,
                 opener: msg,
+                frame: BlobRef::from_bytes([3; 32]),
             },
             Event::Recalled {
                 anchor: Some("a2".into()),

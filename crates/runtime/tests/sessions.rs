@@ -20,8 +20,8 @@ use harness_ports::{
 use harness_protocol::{Decision, Envelope, Event, InputItem, Op, TaskState};
 use harness_runtime::{ApprovalMode, RuntimeDeps, SessionConfig, SessionHandle, spawn_session};
 use harness_testkit::invariants::check_all;
-use harness_testkit::{AskForChanges, FakeProvider};
-use harness_tools::{MemoryBlobStore, MemoryReadLedger, Unsandboxed};
+use harness_testkit::{AskForChanges, FakeProvider, MemoryStore};
+use harness_tools::{MemoryReadLedger, Unsandboxed};
 use harness_types::{ContentBlock, Risk, Role, StopReason, TaskId};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
@@ -175,7 +175,7 @@ use futures::StreamExt;
 struct Run {
     handle: SessionHandle,
     events: broadcast::Receiver<Envelope>,
-    blobs: Arc<MemoryBlobStore>,
+    blobs: Arc<MemoryStore>,
     policy: Arc<AskForChanges>,
     peak: Arc<std::sync::atomic::AtomicUsize>,
     _dir: tempfile::TempDir,
@@ -184,7 +184,7 @@ struct Run {
 /// Output cap used by the test sessions (small, so tests can exceed it cheaply).
 const TEST_CAP_TOKENS: u64 = 200;
 
-fn start(provider: Arc<dyn Provider>, approval: ApprovalMode, max_turns: u32) -> Run {
+async fn start(provider: Arc<dyn Provider>, approval: ApprovalMode, max_turns: u32) -> Run {
     let dir = tempfile::tempdir().unwrap();
     let mut tools = ToolRegistry::new();
     tools.register(Arc::new(Echo)).unwrap();
@@ -199,16 +199,19 @@ fn start(provider: Arc<dyn Provider>, approval: ApprovalMode, max_turns: u32) ->
             peak: Arc::clone(&peak),
         }))
         .unwrap();
-    let blobs = Arc::new(MemoryBlobStore::default());
+    let store = Arc::new(MemoryStore::default());
     let policy = Arc::new(AskForChanges::default());
     let deps = RuntimeDeps {
         provider,
         tools,
         clock: Arc::new(SystemClock),
         sandbox: Arc::new(Unsandboxed),
-        blobs: Arc::clone(&blobs) as _,
+        blobs: Arc::clone(&store) as _,
         ledger: Arc::new(MemoryReadLedger::default()),
         policy: Arc::clone(&policy) as _,
+        log: Arc::clone(&store) as _,
+        sessions: Arc::clone(&store) as _,
+        snapshots: Arc::clone(&store) as _,
     };
     let config = SessionConfig {
         cwd: dir.path().to_path_buf(),
@@ -218,11 +221,11 @@ fn start(provider: Arc<dyn Provider>, approval: ApprovalMode, max_turns: u32) ->
         output_cap_tokens: TEST_CAP_TOKENS,
         max_parallel_tools: 2,
     };
-    let (handle, events) = spawn_session(deps, config);
+    let (handle, events) = spawn_session(deps, config).await.unwrap();
     Run {
         handle,
         events,
-        blobs,
+        blobs: store,
         policy,
         peak,
         _dir: dir,
@@ -325,7 +328,10 @@ async fn submit_envelopes(run: &mut Run, text: &str, on_approval: OnApproval) ->
             };
             run.handle.send(op).await.unwrap();
         }
-        let done = ends_task(event);
+        // Only the task this submission started counts (a superseded paused
+        // task ends first).
+        let done = ends_task(event)
+            && matches!(event, Event::TaskState { task: t, .. } if Some(*t) == task);
         events.push(env);
         if done {
             return events;
@@ -380,7 +386,7 @@ fn tool_results(req: &ModelRequest) -> Vec<(String, bool, String)> {
 #[tokio::test]
 async fn session_1_text_only_reply_completes() {
     let fake = FakeProvider::new().with_text_turn("Hello!");
-    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
     let events = submit(&mut run, "hi", OnApproval::Approve).await;
     assert_eq!(final_state(&events), TaskState::Completed);
     assert!(events.iter().any(
@@ -404,7 +410,7 @@ async fn session_2_read_only_tool_runs_without_approval() {
     let fake = FakeProvider::new()
         .with_tool_call_turn("c1", "echo", &json!({"text": "pong"}))
         .with_text_turn("It said pong.");
-    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
     let events = submit(&mut run, "ping", OnApproval::Deny).await;
     assert_eq!(final_state(&events), TaskState::Completed);
     assert!(
@@ -427,7 +433,7 @@ async fn session_3_two_calls_in_one_turn_return_results_in_one_message() {
             ("b", "exec", json!({"command": "make"})),
         ])
         .with_text_turn("Both done.");
-    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
     let events = submit(&mut run, "do both", OnApproval::Approve).await;
     assert_eq!(final_state(&events), TaskState::Completed);
     let approvals = events
@@ -452,7 +458,7 @@ async fn session_4_conversation_continues_across_tasks() {
         .with_text_turn("First answer.")
         .with_tool_call_turn("c2", "exec", &json!({"command": "ls"}))
         .with_text_turn("Second answer.");
-    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
     assert_eq!(
         final_state(&submit(&mut run, "first", OnApproval::Approve).await),
         TaskState::Completed
@@ -489,7 +495,7 @@ async fn session_5_denied_unknown_and_failing_tools_are_reported_to_the_model() 
             ("c", "fails", json!({})),
         ])
         .with_text_turn("I'll stop.");
-    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
     let events = submit(&mut run, "go", OnApproval::Deny).await;
     assert_eq!(final_state(&events), TaskState::Completed);
     let results = tool_results(&fake.requests()[1]);
@@ -514,7 +520,7 @@ async fn approval_never_denies_without_asking() {
     let fake = FakeProvider::new()
         .with_tool_call_turn("c1", "exec", &json!({"command": "ls"}))
         .with_text_turn("ok");
-    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Never, 10);
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Never, 10).await;
     let events = submit(&mut run, "go", OnApproval::Approve).await;
     assert!(
         !events
@@ -538,7 +544,7 @@ async fn interrupt_during_approval_pauses_with_a_valid_transcript() {
             ("b", "echo", json!({"text": "y"})),
         ])
         .with_text_turn("resumed");
-    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
     let events = submit(&mut run, "go", OnApproval::Interrupt).await;
     assert_eq!(final_state(&events), TaskState::Paused);
     // The next input still works, and its request carries error results for both calls.
@@ -565,7 +571,7 @@ fn tool_results_before_last_user(req: &ModelRequest) -> Vec<(String, bool, Strin
 
 #[tokio::test]
 async fn interrupt_during_streaming_records_the_partial_text_and_pauses() {
-    let mut run = start(Arc::new(Hanging), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(Hanging), ApprovalMode::Ask, 10).await;
     run.handle
         .send(Op::Submit {
             session: run.handle.id(),
@@ -609,7 +615,7 @@ async fn max_turns_exhausts_the_budget() {
         .with_tool_call_turn("a", "echo", &json!({"text": "1"}))
         .with_tool_call_turn("b", "echo", &json!({"text": "2"}))
         .with_text_turn("never reached");
-    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 2);
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 2).await;
     let events = submit(&mut run, "loop", OnApproval::Approve).await;
     assert_eq!(final_state(&events), TaskState::BudgetExhausted);
     assert_eq!(fake.requests().len(), 2);
@@ -619,7 +625,7 @@ async fn max_turns_exhausts_the_budget() {
 #[tokio::test]
 async fn provider_error_fails_the_task_with_an_error_event() {
     let fake = FakeProvider::new().with_turn(vec![Err(ProviderError::Auth("bad key".into()))]);
-    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
     let events = submit(&mut run, "hi", OnApproval::Approve).await;
     assert_eq!(final_state(&events), TaskState::Failed);
     assert!(
@@ -643,7 +649,7 @@ async fn refusal_fails_the_task_and_the_next_input_still_works() {
             }),
         ])
         .with_text_turn("Sure, here is something else.");
-    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
     let events = submit(&mut run, "bad request", OnApproval::Approve).await;
     assert_eq!(final_state(&events), TaskState::Failed);
     assert!(events.iter().any(|e| matches!(
@@ -662,7 +668,7 @@ async fn refusal_fails_the_task_and_the_next_input_still_works() {
 
 #[tokio::test]
 async fn submitting_while_busy_is_an_error() {
-    let mut run = start(Arc::new(Hanging), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(Hanging), ApprovalMode::Ask, 10).await;
     let submit_op = || Op::Submit {
         session: run.handle.id(),
         input: vec![InputItem::Text { text: "hi".into() }],
@@ -684,7 +690,7 @@ async fn submitting_while_busy_is_an_error() {
 
 #[tokio::test]
 async fn session_opened_is_the_first_event() {
-    let mut run = start(Arc::new(FakeProvider::new()), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(FakeProvider::new()), ApprovalMode::Ask, 10).await;
     let first = run.events.recv().await.unwrap();
     assert!(
         matches!(first.event, Event::SessionOpened { segment: 0, .. }),
@@ -720,7 +726,7 @@ fn kind_of(e: &Event) -> &str {
 #[tokio::test]
 async fn cancel_during_approval_ends_cancelled() {
     let fake = FakeProvider::new().with_tool_call_turn("c1", "exec", &json!({"command": "x"}));
-    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
     run.handle
         .send(Op::Submit {
             session: run.handle.id(),
@@ -755,7 +761,7 @@ async fn cancel_during_approval_ends_cancelled() {
 
 #[tokio::test]
 async fn ops_from_later_phases_are_reported_as_unsupported() {
-    let mut run = start(Arc::new(FakeProvider::new()), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(FakeProvider::new()), ApprovalMode::Ask, 10).await;
     let session = run.handle.id();
     for op in [
         Op::Pause {
@@ -764,6 +770,10 @@ async fn ops_from_later_phases_are_reported_as_unsupported() {
         Op::Resume {
             task: TaskId::new(),
         },
+    ] {
+        assert_eq!(kind_of(&first_problem(&mut run, op).await), "no_such_task");
+    }
+    for op in [
         Op::Compact {
             session,
             focus: None,
@@ -784,7 +794,7 @@ async fn ops_from_later_phases_are_reported_as_unsupported() {
 
 #[tokio::test]
 async fn bad_submissions_are_rejected_with_specific_errors() {
-    let mut run = start(Arc::new(FakeProvider::new()), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(FakeProvider::new()), ApprovalMode::Ask, 10).await;
     let session = run.handle.id();
     let wrong = Op::Submit {
         session: harness_types::SessionId::new(),
@@ -813,7 +823,7 @@ async fn bad_submissions_are_rejected_with_specific_errors() {
 
 #[tokio::test]
 async fn stray_approvals_and_interrupts_are_warnings() {
-    let mut run = start(Arc::new(FakeProvider::new()), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(FakeProvider::new()), ApprovalMode::Ask, 10).await;
     let approve = Op::Approve {
         request: harness_types::ApprovalId::new(),
         decision: Decision::Once,
@@ -848,7 +858,7 @@ async fn pause_turn_ends_the_task_with_a_warning_and_stays_append_only() {
             }),
         ])
         .with_text_turn("Next answer.");
-    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
     let events = submit(&mut run, "go", OnApproval::Approve).await;
     assert_eq!(final_state(&events), TaskState::Completed);
     assert!(
@@ -878,7 +888,7 @@ async fn max_tokens_without_tool_calls_fails() {
             reason: StopReason::MaxTokens,
         }),
     ]);
-    let mut run = start(Arc::new(fake), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(fake), ApprovalMode::Ask, 10).await;
     let events = submit(&mut run, "go", OnApproval::Approve).await;
     assert_eq!(final_state(&events), TaskState::Failed);
 }
@@ -896,14 +906,14 @@ async fn provider_notices_become_warnings() {
             reason: StopReason::EndTurn,
         }),
     ]);
-    let mut run = start(Arc::new(fake), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(fake), ApprovalMode::Ask, 10).await;
     let events = submit(&mut run, "go", OnApproval::Approve).await;
     assert!(events.iter().any(|e| matches!(e, Event::Warning { kind, message } if kind == "provider_notice" && message == "thinking dropped")));
 }
 
 #[tokio::test]
 async fn shutdown_cancels_a_running_task() {
-    let mut run = start(Arc::new(Hanging), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(Hanging), ApprovalMode::Ask, 10).await;
     run.handle
         .send(Op::Submit {
             session: run.handle.id(),
@@ -945,7 +955,7 @@ async fn large_output_is_capped_once_with_a_footer_naming_the_event_that_holds_i
     let fake = FakeProvider::new()
         .with_tool_call_turn("c1", "echo", &json!({ "text": big }))
         .with_text_turn("done");
-    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
     let envelopes = submit_envelopes(&mut run, "go", OnApproval::Deny).await;
 
     let (seq, full, sent) = envelopes
@@ -983,7 +993,7 @@ async fn small_output_is_sent_whole_and_kept_inline() {
     let fake = FakeProvider::new()
         .with_tool_call_turn("c1", "echo", &json!({"text": "short"}))
         .with_text_turn("done");
-    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
     let events = submit(&mut run, "go", OnApproval::Deny).await;
     assert!(events.iter().any(|e| matches!(
         e,
@@ -997,7 +1007,7 @@ async fn a_tools_own_cap_overrides_the_session_cap() {
     let fake = FakeProvider::new()
         .with_tool_call_turn("c1", "echo_tiny_cap", &json!({"text": numbered_lines(20)}))
         .with_text_turn("done");
-    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
     submit(&mut run, "go", OnApproval::Deny).await;
     let text = &tool_results(&fake.requests()[1])[0].2;
     assert!(text.contains("[output trimmed: "), "{text}");
@@ -1014,7 +1024,7 @@ async fn ask_user_waits_for_the_answer_and_returns_it() {
             &json!({"question": "Favourite colour?", "options": ["red", "blue"]}),
         )
         .with_text_turn("Blue it is.");
-    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
     let events = submit(&mut run, "pick", OnApproval::Approve).await;
     assert_eq!(final_state(&events), TaskState::Completed);
     let asked = events
@@ -1048,7 +1058,7 @@ async fn ask_user_in_a_headless_session_answers_no_user_available() {
     let fake = FakeProvider::new()
         .with_tool_call_turn("q1", "ask_user", &json!({"question": "?"}))
         .with_text_turn("ok");
-    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Never, 10);
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Never, 10).await;
     let events = submit(&mut run, "pick", OnApproval::Approve).await;
     assert!(
         !events
@@ -1066,7 +1076,7 @@ async fn interrupting_a_question_pauses_with_a_valid_transcript() {
     let fake = FakeProvider::new()
         .with_tool_call_turn("q1", "ask_user", &json!({"question": "?"}))
         .with_text_turn("after resume");
-    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
     let events = submit(&mut run, "pick", OnApproval::Interrupt).await;
     assert_eq!(final_state(&events), TaskState::Paused);
     // The next task still gets a well-formed transcript.
@@ -1079,7 +1089,7 @@ async fn interrupting_a_question_pauses_with_a_valid_transcript() {
 #[tokio::test]
 async fn stray_answers_are_warnings() {
     let fake = FakeProvider::new();
-    let mut run = start(Arc::new(fake), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(fake), ApprovalMode::Ask, 10).await;
     let e = first_problem(
         &mut run,
         Op::Answer {
@@ -1098,7 +1108,7 @@ async fn policy_denials_reach_the_model_without_asking() {
     let fake = FakeProvider::new()
         .with_tool_call_turn("c1", "echo", &json!({"text": "x", "deny": true}))
         .with_text_turn("ok");
-    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
     let events = submit(&mut run, "go", OnApproval::Approve).await;
     assert!(
         !events
@@ -1121,7 +1131,7 @@ async fn approval_requests_carry_the_policys_reason() {
     let fake = FakeProvider::new()
         .with_tool_call_turn("c1", "exec", &json!({"command": "ls"}))
         .with_text_turn("ok");
-    let mut run = start(Arc::new(fake), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(fake), ApprovalMode::Ask, 10).await;
     let events = submit(&mut run, "go", OnApproval::Approve).await;
     assert!(events.iter().any(
         |e| matches!(e, Event::ApprovalRequested { reason, .. } if reason == "exec needs approval")
@@ -1135,7 +1145,7 @@ async fn approving_for_the_session_skips_the_next_question() {
         .with_text_turn("first")
         .with_tool_call_turn("c2", "exec", &json!({"command": "ls"}))
         .with_text_turn("second");
-    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
     let first = submit(&mut run, "one", OnApproval::ForSession).await;
     assert_eq!(
         first
@@ -1161,7 +1171,7 @@ async fn always_grants_are_remembered_with_their_scope() {
     let fake = FakeProvider::new()
         .with_tool_call_turn("c1", "exec", &json!({"command": "make"}))
         .with_text_turn("done");
-    let mut run = start(Arc::new(fake), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(fake), ApprovalMode::Ask, 10).await;
     let events = submit(&mut run, "go", OnApproval::AlwaysUser).await;
     assert_eq!(final_state(&events), TaskState::Completed);
     assert_eq!(run.policy.grants()[0].2, harness_ports::GrantScope::User);
@@ -1180,7 +1190,7 @@ async fn parallel_safe_calls_run_together_within_the_limit_and_keep_call_order()
     let fake = FakeProvider::new()
         .with_tool_calls_turn(&calls)
         .with_text_turn("done");
-    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
     let started = std::time::Instant::now();
     submit(&mut run, "go", OnApproval::Deny).await;
     let elapsed = started.elapsed();
@@ -1209,7 +1219,7 @@ async fn a_call_needing_approval_splits_parallel_batches_in_order() {
     let fake = FakeProvider::new()
         .with_tool_calls_turn(&calls)
         .with_text_turn("done");
-    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10);
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
     let events = submit(&mut run, "go", OnApproval::Approve).await;
     let started: Vec<&str> = events
         .iter()

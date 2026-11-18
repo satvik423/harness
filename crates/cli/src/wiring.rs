@@ -91,6 +91,76 @@ pub fn build_policy(inputs: &PolicyInputs<'_>) -> Result<Arc<PolicyEngine>, Wiri
     Ok(Arc::new(engine))
 }
 
+/// The model a stored session's current segment was opened with, read from
+/// its frozen frame (ADR-032). `None` if the session has no segment yet.
+///
+/// # Errors
+/// A store error, or [`harness_ports::StoreError::Corrupt`] for a bad frame.
+pub async fn session_model(
+    log: &dyn harness_ports::EventLog,
+    blobs: &dyn harness_ports::BlobStore,
+    session: harness_types::SessionId,
+) -> Result<Option<ModelRef>, harness_ports::StoreError> {
+    let events = log
+        .range(
+            session,
+            harness_types::Seq::FIRST,
+            harness_types::Seq(u64::MAX),
+        )
+        .await?;
+    let Some(frame) = events.iter().rev().find_map(|e| match &e.envelope.event {
+        harness_protocol::Event::SegmentOpened { frame, .. } => Some(*frame),
+        _ => None,
+    }) else {
+        return Ok(None);
+    };
+    let bytes = blobs.get(&frame).await?;
+    let frame: harness_context::SegmentFrame = serde_json::from_slice(&bytes)
+        .map_err(|e| harness_ports::StoreError::Corrupt(format!("segment frame: {e}")))?;
+    format!("{}/{}", frame.provider, frame.model)
+        .parse()
+        .map(Some)
+        .map_err(|e| harness_ports::StoreError::Corrupt(format!("segment frame model: {e}")))
+}
+
+/// A provider for commands that never call a model (`session undo`,
+/// `task cancel`): every request fails with a clear message.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Offline;
+
+#[async_trait::async_trait]
+impl Provider for Offline {
+    fn id(&self) -> &str {
+        "offline"
+    }
+
+    async fn capabilities(
+        &self,
+        _: &str,
+    ) -> Result<harness_ports::Capabilities, harness_ports::ProviderError> {
+        Err(harness_ports::ProviderError::Unsupported(
+            "this command does not call a model".into(),
+        ))
+    }
+
+    async fn stream(
+        &self,
+        _: harness_ports::ModelRequest,
+        _: tokio_util::sync::CancellationToken,
+    ) -> Result<harness_ports::ProviderStream, harness_ports::ProviderError> {
+        Err(harness_ports::ProviderError::Unsupported(
+            "this command does not call a model".into(),
+        ))
+    }
+
+    async fn count_tokens(
+        &self,
+        _: &harness_ports::ModelRequest,
+    ) -> Result<u64, harness_ports::ProviderError> {
+        Ok(0)
+    }
+}
+
 /// Creates the provider for `model`, resolving its API key from `secrets`.
 ///
 /// # Errors

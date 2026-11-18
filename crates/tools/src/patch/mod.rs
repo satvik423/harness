@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 pub use apply::{FileChange, PatchFs, PlanError, normalize, plan};
 pub use parse::{Hunk, HunkLine, ParseError, Patch, PatchOp, parse_patch};
 
-use crate::fs_write::{record_written, tmp_name};
+use crate::fs_write::{record_written, snapshot, tmp_name};
 use crate::read_file::resolve;
 use crate::support::stamp_of;
 
@@ -242,13 +242,27 @@ impl Tool for ApplyPatch {
         let task = ctx.task;
         let counts = line_counts(&patch);
         // Reading and writing several files is blocking work.
+        let plan_cwd = cwd.clone();
         let changes = tokio::task::spawn_blocking(move || {
             let fs = DiskFs {
-                cwd: &cwd,
+                cwd: &plan_cwd,
                 ledger: ledger.as_ref(),
             };
-            let changes = plan(&patch, &fs)
-                .map_err(|e| ToolError::Failed(format!("{e}. Nothing was changed.")))?;
+            plan(&patch, &fs).map_err(|e| ToolError::Failed(format!("{e}. Nothing was changed.")))
+        })
+        .await
+        .map_err(|e| ToolError::Failed(format!("patch stopped: {e}")))??;
+        // Every file is snapshotted before any is written, so undo can restore all.
+        for change in &changes {
+            snapshot(
+                &ctx,
+                &cwd.join(&change.path),
+                change.before.as_deref().map(str::as_bytes),
+                &change.path,
+            )
+            .await?;
+        }
+        let changes = tokio::task::spawn_blocking(move || {
             commit(&cwd, &changes, task)
                 .map_err(|e| ToolError::Failed(format!("{e}. Nothing was changed.")))?;
             Ok::<_, ToolError>(changes)

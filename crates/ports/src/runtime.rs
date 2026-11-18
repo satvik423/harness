@@ -1,20 +1,15 @@
 //! Small runtime ports: [`EventSink`] and [`Clock`].
 
 use harness_protocol::Event;
-use harness_types::Seq;
 
 /// Somewhere to send live events (bounded and non-blocking in real implementations).
 pub trait EventSink: Send + Sync {
     /// Emits an event. Must not block; a slow subscriber may miss deltas.
-    fn emit(&self, event: Event);
-
-    /// Emits an event built from the sequence number it is given, and returns
-    /// that number.
     ///
-    /// Used when an event must refer to itself, such as the recall footer of a
-    /// capped tool result (`full: recall {"seq_from":S,...}`). The sequence
-    /// number and the send happen together, so no other event can take it.
-    fn emit_with(&self, build: &mut dyn FnMut(Seq) -> Event) -> Seq;
+    /// Tools use this for live, non-persisted events such as
+    /// [`Event::ToolOutput`]. Persisted events are recorded by the runtime,
+    /// which commits them to the event log first (NFR-03).
+    fn emit(&self, event: Event);
 }
 
 /// A source of wall-clock time, injectable so tests are deterministic.
