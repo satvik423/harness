@@ -22,7 +22,7 @@ use harness_runtime::{
 use harness_testkit::invariants::check_all;
 use harness_testkit::{AskForChanges, FakeProvider, MemoryStore};
 use harness_tools::{MemoryReadLedger, Unsandboxed, WriteFile};
-use harness_types::{ContentBlock, Message, Risk, Role, Seq, SessionId, TaskId};
+use harness_types::{ContentBlock, Message, Mode, Risk, Role, Seq, SessionId, TaskId};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
@@ -121,10 +121,16 @@ impl Env {
     }
 
     fn config(&self) -> SessionConfig {
+        self.config_in(Mode::Auto, false)
+    }
+
+    fn config_in(&self, mode: Mode, full_access: bool) -> SessionConfig {
         SessionConfig {
             cwd: self.dir.path().to_path_buf(),
             persona: builtin_default(),
             approval: ApprovalMode::Ask,
+            mode,
+            full_access,
             max_turns: 10,
             output_cap_tokens: 2_000,
             max_parallel_tools: 4,
@@ -553,6 +559,7 @@ async fn crashed_session(env: &Env) -> (SessionId, TaskId) {
         Event::SessionOpened {
             persona: "default".into(),
             segment: 0,
+            mode: None,
         },
         Event::SegmentOpened {
             segment: 0,
@@ -933,6 +940,7 @@ async fn a_task_whose_input_was_never_saved_is_failed_not_resumed() {
         Event::SessionOpened {
             persona: "default".into(),
             segment: 0,
+            mode: None,
         },
         Event::SegmentOpened {
             segment: 0,
@@ -1108,4 +1116,101 @@ async fn the_request_history_rebuilds_exactly_what_the_provider_received() {
             .unwrap();
     let rebuilt: Vec<_> = history.into_iter().map(|(_, r)| r).collect();
     assert_eq!(rebuilt, fake.requests());
+}
+
+// ---------- permission modes (ADR-042) ----------
+
+/// Waits for the first event matching `want`.
+async fn next_matching(
+    rx: &mut broadcast::Receiver<Envelope>,
+    want: impl Fn(&Event) -> bool,
+) -> Event {
+    loop {
+        let env = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if want(&env.event) {
+            return env.event;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_resumed_session_keeps_its_mode_and_still_sends_the_note() {
+    let env = Env::new();
+    let first = FakeProvider::new().with_text_turn("Hello!");
+    let (handle, mut rx) = env.spawn(&first).await;
+    let id = handle.id();
+    drive(&handle, &mut rx, Some(submit(id, "hi")), ENDS, |_| None).await;
+    handle
+        .send(Op::SetMode {
+            session: id,
+            mode: Mode::Plan,
+        })
+        .await
+        .unwrap();
+    next_matching(&mut rx, |e| matches!(e, Event::ModeChanged { .. })).await;
+    handle.send(Op::Shutdown).await.unwrap();
+    handle.closed().await;
+
+    // The new process starts sessions in auto mode; this one stays in plan.
+    let second = FakeProvider::new()
+        .with_tool_call_turn("c1", "slow_exec", &json!({"tag": "x"}))
+        .with_text_turn("planned");
+    let (handle, mut rx, _) = env.resume(&second, id).await;
+    drive(&handle, &mut rx, Some(submit(id, "go on")), ENDS, |_| None).await;
+    assert_eq!(env.policy.modes().last(), Some(&Mode::Plan));
+    let sent = &second.requests()[0];
+    let ContentBlock::Text { text } = &sent.messages.last().unwrap().content[0] else {
+        panic!("{sent:?}")
+    };
+    assert!(
+        text.starts_with("<system-note>\nThe permission mode is now plan"),
+        "{text}"
+    );
+    let mut all = first.requests();
+    all.extend(second.requests());
+    assert!(check_all(&all).is_empty());
+    let history = harness_runtime::request_history(env.store.as_ref(), env.store.as_ref(), id)
+        .await
+        .unwrap();
+    assert_eq!(
+        history.last().unwrap().1,
+        second.requests().last().unwrap().clone()
+    );
+}
+
+#[tokio::test]
+async fn full_mode_does_not_survive_a_restart_without_full_access() {
+    let env = Env::new();
+    let fake = FakeProvider::new();
+    let (handle, _rx) = spawn_session(
+        env.deps(Arc::new(fake.clone()), Arc::clone(&env.store) as _),
+        env.config_in(Mode::Full, true),
+    )
+    .await
+    .unwrap();
+    let id = handle.id();
+    handle.send(Op::Shutdown).await.unwrap();
+    handle.closed().await;
+
+    let (_handle, mut rx, _) = env.resume(&fake, id).await;
+    let changed = next_matching(&mut rx, |e| matches!(e, Event::ModeChanged { .. })).await;
+    assert!(
+        matches!(
+            changed,
+            Event::ModeChanged {
+                from: Mode::Full,
+                to: Mode::Auto,
+                ..
+            }
+        ),
+        "{changed:?}"
+    );
+    let warned = next_matching(&mut rx, |e| matches!(e, Event::Warning { .. })).await;
+    assert!(
+        matches!(&warned, Event::Warning { kind, message } if kind == "mode" && message.contains("--dangerously-full-access")),
+        "{warned:?}"
+    );
 }

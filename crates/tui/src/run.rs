@@ -224,11 +224,24 @@ async fn perform(
                 level: Level::Info,
                 text: format!("starting a new session with {model}…"),
             });
+            // A new session keeps the mode the user chose (/clear in plan mode
+            // stays in plan mode); a stored session keeps its own.
+            let mode = app.view.mode;
             match backend.new_session(model, effort).await {
                 Ok(attached) => {
                     app.attach(&attached);
                     *events = attached.events;
                     *events_open = true;
+                    if app.view.mode != mode
+                        && let Err(e) = backend
+                            .send(Op::SetMode {
+                                session: app.view.id,
+                                mode,
+                            })
+                            .await
+                    {
+                        failed(app, e);
+                    }
                 }
                 Err(e) => failed(app, format!("could not start a new session: {e}")),
             }

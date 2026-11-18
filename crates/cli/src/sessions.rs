@@ -277,10 +277,16 @@ pub fn event_line(e: &LoggedEvent) -> String {
         } => {
             format!("task {task} → {} ({reason})", state_name(*to))
         }
-        Event::ApprovalRequested { reason, .. } => shorten(reason, 80),
+        Event::ApprovalRequested {
+            reason, summary, ..
+        } => match summary {
+            Some(summary) => shorten(&format!("{summary} — {reason}"), 80),
+            None => shorten(reason, 80),
+        },
         Event::ApprovalResolved { decision, .. } => format!("{decision:?}"),
         Event::Warning { message, .. } | Event::Error { message, .. } => shorten(message, 80),
         Event::UndoApplied { paths, .. } => paths.join(", "),
+        Event::ModeChanged { from, to, .. } => format!("{from} → {to}"),
         Event::SystemNote { text, .. } => shorten(text, 80),
         _ => String::new(),
     };
@@ -503,6 +509,30 @@ mod tests {
             tasks.contains("recovered") && tasks.contains(&s.id.to_string()),
             "{tasks}"
         );
+    }
+
+    #[test]
+    fn event_lines_show_mode_changes_and_approval_descriptions() {
+        let line = event_line(&logged(
+            4,
+            Event::ModeChanged {
+                from: harness_types::Mode::Auto,
+                to: harness_types::Mode::Plan,
+                note: "n".into(),
+            },
+        ));
+        assert!(line.ends_with("auto → plan"), "{line}");
+        let line = event_line(&logged(
+            5,
+            Event::ApprovalRequested {
+                id: harness_types::ApprovalId::new(),
+                task: TaskId::new(),
+                call_id: "c".into(),
+                reason: "run `ls`".into(),
+                summary: Some("List files".into()),
+            },
+        ));
+        assert!(line.ends_with("List files — run `ls`"), "{line}");
     }
 
     #[test]

@@ -38,6 +38,11 @@ pub enum WiringError {
         "policy.profile is \"full\", which removes every safeguard; pass --dangerously-full-access to confirm, or choose another profile"
     )]
     FullAccessNotConfirmed,
+    /// `--mode full` was given without `--dangerously-full-access`.
+    #[error(
+        "--mode full removes every safeguard; pass --dangerously-full-access to confirm, or choose another mode"
+    )]
+    FullModeNotConfirmed,
     /// A rules file or default deny path is invalid.
     #[error("invalid policy rules: {0}")]
     Rules(#[from] RuleError),
@@ -56,7 +61,8 @@ pub struct PolicyInputs<'a> {
     pub trusted: bool,
     /// `--approval`, overriding the profile's approval policy.
     pub approval: Option<ApprovalPolicy>,
-    /// `--dangerously-full-access`: run with the `full` profile.
+    /// `--dangerously-full-access`: start in `full` mode (unless `--mode` says
+    /// otherwise) and allow switching to it.
     pub full_access: bool,
     /// Whether commands run in an isolating sandbox.
     pub sandboxed: bool,
@@ -75,6 +81,7 @@ pub fn build_policy(inputs: &PolicyInputs<'_>) -> Result<Arc<PolicyEngine>, Wiri
         (false, PolicyProfile::Full) => return Err(WiringError::FullAccessNotConfirmed),
         (false, PolicyProfile::ReadOnly) => Profile::ReadOnly,
         (false, PolicyProfile::Auto) => Profile::Auto,
+        (false, PolicyProfile::Plan) => Profile::Plan,
         (false, PolicyProfile::Ci) => Profile::Ci,
     };
     let engine = PolicyEngine::new(PolicySettings {
@@ -87,6 +94,7 @@ pub fn build_policy(inputs: &PolicyInputs<'_>) -> Result<Arc<PolicyEngine>, Wiri
         project_rules: inputs
             .trusted
             .then(|| Paths::project_rules_file(inputs.project)),
+        full_access: inputs.full_access,
     })?;
     Ok(Arc::new(engine))
 }
@@ -265,6 +273,7 @@ mod tests {
                 },
                 cwd: self.project(),
                 writable_roots: vec![self.project()],
+                mode: harness_types::Mode::Auto,
             }
         }
     }

@@ -133,6 +133,11 @@ All are the latest stable releases on 18 Nov 2026. `cargo deny` is clean (`binco
 - A tool refused by the policy shows its reason twice: on the card and as a warning notice (the runtime records a `Warning` event too).
 - With mouse capture on, selecting text needs Shift+drag (`[ui] mouse = false` turns capture off).
 - `ratatui`'s `unstable-rendered-line-info` API may change in a minor release.
+- In plan mode a command you approve can still change files (for example `sed -i`): plan
+  mode refuses the edit tools, and commands are your call. The Phase 13 sandbox can make
+  them read-only (follow-up 2).
+- Approval descriptions are written by the model; the exact command is always shown under
+  them (ADR-043).
 
 ## Trial follow-up: gaps filled before Phase 5
 
@@ -201,13 +206,87 @@ No new dependencies.
 
 Anthropic still has no live test (no key).
 
+## Trial follow-up 2: approval descriptions and permission modes
+
+After the trial you asked for two things before Phase 5:
+
+1. **A plain description on every approval.** You could not judge commands you did not
+   understand from the command text alone.
+2. **Modes like other harnesses.** There were none to switch: profiles were picked once,
+   at startup, and Shift+Tab did nothing.
+
+Your decisions:
+- keep the names `read-only` and `auto`, and add `plan`;
+- shell commands still ask in plan mode;
+- no AI judge: a real "auto" comes with the Phase 13 sandbox.
+
+ADR-042 and ADR-043 record them, and the plan is now v1.6.
+
+| Change | Evidence |
+|---|---|
+| `shell`, `pty_start` and `pty_write` ask the model for a one-line `description`; approvals carry it as `summary` and show it **above** the exact command (TUI panel, headless prompt, notification, `session show`) (ADR-043) | tools, runtime, protocol, TUI, CLI tests; live: "Run test_calc.py with Python 3 to check whether it passes" above ``run `python3 test_calc.py` `` |
+| Permission modes `read-only`, `auto`, `plan`, `full` belong to the session, and every policy call is judged in the mode in force (ADR-042) | policy mode × risk tests |
+| Plan mode refuses every edit before rules are matched, so allow rules and grants cannot override it; commands still ask | policy test `plan_mode_beats_allow_rules_and_session_grants` |
+| Shift+Tab cycles read-only → auto → plan (→ full only with `--dangerously-full-access`); `/mode [name]` switches or opens a picker | `App` tests; live |
+| `Op::SetMode` records `ModeChanged`; the model gets a system note with its next message; a switch mid-task applies from the next call | runtime tests; live `debug diff-requests`: append-only, 17 earlier messages unchanged |
+| `propose_plan` shows the plan in the transcript, with three choices: approve with auto-accept, approve and ask, or keep planning / type feedback | tools tests; live: plan, feedback, re-plan, approve → `auto`, edit ran without asking |
+| A resumed session keeps its mode (`SessionOpened` records the start); `--mode` switches it; `full` drops to `auto` without the flag | persistence tests; live `harness -c` came back in `plan`, `-c --mode auto` switched |
+| `harness --mode` and `harness run --mode`; `policy.profile = "plan"` | binary test, factory test |
+| `harness run --mode plan` ends with the plan and changes nothing; a closed input counts as "nobody can approve" | tools test; live: one proposal, `calc.py` unchanged |
+| `/clear` and `/model` keep the current mode | — |
+
+The live run caught two problems, both fixed:
+- With stdin closed, headless answered "(no answer…)", and `propose_plan` took it as
+  feedback, so the model re-proposed three times.
+- The plan card showed raw JSON.
+
+New public items:
+
+- `Mode` and `ParseModeError` (types);
+- `ModeControl`, `FixedMode`, `ModeError`, `NO_ANSWER`, `PolicyCall.mode` and
+  `ToolCtx.mode` (ports);
+- `Op::SetMode`, `Event::ModeChanged`, `SessionOpened.mode` and
+  `ApprovalRequested.summary` (protocol);
+- `Profile::Plan`, `Profile::mode`, `PolicySettings.full_access` and `PLAN_MODE_REFUSAL`
+  (policy);
+- `SessionConfig.mode` and `full_access` (runtime);
+- `ProposePlan`, `PLAN_CHOICES` and `DESCRIPTION_FIELD` (tools);
+- `SessionView.mode` and `full_access`, `Slash::Mode` and `view::modes_overlay` (tui);
+- `PolicyProfile::Plan` (config);
+- `SessionFactory.mode`, `start_mode`, `RunOptions.mode`, `mode_given`, `full_access`
+  and `WiringError::FullModeNotConfirmed` (cli).
+
+No new dependencies.
+
+Old sessions still load: the new event fields are optional. Sessions started before this
+change keep their frozen tool list, so their approvals show no description.
+
+**Checks after follow-up 2 (all pass):**
+
+| Check | Result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean |
+| `cargo nextest run --workspace --all-features` | 674 passed (+33) |
+| `cargo test --workspace --doc` | 58 passed (+2) |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | clean |
+| `cargo deny check` | advisories ok, bans ok, licenses ok, sources ok |
+| `cargo llvm-cov --workspace --summary-only` | 91.5% lines: runtime 89.6%, context 97.7%, policy 93.2%, tools 95.9%, tui 81.8%, cli 88.2% |
+
+Known issue: in plan mode, a command you approve can still change files (for example
+`sed -i`). Plan mode refuses the edit tools; commands are your call, which is why they
+still ask. The Phase 13 sandbox can make plan-mode commands read-only.
+
 ## Notes for later phases
 
 - **Phase 5:**
   - `/model` and `/effort` switch inside a session via compaction (ADR-038).
   - `/compact` and `/recall` slot into the slash framework.
   - `Compacted` and `Recalled` events need TUI rendering.
-- **Phase 6:** persona in the header and `/persona`; cost per persona (FR-PRV-06).
+- **Phase 6:** persona in the header and `/persona`; cost per persona (FR-PRV-06);
+  a persona's `policy profile` sets its starting mode (ADR-042).
 - **Phase 7:** `/hooks`, `/skills`.
 - **Phase 11:** replace attachment notes with converted content and images (ADR-039).
 - **Phase 12:** fallbacks shown in the status bar.
+- **Phase 13:** with the sandbox, `auto` runs sandboxed commands without asking (the
+  real "auto" mode), and plan-mode commands can run read-only (ADR-042).

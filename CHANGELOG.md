@@ -22,6 +22,11 @@ All notable changes to harness. Versions follow the release plan in
   (`[ui] mouse = false` to turn off), shell cards keep their last output lines, a model
   picker in `/model`, faster redraws in long sessions.
 - **Prices for OpenAI's gpt-6 models** in the built-in pricing table.
+- **Approvals explain themselves:** commands come with a one-line description from the
+  agent, shown above the exact command (ADR-043).
+- **Permission modes** `read-only`, `auto`, `plan`, `full` switch at any time: Shift+Tab,
+  `/mode`, `--mode`, or `policy.profile`. In plan mode the agent explores and proposes a
+  plan (`propose_plan`); edits wait for your approval (ADR-042).
 
 ## 0.1.0 — "It works" (2026-11-18)
 

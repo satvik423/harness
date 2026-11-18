@@ -7,7 +7,7 @@
 //! - model naming: [`ModelRef`]
 //! - conversation content: [`Role`], [`ContentBlock`], [`Message`]
 //! - accounting: [`Usage`], [`StopReason`]
-//! - safety: [`Risk`]
+//! - safety: [`Risk`], [`Mode`]
 //!
 //! # Example
 //! ```
@@ -20,6 +20,7 @@
 
 mod ids;
 mod message;
+mod mode;
 mod model_ref;
 mod risk;
 mod usage;
@@ -28,6 +29,7 @@ pub use ids::{
     ApprovalId, BlobRef, ParseBlobRefError, ParseIdError, QuestionId, Seq, SessionId, TaskId,
 };
 pub use message::{ContentBlock, Message, Role};
+pub use mode::{Mode, ParseModeError};
 pub use model_ref::{ModelRef, ParseModelRefError};
 pub use risk::Risk;
 pub use usage::{StopReason, Usage};

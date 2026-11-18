@@ -11,7 +11,7 @@ context only (ADR-001, ADR-016).
 | `resume_session(deps, config, id)` | Rebuilds a stored session from its events, recovers a task that was running when harness stopped, starts its actor; returns `Resumed { paused, recovered }` |
 | `SessionHandle` | `id()`, `send(Op)`, `subscribe()`, `closed()` (waits until the actor has stopped) |
 | `RuntimeDeps` | Provider, tools, clock, sandbox, blob store, read ledger, policy, event log, session store, snapshot store (all `Arc<dyn Port>`) |
-| `SessionConfig` | Working directory, persona, approval mode, max model calls per task run, output cap, parallel-call limit |
+| `SessionConfig` | Working directory, persona, approval mode, starting permission `mode` and `full_access` (ADR-042), max model calls per task run, output cap, parallel-call limit |
 | `ApprovalMode` | `Ask` (someone can answer prompts) or `Never` (headless: asks become denials, `ask_user` gets "no user available") |
 | `RuntimeError` | `Closed`, `NotFound`, `Store`, `Corrupt` |
 | `OUTCOME_UNKNOWN` | The result given to a call that was running when harness stopped |
@@ -43,7 +43,16 @@ context only (ADR-001, ADR-016).
 
 `Submit`, `Approve`, `Answer` (for `ask_user`, ADR-028), `Interrupt` (→ Paused at once),
 `Pause` (→ Paused at the next safe point), `Resume`, `Cancel` (running or paused),
-`Undo` (ADR-034), `Shutdown`. `Fork` answers that it arrives in Phase 5 (ADR-035).
+`Undo` (ADR-034), `SetMode` (records `ModeChanged` and queues a note for the model; refuses `full` without full access; ADR-042), `Shutdown`. `Fork` answers that it arrives in Phase 5 (ADR-035).
+
+## Permission modes (ADR-042)
+
+Each session holds its `Mode` in a shared cell (`mode.rs`). The policy reads it on every
+call, so a switch during a task applies from the next call. Tools reach it through
+`ToolCtx::mode` (`propose_plan`). A switch is recorded before it takes effect. Its note
+is sent at the start of the next user message while a segment is open. A new segment's
+environment states the mode instead, and replay rebuilds both the same way. Approval
+requests carry the call's one-line `description` as `summary` (ADR-043).
 
 ## Durability, resume and recovery (Phase 3)
 

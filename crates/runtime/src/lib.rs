@@ -20,6 +20,7 @@
 
 mod approval;
 mod journal;
+mod mode;
 mod pricing;
 mod replay;
 mod session;

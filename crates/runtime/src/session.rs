@@ -14,11 +14,12 @@ use harness_context::{
     ActivePersona, Environment, SegmentContext, SegmentSpec, load_project_instructions,
 };
 use harness_ports::{
-    BlobStore, Clock, EventLog, Policy, Provider, ReadLedger, Sandbox, SessionRecord,
-    SessionStatus, SessionStore, SnapshotStore, StoreError, TaskControl, ToolRegistry,
+    BlobStore, Clock, EventLog, ModeControl as _, Policy, Provider, ReadLedger, Sandbox,
+    SessionRecord, SessionStatus, SessionStore, SnapshotStore, StoreError, TaskControl,
+    ToolRegistry,
 };
 use harness_protocol::{Envelope, Event, InputItem, Op, TaskState};
-use harness_types::{ContentBlock, Message, SessionId, TaskId};
+use harness_types::{ContentBlock, Message, Mode, SessionId, TaskId};
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -27,6 +28,7 @@ use tracing::Instrument;
 
 use crate::approval::{Approvals, Questions};
 use crate::journal::Journal;
+use crate::mode::{SessionMode, environment_note};
 use crate::replay::{PausedTask, rebuild, recover};
 use crate::turn::{PauseFlag, Round, Start, StopKind, StopSlot, TaskCtx, TaskResult, run_task};
 use crate::{ApprovalMode, ModelPrice};
@@ -82,6 +84,11 @@ pub struct SessionConfig {
     pub persona: ActivePersona,
     /// How calls needing approval are answered.
     pub approval: ApprovalMode,
+    /// The permission mode a new session starts in (ADR-042). A resumed
+    /// session keeps the mode it had.
+    pub mode: Mode,
+    /// Whether `full` mode may be chosen (`--dangerously-full-access`).
+    pub full_access: bool,
     /// Maximum model calls per task run.
     pub max_turns: u32,
     /// Tool output cap in estimated tokens, unless a tool sets its own
@@ -186,10 +193,15 @@ pub async fn spawn_session(
             Event::SessionOpened {
                 persona: config.persona.name.clone(),
                 segment: 0,
+                mode: Some(config.mode),
             },
         )
         .await?;
-    let handle = start(Actor::new(id, deps, config, journal, None, None), events_tx);
+    let mode = config.mode;
+    let handle = start(
+        Actor::new(id, deps, config, journal, None, None, mode),
+        events_tx,
+    );
     Ok((handle, events_rx))
 }
 
@@ -225,7 +237,20 @@ pub async fn resume_session(
         paused: paused.as_ref().map(|p| p.task),
         recovered: paused.as_ref().is_some_and(|p| p.recovered),
     };
-    let actor = Actor::new(id, deps, config, journal, rebuilt.segment, paused);
+    let mode = rebuilt.mode.unwrap_or(config.mode);
+    let full_access = config.full_access;
+    let actor = Actor::new(id, deps, config, journal, rebuilt.segment, paused, mode);
+    // A session left in full mode does not keep it in a process started
+    // without --dangerously-full-access.
+    if mode == Mode::Full && !full_access {
+        let _ = actor.mode.set(Mode::Auto).await;
+        actor
+            .warn(
+                "mode",
+                "this session was in full mode; it continues in auto mode because harness was started without --dangerously-full-access".into(),
+            )
+            .await;
+    }
     Ok((start(actor, events_tx), events_rx, resumed))
 }
 
@@ -272,6 +297,8 @@ struct Actor {
     segment: Option<SegmentContext>,
     approvals: Arc<Approvals>,
     questions: Arc<Questions>,
+    /// The permission mode, shared with running tasks and their tools.
+    mode: Arc<SessionMode>,
     running: Option<Running>,
     paused: Option<Paused>,
     /// Parent of every task's cancellation token.
@@ -286,7 +313,13 @@ impl Actor {
         journal: Arc<Journal>,
         segment: Option<SegmentContext>,
         paused: Option<PausedTask>,
+        mode: Mode,
     ) -> Self {
+        let mode = Arc::new(SessionMode::new(
+            mode,
+            config.full_access,
+            Arc::clone(&journal),
+        ));
         Self {
             id,
             deps,
@@ -295,6 +328,7 @@ impl Actor {
             segment,
             approvals: Arc::default(),
             questions: Arc::default(),
+            mode,
             running: None,
             paused: paused.map(|p| Paused {
                 task: p.task,
@@ -394,6 +428,7 @@ impl Actor {
             Op::Pause { task } => self.pause(task).await,
             Op::Resume { task } => self.resume(task).await,
             Op::Undo { session } => self.undo(session).await,
+            Op::SetMode { session, mode } => self.set_mode(session, mode).await,
             Op::Compact { .. } => {
                 self.warn("unsupported", "compaction arrives in Phase 5".into())
                     .await;
@@ -509,6 +544,7 @@ impl Actor {
             journal: Arc::clone(&self.journal),
             approvals: Arc::clone(&self.approvals),
             questions: Arc::clone(&self.questions),
+            mode: Arc::clone(&self.mode),
             cancel: cancel.clone(),
             stop: Arc::clone(&stop),
             pause: Arc::clone(&pause),
@@ -543,9 +579,12 @@ impl Actor {
         .map_err(|e| format!("gathering the environment failed: {e}"))?;
         let instructions = instructions.map_err(|e| e.to_string())?;
         let mut environment = environment;
+        // The new segment's environment states the mode, so notes about
+        // earlier switches are not sent (replay drops them the same way).
+        let _ = self.mode.take_notes();
         environment
             .notes
-            .push(approval_note(self.config.approval).into());
+            .push(environment_note(self.mode.current(), self.config.approval));
         let segment = SegmentContext::open(SegmentSpec {
             persona: self.config.persona.clone(),
             tools: self.deps.tools.specs(),
@@ -737,6 +776,20 @@ impl Actor {
         }
     }
 
+    async fn set_mode(&mut self, session: SessionId, mode: Mode) {
+        if session != self.id {
+            self.error(
+                "unknown_session",
+                format!("this is session {}, not {session}", self.id),
+            )
+            .await;
+            return;
+        }
+        if let Err(e) = self.mode.set(mode).await {
+            self.warn("mode", e.to_string()).await;
+        }
+    }
+
     async fn shutdown(&mut self) {
         if let Some(running) = self.running.take() {
             *running
@@ -816,17 +869,5 @@ async fn join_running(running: &mut Option<Running>) -> Result<TaskResult, tokio
     match running {
         Some(r) => (&mut r.join).await,
         None => std::future::pending().await,
-    }
-}
-
-/// The environment note describing how approvals work in this session.
-fn approval_note(mode: ApprovalMode) -> &'static str {
-    match mode {
-        ApprovalMode::Ask => {
-            "Commands run without a sandbox. Reads run freely; the user approves every other tool call."
-        }
-        ApprovalMode::Never => {
-            "Commands run without a sandbox. Tool calls that need approval are denied automatically in this session."
-        }
     }
 }

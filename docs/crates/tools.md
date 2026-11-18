@@ -13,13 +13,17 @@ An adapter crate: it may depend on ports, types and protocol, never on the runti
 | `apply_patch` | `patch` (Codex format) | Write (every path, rename targets included) | Add, delete, update and rename files all-or-nothing; hunks found exactly, then ignoring trailing whitespace, then ignoring all surrounding whitespace; refuses files changed since they were read |
 | `glob` | `pattern`, `path?` | ReadOnly, parallel-safe | gitignore-aware; `*` stays in one directory, `**/` recurses; newest first; at most 500 |
 | `grep` | `pattern`, `path?`, `glob?`, `context?` (≤ 10), `mode?` (`files` default, `content`, `count`), `ignore_case?` | ReadOnly, parallel-safe | ripgrep libraries; binary files skipped; `content` output is `path:line:text` with `--` between groups, wrapped as untrusted; at most 2,000 lines |
-| `shell` | `command`, `timeout_s?` (1–600, default 120) | Exec | `/bin/sh -c` in its own process group; live output as `ToolOutput` events; output kept in bounded memory (8 MiB); ends with `[exit code N]` |
-| `pty_start` | `command`, `wait_ms?` | Exec | Starts a program on its own pseudo-terminal (session leader); returns id `ptyN` and first output |
-| `pty_write` | `id`, `input`, `wait_ms?` | Exec | Types into the program (`\n` is Enter, `\u0003` Ctrl-C); returns new output |
+| `shell` | `command`, `description`, `timeout_s?` (1–600, default 120) | Exec | `/bin/sh -c` in its own process group; live output as `ToolOutput` events; output kept in bounded memory (8 MiB); ends with `[exit code N]` |
+| `pty_start` | `command`, `description`, `wait_ms?` | Exec | Starts a program on its own pseudo-terminal (session leader); returns id `ptyN` and first output |
+| `pty_write` | `id`, `input`, `description`, `wait_ms?` | Exec | Types into the program (`\n` is Enter, `\u0003` Ctrl-C); returns new output |
 | `pty_read` | `id`, `wait_ms?` (≤ 30,000) | ReadOnly (ADR-027) | Output since the last read; escape codes and `\r` removed; reports exit |
 | `pty_kill` | `id` | ReadOnly (ADR-027) | Kills the program's whole process group |
 | `todo` | `items[{text, status}]` | ReadOnly | Replaces the checklist; at most one item `in_progress`; the UI renders it from the call |
 | `ask_user` | `question`, `options?`, `multi?` | ReadOnly | Asks through `ToolCtx::user` (ADR-028); headless runs get "no user available" |
+| `propose_plan` | `plan` (Markdown) | ReadOnly | In plan mode, asks the user to approve the plan (`PLAN_CHOICES`); approval switches to `auto` or `read-only` through `ToolCtx::mode`, other answers go back as feedback; headless or outside plan mode it changes nothing (ADR-042) |
+
+`description` is the model's one-line explanation for the approval panel
+(`DESCRIPTION_FIELD`, ADR-043); the tools ignore it when they run.
 
 `builtin_registry()` returns a `ToolRegistry` with all of them. The PTY tools share
 one `PtyManager` (at most 8 programs; 1 MiB of unread output each).

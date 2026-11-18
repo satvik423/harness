@@ -6,10 +6,10 @@ The only interface between front-ends and the core: `Op` goes in, `Event` comes 
 
 | Item | Purpose |
 |---|---|
-| `Op` | Requests into the core: create/resume session, submit input, interrupt, pause, resume, cancel, approve, answer (`ask_user`), undo, compact, switch persona, fork, shutdown. Tagged `{"op": "…"}` |
+| `Op` | Requests into the core: create/resume session, submit input, interrupt, pause, resume, cancel, approve, answer (`ask_user`), undo, set the permission mode (`set_mode`, ADR-042), compact, switch persona, fork, shutdown. Tagged `{"op": "…"}` |
 | `Decision`, `RuleScope` | Answers to approval requests (once, for session, always, deny) |
 | `InputItem` | Text, a file path, or an existing blob |
-| `Event` | Everything the core reports, including `question_asked` / `question_answered` for `ask_user` (ADR-028); `segment_opened` carries the frame blob (ADR-032). Tagged `{"type": "…"}` |
+| `Event` | Everything the core reports, including `question_asked` / `question_answered` for `ask_user` (ADR-028); `segment_opened` carries the frame blob (ADR-032); `session_opened` records the starting mode and `mode_changed` each switch, with the note for the model (ADR-042); `approval_requested` has an optional one-line `summary` from the model (ADR-043). Tagged `{"type": "…"}` |
 | `Event::kind` | Stable snake_case name, equal to the serialised tag; stored in `events.kind` |
 | `Event::is_persisted` | `false` only for streaming deltas (`text_delta`, `thinking_delta`, `tool_output`) |
 | `Envelope` | `{seq, ts, session, event}`: an event with its position in the log |

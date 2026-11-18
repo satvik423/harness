@@ -3,18 +3,19 @@
 use std::sync::{Mutex, PoisonError};
 
 use harness_ports::{GrantScope, Policy, PolicyCall, PolicyError, Verdict};
-use harness_types::Risk;
+use harness_types::{Mode, Risk};
 
 /// Allows read-only calls and asks about everything else, like the Phase 1
 /// runtime did. Calls whose input contains `"deny": true` are denied, so tests
 /// can exercise policy refusals. Remembered grants (any scope) allow later
-/// calls with the same tool and risk.
+/// calls with the same tool and risk. The mode of every judged call is kept,
+/// so tests can check which mode the runtime passed.
 ///
 /// # Examples
 /// ```
 /// use harness_ports::{GrantScope, Policy, PolicyCall, Verdict};
 /// use harness_testkit::AskForChanges;
-/// use harness_types::Risk;
+/// use harness_types::{Mode, Risk};
 /// let policy = AskForChanges::default();
 /// let call = PolicyCall {
 ///     tool: "exec".into(),
@@ -22,6 +23,7 @@ use harness_types::Risk;
 ///     risk: Risk::Exec { command: "ls".into() },
 ///     cwd: "/p".into(),
 ///     writable_roots: vec![],
+///     mode: Mode::Auto,
 /// };
 /// assert!(matches!(policy.evaluate(&call), Verdict::Ask { .. }));
 /// policy.remember(&call, GrantScope::Session).unwrap();
@@ -30,6 +32,7 @@ use harness_types::Risk;
 #[derive(Debug, Default)]
 pub struct AskForChanges {
     grants: Mutex<Vec<(String, Risk, GrantScope)>>,
+    modes: Mutex<Vec<Mode>>,
 }
 
 impl AskForChanges {
@@ -41,10 +44,23 @@ impl AskForChanges {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
+
+    /// The mode of every call judged so far, in order.
+    #[must_use]
+    pub fn modes(&self) -> Vec<Mode> {
+        self.modes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
 }
 
 impl Policy for AskForChanges {
     fn evaluate(&self, call: &PolicyCall) -> Verdict {
+        self.modes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(call.mode);
         if call.input.get("deny").and_then(serde_json::Value::as_bool) == Some(true) {
             return Verdict::Deny {
                 reason: "Denied by policy: test rule".into(),

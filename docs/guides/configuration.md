@@ -82,5 +82,7 @@ only with an update; harness never fetches prices.
 
 ## Permissions
 
-`[policy] profile` and `default_deny_paths` control what runs without asking; rules
-go in separate `rules.toml` files. See the [permissions guide](permissions.md).
+`[policy] profile` (`read-only`, `auto`, `plan`, `ci` or `full`) picks the mode sessions
+start in; `default_deny_paths` lists files no tool may touch. Rules go in separate
+`rules.toml` files. You can switch modes while working (Shift+Tab, `/mode`, `--mode`).
+See the [permissions guide](permissions.md).

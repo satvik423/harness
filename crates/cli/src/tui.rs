@@ -109,6 +109,7 @@ impl CliBackend {
     ) -> Result<Attached, String> {
         let f = &self.factory;
         let (deps, approval) = f.deps(provider).map_err(|e| e.to_string())?;
+        let mode = f.start_mode().map_err(|e| e.to_string())?;
         let mut persona = harness_context::builtin_default();
         persona.model = model.clone();
         if effort.is_some() {
@@ -121,6 +122,8 @@ impl CliBackend {
                 ApprovalPolicy::OnRequest => ApprovalMode::Ask,
                 ApprovalPolicy::Never => ApprovalMode::Never,
             },
+            mode,
+            full_access: f.full_access,
             max_turns: TUI_MAX_TURNS,
             output_cap_tokens: f.config.context.output_cap_tokens,
             max_parallel_tools: usize::try_from(f.config.runtime.max_parallel_tools).unwrap_or(1),
@@ -171,7 +174,8 @@ impl CliBackend {
                 persona: persona.name,
                 model: model.clone(),
                 effort: persona.effort,
-                profile: f.profile_name().to_owned(),
+                mode,
+                full_access: f.full_access,
                 context_limit: f.config.context.compact_at_tokens,
                 priced: f.price(&model).is_some(),
                 cwd: f.cwd.clone(),
@@ -347,6 +351,7 @@ mod tests {
             trusted: false,
             approval: None,
             full_access: false,
+            mode: None,
             store: Arc::new(SqliteStore::open(dir).unwrap()),
         })
     }
@@ -370,6 +375,7 @@ mod tests {
             trusted: false,
             approval: None,
             full_access: false,
+            mode: None,
             store: Arc::new(SqliteStore::open(dir).unwrap()),
         }))
     }
@@ -411,7 +417,8 @@ mod tests {
         assert_eq!(attached.view.model, model);
         assert_eq!(attached.view.effort, Some(Effort::Low));
         assert!(attached.view.priced, "opus has a default price");
-        assert_eq!(attached.view.profile, "auto");
+        assert_eq!(attached.view.mode, harness_types::Mode::Auto);
+        assert!(!attached.view.full_access);
         backend
             .send(Op::Submit {
                 session: attached.view.id,

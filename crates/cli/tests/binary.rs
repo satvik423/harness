@@ -207,6 +207,7 @@ mod stored {
                 Event::SessionOpened {
                     persona: "default".into(),
                     segment: 0,
+                    mode: None,
                 },
                 Event::SegmentOpened {
                     segment: 0,
@@ -422,4 +423,32 @@ fn continue_is_a_tui_flag_that_excludes_session() {
     assert!(help.contains("--continue"), "{help}");
     let both = run(home.path(), &["-c", "--session", "01J"], &[]);
     assert_eq!(both.status.code(), Some(2), "{both:?}");
+}
+
+#[test]
+fn mode_is_a_flag_and_full_mode_needs_full_access() {
+    let home = tempfile::tempdir().unwrap();
+    let help =
+        String::from_utf8_lossy(&run(home.path(), &["run", "--help"], &[]).stdout).into_owned();
+    assert!(help.contains("--mode <MODE>"), "{help}");
+    let bad = run(home.path(), &["run", "--mode", "yolo", "hello"], &[]);
+    assert_eq!(bad.status.code(), Some(2), "{bad:?}");
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("read-only, auto, plan or full"));
+    // A key is set so the run gets as far as choosing the mode; nothing is sent.
+    let full = run(
+        home.path(),
+        &["run", "--mode", "full", "hello"],
+        &[
+            ("TEST_FAKE_ANTHROPIC_KEY", "sk-test-not-used"),
+            (
+                "HARNESS_PROVIDERS__ANTHROPIC__API_KEY",
+                "env:TEST_FAKE_ANTHROPIC_KEY",
+            ),
+        ],
+    );
+    assert_eq!(full.status.code(), Some(1), "{full:?}");
+    assert!(
+        String::from_utf8_lossy(&full.stderr).contains("--dangerously-full-access"),
+        "{full:?}"
+    );
 }

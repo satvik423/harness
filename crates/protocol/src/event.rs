@@ -1,7 +1,7 @@
 //! [`Event`]: everything the core reports, and the [`Envelope`] that orders it.
 
 use harness_types::{
-    ApprovalId, BlobRef, ContentBlock, Message, QuestionId, Risk, Seq, SessionId, StopReason,
+    ApprovalId, BlobRef, ContentBlock, Message, Mode, QuestionId, Risk, Seq, SessionId, StopReason,
     TaskId, Usage,
 };
 use serde::{Deserialize, Serialize};
@@ -112,6 +112,10 @@ pub enum Event {
         persona: String,
         /// Current segment number.
         segment: u32,
+        /// The permission mode the session starts in (ADR-042); absent in
+        /// sessions recorded before modes could switch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<Mode>,
     },
     /// User input was appended to the transcript (attachments already resolved to blobs).
     UserInput {
@@ -197,6 +201,11 @@ pub enum Event {
         call_id: String,
         /// Why approval is needed (for example the matched rule).
         reason: String,
+        /// One plain line from the model saying what the call does (the call's
+        /// `description` input, ADR-043). The model's claim, not a verified
+        /// fact: front-ends show it next to `reason`, never instead of it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
     },
     /// An approval request was answered.
     ApprovalResolved {
@@ -306,6 +315,16 @@ pub enum Event {
         /// Child persona.
         persona: String,
     },
+    /// The session's permission mode was switched (ADR-042).
+    ModeChanged {
+        /// The mode before.
+        from: Mode,
+        /// The mode now in force.
+        to: Mode,
+        /// The system note telling the model, sent at the start of the next
+        /// user message when a segment is open (replay queues it the same way).
+        note: String,
+    },
     /// Files were restored by `/undo`.
     UndoApplied {
         /// The task.
@@ -376,6 +395,7 @@ impl Event {
             Self::SegmentOpened { .. } => "segment_opened",
             Self::Recalled { .. } => "recalled",
             Self::SubagentSpawned { .. } => "subagent_spawned",
+            Self::ModeChanged { .. } => "mode_changed",
             Self::UndoApplied { .. } => "undo_applied",
             Self::Usage { .. } => "usage",
             Self::Warning { .. } => "warning",
@@ -407,6 +427,7 @@ mod tests {
             Event::SessionOpened {
                 persona: "coder".into(),
                 segment: 0,
+                mode: Some(Mode::ReadOnly),
             },
             Event::UserInput {
                 task: t,
@@ -453,6 +474,7 @@ mod tests {
                 task: t,
                 call_id: "c1".into(),
                 reason: "exec".into(),
+                summary: Some("List the files".into()),
             },
             Event::ApprovalResolved {
                 id: ApprovalId::new(),
@@ -513,6 +535,11 @@ mod tests {
                 child: TaskId::new(),
                 persona: "reader".into(),
             },
+            Event::ModeChanged {
+                from: Mode::Auto,
+                to: Mode::Plan,
+                note: "Plan mode is on.".into(),
+            },
             Event::UndoApplied {
                 task: t,
                 paths: vec!["src/a.rs".into()],
@@ -545,6 +572,21 @@ mod tests {
             let back: Event = serde_json::from_str(&json).unwrap();
             assert_eq!(back, e, "{json}");
         }
+    }
+
+    #[test]
+    fn approval_requests_logged_before_summaries_still_load() {
+        let old = json!({
+            "type": "approval_requested",
+            "id": ApprovalId::new(),
+            "task": TaskId::new(),
+            "call_id": "c1",
+            "reason": "run `ls`",
+        });
+        let Event::ApprovalRequested { summary, .. } = serde_json::from_value(old).unwrap() else {
+            panic!("not an approval request");
+        };
+        assert_eq!(summary, None);
     }
 
     #[test]

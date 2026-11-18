@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use harness_types::{ApprovalId, BlobRef, QuestionId, Seq, SessionId, TaskId};
+use harness_types::{ApprovalId, BlobRef, Mode, QuestionId, Seq, SessionId, TaskId};
 use serde::{Deserialize, Serialize};
 
 /// A request sent into the core by a front-end (TUI, CLI, JSON-RPC server, tests).
@@ -89,6 +89,13 @@ pub enum Op {
     Undo {
         /// Target session.
         session: SessionId,
+    },
+    /// Switch the session's permission mode (Shift+Tab, `/mode`; ADR-042).
+    SetMode {
+        /// Target session.
+        session: SessionId,
+        /// The mode to switch to.
+        mode: Mode,
     },
     /// Shut the core down cleanly.
     Shutdown,
@@ -214,6 +221,10 @@ mod tests {
             },
             Op::Undo {
                 session: SessionId::new(),
+            },
+            Op::SetMode {
+                session: s,
+                mode: Mode::Plan,
             },
             Op::Shutdown,
         ]

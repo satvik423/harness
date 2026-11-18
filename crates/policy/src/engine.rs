@@ -21,18 +21,22 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{PoisonError, RwLock};
 
 use harness_ports::{GrantScope, Policy, PolicyCall, PolicyError, Verdict};
-use harness_types::Risk;
+use harness_types::{Mode, Risk};
 
 use crate::rules::{Decision, Origin, RawRule, Rule, RuleError, RulesFile, load_rules};
 use crate::shell::analyze;
 
-/// A named pairing of sandbox mode and approval policy (Tech spec 3.6).
+/// A named pairing of sandbox mode and approval policy (Tech spec 3.6): how a
+/// session starts. The session's [`Mode`] can change later; the policy judges
+/// each call by [`PolicyCall::mode`] (ADR-042).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile {
     /// Explore freely; writes and unsandboxed commands need approval.
     ReadOnly,
     /// Edit inside the project; ask to leave it, use the network or escalate.
     Auto,
+    /// Start in plan mode: no edits until the user approves a plan.
+    Plan,
     /// Like `auto`, but never asks: what would need approval is denied.
     Ci,
     /// No walls and no questions (requires `--dangerously-full-access`).
@@ -44,11 +48,26 @@ impl Profile {
     #[must_use]
     pub fn default_approval(self) -> ApprovalPolicy {
         match self {
-            Self::ReadOnly | Self::Auto => ApprovalPolicy::OnRequest,
+            Self::ReadOnly | Self::Auto | Self::Plan => ApprovalPolicy::OnRequest,
             Self::Ci | Self::Full => ApprovalPolicy::Never,
         }
     }
+
+    /// The mode a session with this profile starts in (`ci` is `auto` that
+    /// never asks).
+    #[must_use]
+    pub fn mode(self) -> Mode {
+        match self {
+            Self::ReadOnly => Mode::ReadOnly,
+            Self::Auto | Self::Ci => Mode::Auto,
+            Self::Plan => Mode::Plan,
+            Self::Full => Mode::Full,
+        }
+    }
 }
+
+/// Why plan mode refuses an edit; the model reads it in the tool result.
+pub const PLAN_MODE_REFUSAL: &str = "plan mode is on, so files cannot be changed until the user approves a plan. Keep exploring with read-only tools, then call propose_plan with your plan.";
 
 /// When the user is asked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +95,9 @@ pub struct PolicySettings {
     pub user_rules: Option<PathBuf>,
     /// The project's rules file; `None` when the project is not trusted.
     pub project_rules: Option<PathBuf>,
+    /// Whether `full` mode counts (`--dangerously-full-access`). Without it a
+    /// call in `full` mode is judged as `auto`.
+    pub full_access: bool,
 }
 
 /// One unit of a call: what rules are matched against.
@@ -213,11 +235,20 @@ impl PolicyEngine {
         }
     }
 
-    /// The profile's decision for a unit no rule matched.
+    /// The mode a call is judged in: `full` only counts with full access.
+    fn mode_of(&self, call: &PolicyCall) -> Mode {
+        match call.mode {
+            Mode::Full if !self.settings.full_access => Mode::Auto,
+            mode => mode,
+        }
+    }
+
+    /// The mode's decision for a unit no rule matched.
     fn default_for(&self, call: &PolicyCall, unit: &Unit) -> (Decision, String) {
         let s = &self.settings;
-        if s.profile == Profile::Full {
-            return (Decision::Allow, "full access profile".into());
+        let mode = self.mode_of(call);
+        if mode == Mode::Full {
+            return (Decision::Allow, "full mode".into());
         }
         match &call.risk {
             Risk::ReadOnly { .. } => (Decision::Allow, "read-only call".into()),
@@ -235,11 +266,8 @@ impl PolicyEngine {
                             list(&outside.into_iter().cloned().collect::<Vec<_>>())
                         ),
                     )
-                } else if s.profile == Profile::ReadOnly {
-                    (
-                        Decision::Ask,
-                        "the read-only profile asks before writes".into(),
-                    )
+                } else if mode == Mode::ReadOnly {
+                    (Decision::Ask, "read-only mode asks before writes".into())
                 } else {
                     (Decision::Allow, "write inside the workspace".into())
                 }
@@ -338,6 +366,14 @@ impl PolicyEngine {
 
 impl Policy for PolicyEngine {
     fn evaluate(&self, call: &PolicyCall) -> Verdict {
+        // Plan mode is a promise to the user: nothing changes until they approve
+        // a plan. So it is checked first, and no allow rule or grant overrides it.
+        if self.mode_of(call) == Mode::Plan && matches!(call.risk, Risk::Write { .. }) {
+            return Verdict::Deny {
+                reason: format!("Denied: {PLAN_MODE_REFUSAL}"),
+                approval_required: false,
+            };
+        }
         let mut force = Vec::new();
         let units = Self::units(call, &mut force);
         let mut decision = Decision::Allow;
@@ -520,6 +556,24 @@ mod tests {
 
     const CWD: &str = "/proj";
 
+    /// Judges a call made in the engine's starting mode, as a fresh session would.
+    trait Judge {
+        fn judge(&self, call: &PolicyCall) -> Verdict;
+    }
+
+    impl Judge for PolicyEngine {
+        fn judge(&self, call: &PolicyCall) -> Verdict {
+            let mut call = call.clone();
+            call.mode = self.settings.profile.mode();
+            self.evaluate(&call)
+        }
+    }
+
+    fn in_mode(mode: Mode, mut call: PolicyCall) -> PolicyCall {
+        call.mode = mode;
+        call
+    }
+
     fn settings(profile: Profile) -> PolicySettings {
         PolicySettings {
             profile,
@@ -533,6 +587,7 @@ mod tests {
             home: Some("/home/u".into()),
             user_rules: None,
             project_rules: None,
+            full_access: profile == Profile::Full,
         }
     }
 
@@ -556,6 +611,7 @@ mod tests {
             risk,
             cwd: CWD.into(),
             writable_roots: vec![CWD.into()],
+            mode: Mode::Auto,
         }
     }
 
@@ -597,21 +653,21 @@ mod tests {
     #[test]
     fn reads_are_allowed_except_protected_paths() {
         let e = engine(Profile::Auto);
-        assert_eq!(kind(&e.evaluate(&read("/proj/src/main.rs"))), "allow");
-        assert_eq!(kind(&e.evaluate(&read("/etc/hosts"))), "allow");
+        assert_eq!(kind(&e.judge(&read("/proj/src/main.rs"))), "allow");
+        assert_eq!(kind(&e.judge(&read("/etc/hosts"))), "allow");
         for protected in [
             "/proj/.env",
             "/proj/api/.env.production",
             "/home/u/.ssh/id_rsa",
             "/proj/.harness/state.db",
         ] {
-            let v = e.evaluate(&read(protected));
+            let v = e.judge(&read(protected));
             assert_eq!(kind(&v), "deny", "{protected}");
         }
         let Verdict::Deny {
             reason,
             approval_required: false,
-        } = e.evaluate(&read("/proj/.env"))
+        } = e.judge(&read("/proj/.env"))
         else {
             panic!()
         };
@@ -622,32 +678,29 @@ mod tests {
     #[test]
     fn relative_and_dotted_paths_are_normalised_before_matching() {
         let e = engine(Profile::Auto);
-        assert_eq!(kind(&e.evaluate(&read("/proj/src/../.env"))), "deny");
-        assert_eq!(
-            kind(&e.evaluate(&write("/proj/src/../../etc/passwd"))),
-            "ask"
-        );
+        assert_eq!(kind(&e.judge(&read("/proj/src/../.env"))), "deny");
+        assert_eq!(kind(&e.judge(&write("/proj/src/../../etc/passwd"))), "ask");
     }
 
     #[test]
     fn writes_follow_the_profile_and_the_workspace() {
         assert_eq!(
-            kind(&engine(Profile::Auto).evaluate(&write("/proj/a.rs"))),
+            kind(&engine(Profile::Auto).judge(&write("/proj/a.rs"))),
             "allow"
         );
         assert_eq!(
-            kind(&engine(Profile::Auto).evaluate(&write("/tmp/a.rs"))),
+            kind(&engine(Profile::Auto).judge(&write("/tmp/a.rs"))),
             "ask"
         );
         assert_eq!(
-            kind(&engine(Profile::ReadOnly).evaluate(&write("/proj/a.rs"))),
+            kind(&engine(Profile::ReadOnly).judge(&write("/proj/a.rs"))),
             "ask"
         );
         assert_eq!(
-            kind(&engine(Profile::Full).evaluate(&write("/tmp/a.rs"))),
+            kind(&engine(Profile::Full).judge(&write("/tmp/a.rs"))),
             "allow"
         );
-        let Verdict::Ask { reason } = engine(Profile::Auto).evaluate(&write("/tmp/a.rs")) else {
+        let Verdict::Ask { reason } = engine(Profile::Auto).judge(&write("/tmp/a.rs")) else {
             panic!()
         };
         assert_eq!(
@@ -662,8 +715,8 @@ mod tests {
             Profile::Auto,
             "[[rule]]\ntool = \"shell\"\nmatch = \"prefix:cargo test\"\ndecision = \"allow\"",
         );
-        assert_eq!(kind(&e.evaluate(&shell("cargo test --all"))), "allow");
-        let Verdict::Ask { reason } = e.evaluate(&shell("cargo build")) else {
+        assert_eq!(kind(&e.judge(&shell("cargo test --all"))), "allow");
+        let Verdict::Ask { reason } = e.judge(&shell("cargo build")) else {
             panic!()
         };
         assert_eq!(reason, "run `cargo build` (commands run without a sandbox)");
@@ -689,7 +742,7 @@ match = "prefix:rm -rf /"
 decision = "deny"
 "#,
         );
-        let Verdict::Ask { reason } = e.evaluate(&shell("cargo test && git push")) else {
+        let Verdict::Ask { reason } = e.judge(&shell("cargo test && git push")) else {
             panic!()
         };
         assert_eq!(
@@ -703,8 +756,8 @@ decision = "deny"
                     .to_string()
                 + "): pushing is public)"
         );
-        assert_eq!(kind(&e.evaluate(&shell("cargo test; rm -rf /"))), "deny");
-        assert_eq!(kind(&e.evaluate(&shell("cargo test | tee log"))), "ask");
+        assert_eq!(kind(&e.judge(&shell("cargo test; rm -rf /"))), "deny");
+        assert_eq!(kind(&e.judge(&shell("cargo test | tee log"))), "ask");
     }
 
     #[test]
@@ -713,8 +766,8 @@ decision = "deny"
             Profile::Auto,
             "[[rule]]\ntool = \"shell\"\nmatch = \"prefix:echo\"\ndecision = \"allow\"",
         );
-        assert_eq!(kind(&e.evaluate(&shell("echo hi"))), "allow");
-        let Verdict::Ask { reason } = e.evaluate(&shell("echo $(cat ~/.aws/credentials)")) else {
+        assert_eq!(kind(&e.judge(&shell("echo hi"))), "allow");
+        let Verdict::Ask { reason } = e.judge(&shell("echo $(cat ~/.aws/credentials)")) else {
             panic!()
         };
         assert!(reason.contains("command substitution"), "{reason}");
@@ -726,9 +779,9 @@ decision = "deny"
             Profile::Auto,
             "[[rule]]\ntool = \"shell\"\nmatch = \"prefix:echo\"\ndecision = \"allow\"",
         );
-        assert_eq!(kind(&e.evaluate(&shell("echo hi > notes.txt"))), "allow");
-        assert_eq!(kind(&e.evaluate(&shell("echo hi > /dev/null"))), "allow");
-        let Verdict::Ask { reason } = e.evaluate(&shell("echo hi >> /etc/hosts")) else {
+        assert_eq!(kind(&e.judge(&shell("echo hi > notes.txt"))), "allow");
+        assert_eq!(kind(&e.judge(&shell("echo hi > /dev/null"))), "allow");
+        let Verdict::Ask { reason } = e.judge(&shell("echo hi >> /etc/hosts")) else {
             panic!()
         };
         assert!(
@@ -740,10 +793,10 @@ decision = "deny"
     #[test]
     fn shell_arguments_naming_protected_files_are_denied() {
         let e = engine(Profile::Auto);
-        assert_eq!(kind(&e.evaluate(&shell("cat .env"))), "deny");
-        assert_eq!(kind(&e.evaluate(&shell("cp ~/.ssh/id_rsa /tmp/x"))), "ask");
+        assert_eq!(kind(&e.judge(&shell("cat .env"))), "deny");
+        assert_eq!(kind(&e.judge(&shell("cp ~/.ssh/id_rsa /tmp/x"))), "ask");
         assert_eq!(
-            kind(&e.evaluate(&shell("cp /home/u/.ssh/id_rsa /tmp/x"))),
+            kind(&e.judge(&shell("cp /home/u/.ssh/id_rsa /tmp/x"))),
             "deny"
         );
     }
@@ -753,13 +806,13 @@ decision = "deny"
         let mut s = settings(Profile::Auto);
         s.sandboxed = true;
         let e = PolicyEngine::new(s).unwrap();
-        assert_eq!(kind(&e.evaluate(&shell("make"))), "allow");
-        assert_eq!(kind(&e.evaluate(&shell("make && echo $(id)"))), "ask");
+        assert_eq!(kind(&e.judge(&shell("make"))), "allow");
+        assert_eq!(kind(&e.judge(&shell("make && echo $(id)"))), "ask");
     }
 
     #[test]
     fn approval_policy_never_turns_ask_into_deny_with_a_reason() {
-        let v = engine(Profile::Ci).evaluate(&shell("cargo build"));
+        let v = engine(Profile::Ci).judge(&shell("cargo build"));
         let Verdict::Deny {
             reason,
             approval_required: true,
@@ -772,18 +825,92 @@ decision = "deny"
             "{reason}"
         );
         assert!(reason.contains("approval policy: never"), "{reason}");
+        assert_eq!(kind(&engine(Profile::Ci).judge(&write("/proj/a"))), "allow");
+    }
+
+    #[test]
+    fn the_calls_mode_decides_not_the_starting_profile() {
+        let e = engine(Profile::Auto);
+        let edit = write("/proj/a.rs");
         assert_eq!(
-            kind(&engine(Profile::Ci).evaluate(&write("/proj/a"))),
+            kind(&e.evaluate(&in_mode(Mode::Auto, edit.clone()))),
+            "allow"
+        );
+        assert_eq!(kind(&e.evaluate(&in_mode(Mode::ReadOnly, edit))), "ask");
+    }
+
+    #[test]
+    fn plan_mode_refuses_edits_asks_before_commands_and_allows_reads() {
+        let e = engine(Profile::Auto);
+        let Verdict::Deny {
+            reason,
+            approval_required: false,
+        } = e.evaluate(&in_mode(Mode::Plan, write("/proj/a.rs")))
+        else {
+            panic!()
+        };
+        assert!(reason.contains("plan mode"), "{reason}");
+        assert!(reason.contains("propose_plan"), "{reason}");
+        assert_eq!(
+            kind(&e.evaluate(&in_mode(Mode::Plan, shell("cargo test")))),
+            "ask"
+        );
+        assert_eq!(
+            kind(&e.evaluate(&in_mode(Mode::Plan, read("/proj/a.rs")))),
+            "allow"
+        );
+        assert_eq!(
+            kind(&e.evaluate(&in_mode(Mode::Plan, read("/proj/.env")))),
+            "deny"
+        );
+    }
+
+    #[test]
+    fn plan_mode_beats_allow_rules_and_session_grants() {
+        let (e, _d) = engine_with(
+            Profile::Auto,
+            "[[rule]]\ntool = \"write_file\"\ndecision = \"allow\"",
+        );
+        e.remember(&write("/tmp/x"), GrantScope::Session).unwrap();
+        for path in ["/proj/a.rs", "/tmp/x"] {
+            assert_eq!(
+                kind(&e.evaluate(&in_mode(Mode::Plan, write(path)))),
+                "deny",
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_mode_counts_only_with_full_access() {
+        let e = engine(Profile::Auto);
+        assert_eq!(
+            kind(&e.evaluate(&in_mode(Mode::Full, shell("make")))),
+            "ask"
+        );
+        let e = engine(Profile::Full);
+        assert_eq!(
+            kind(&e.evaluate(&in_mode(Mode::Full, shell("make")))),
             "allow"
         );
     }
 
     #[test]
+    fn profiles_start_in_their_mode() {
+        assert_eq!(Profile::ReadOnly.mode(), Mode::ReadOnly);
+        assert_eq!(Profile::Auto.mode(), Mode::Auto);
+        assert_eq!(Profile::Plan.mode(), Mode::Plan);
+        assert_eq!(Profile::Ci.mode(), Mode::Auto);
+        assert_eq!(Profile::Full.mode(), Mode::Full);
+        assert_eq!(Profile::Plan.default_approval(), ApprovalPolicy::OnRequest);
+    }
+
+    #[test]
     fn full_profile_allows_everything_but_deny_rules() {
         let e = engine(Profile::Full);
-        assert_eq!(kind(&e.evaluate(&shell("rm -rf build"))), "allow");
+        assert_eq!(kind(&e.judge(&shell("rm -rf build"))), "allow");
         assert_eq!(
-            kind(&e.evaluate(&call(
+            kind(&e.judge(&call(
                 "web_fetch",
                 Risk::Network {
                     host: "x.io".into()
@@ -791,7 +918,7 @@ decision = "deny"
             ))),
             "allow"
         );
-        assert_eq!(kind(&e.evaluate(&read("/proj/.env"))), "deny");
+        assert_eq!(kind(&e.judge(&read("/proj/.env"))), "deny");
     }
 
     #[test]
@@ -801,7 +928,7 @@ decision = "deny"
             "[[rule]]\ntool = \"mcp__github__*\"\nmatch = \"glob:get_*\"\ndecision = \"allow\"",
         );
         assert_eq!(
-            kind(&e.evaluate(&call(
+            kind(&e.judge(&call(
                 "web_fetch",
                 Risk::Network {
                     host: "docs.rs".into()
@@ -817,8 +944,8 @@ decision = "deny"
                 },
             )
         };
-        assert_eq!(kind(&e.evaluate(&mcp("mcp__github__get_issue"))), "allow");
-        assert_eq!(kind(&e.evaluate(&mcp("mcp__github__create_issue"))), "ask");
+        assert_eq!(kind(&e.judge(&mcp("mcp__github__get_issue"))), "allow");
+        assert_eq!(kind(&e.judge(&mcp("mcp__github__create_issue"))), "ask");
     }
 
     #[test]
@@ -835,9 +962,9 @@ decision = "deny"
                 },
             )
         };
-        assert_eq!(kind(&e.evaluate(&patch(&["/proj/docs/a.md"]))), "allow");
+        assert_eq!(kind(&e.judge(&patch(&["/proj/docs/a.md"]))), "allow");
         assert_eq!(
-            kind(&e.evaluate(&patch(&["/proj/docs/a.md", "/proj/src/b.rs"]))),
+            kind(&e.judge(&patch(&["/proj/docs/a.md", "/proj/src/b.rs"]))),
             "ask"
         );
     }
@@ -846,16 +973,16 @@ decision = "deny"
     fn session_grants_allow_the_exact_command_only() {
         let e = engine(Profile::Auto);
         let c = shell("npm test -- --watch=false");
-        assert_eq!(kind(&e.evaluate(&c)), "ask");
+        assert_eq!(kind(&e.judge(&c)), "ask");
         let described = e.remember(&c, GrantScope::Session).unwrap();
         assert!(described.contains("this session"), "{described}");
-        assert_eq!(kind(&e.evaluate(&c)), "allow");
+        assert_eq!(kind(&e.judge(&c)), "allow");
         assert_eq!(
-            kind(&e.evaluate(&shell("npm test -- --watch=false; rm x"))),
+            kind(&e.judge(&shell("npm test -- --watch=false; rm x"))),
             "ask"
         );
         assert_eq!(
-            kind(&e.evaluate(&shell("npm test -- --watch=false extra"))),
+            kind(&e.judge(&shell("npm test -- --watch=false extra"))),
             "ask"
         );
     }
@@ -868,7 +995,7 @@ decision = "deny"
         );
         let c = shell("git push");
         e.remember(&c, GrantScope::Session).unwrap();
-        assert_eq!(kind(&e.evaluate(&c)), "ask");
+        assert_eq!(kind(&e.judge(&c)), "ask");
     }
 
     #[test]
@@ -895,8 +1022,8 @@ decision = "deny"
         let mut s = settings(Profile::Auto);
         s.user_rules = Some(dir.path().join("rules.toml"));
         let fresh = PolicyEngine::new(s).unwrap();
-        assert_eq!(kind(&fresh.evaluate(&c)), "allow");
-        assert_eq!(kind(&fresh.evaluate(&shell("cargo clippy"))), "ask");
+        assert_eq!(kind(&fresh.judge(&c)), "allow");
+        assert_eq!(kind(&fresh.judge(&shell("cargo clippy"))), "ask");
     }
 
     #[test]
@@ -904,8 +1031,8 @@ decision = "deny"
         let (e, _d) = engine_with(Profile::Auto, "");
         let outside = write("/tmp/out [1].txt");
         e.remember(&outside, GrantScope::Session).unwrap();
-        assert_eq!(kind(&e.evaluate(&outside)), "allow");
-        assert_eq!(kind(&e.evaluate(&write("/tmp/out 1.txt"))), "ask");
+        assert_eq!(kind(&e.judge(&outside)), "allow");
+        assert_eq!(kind(&e.judge(&write("/tmp/out 1.txt"))), "ask");
     }
 
     #[test]
@@ -919,7 +1046,7 @@ decision = "deny"
         let e = PolicyEngine::new(s).unwrap();
         e.remember(&shell("make"), GrantScope::Project).unwrap();
         assert!(dir.path().join(".harness/rules.toml").exists());
-        assert_eq!(kind(&e.evaluate(&shell("make"))), "allow");
+        assert_eq!(kind(&e.judge(&shell("make"))), "allow");
     }
 
     #[test]

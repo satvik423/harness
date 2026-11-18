@@ -7,7 +7,7 @@ The `harness` binary. Wires the adapters into the runtime and hosts the commands
 | Command | What it does |
 |---|---|
 | `harness [PROMPT] [-c \| --session ID] [run flags]` | Opens the terminal UI in a new session, the most recently active one (`-c`), or a stored one (prints help when not on a terminal) |
-| `harness run PROMPT [--session ID] [--json] [--model provider/model] [--max-turns N] [--approval on-request\|never] [--dangerously-full-access]` | Runs one prompt headless in a new session (or an existing one) and exits |
+| `harness run PROMPT [--session ID] [--json] [--model provider/model] [--max-turns N] [--mode read-only\|auto\|plan\|full] [--approval on-request\|never] [--dangerously-full-access]` | Runs one prompt headless in a new session (or an existing one) and exits. `--mode` picks the starting mode (a resumed session switches to it; `full` needs `--dangerously-full-access`) |
 | `harness session list` | Sessions of this project, newest first, with their last task state |
 | `harness session show ID` | A session's tasks and events |
 | `harness session resume ID [run flags]` | Continues the paused (or recovered) task |

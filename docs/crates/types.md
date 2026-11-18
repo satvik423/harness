@@ -14,6 +14,7 @@ Shared domain types. Depends on no other harness crate.
 | `ContentBlock::Opaque` | Provider data that must round-trip byte for byte (signed thinking, encrypted reasoning) |
 | `Usage`, `StopReason` | Token accounting and why a reply ended |
 | `Risk` | What a tool call would touch; input to policy |
+| `Mode` | The session's permission mode: `read-only`, `auto`, `plan`, `full`; `next()` for Shift+Tab, `describe()`, `FromStr`/`Display` (ADR-042) |
 
 ## Example
 

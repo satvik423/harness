@@ -22,7 +22,7 @@ use harness_runtime::{ApprovalMode, RuntimeDeps, SessionConfig, SessionHandle, s
 use harness_testkit::invariants::check_all;
 use harness_testkit::{AskForChanges, FakeProvider, MemoryStore};
 use harness_tools::{MemoryReadLedger, Unsandboxed};
-use harness_types::{ContentBlock, Risk, Role, StopReason, TaskId};
+use harness_types::{ContentBlock, Mode, Risk, Role, StopReason, TaskId};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -185,6 +185,16 @@ struct Run {
 const TEST_CAP_TOKENS: u64 = 200;
 
 async fn start(provider: Arc<dyn Provider>, approval: ApprovalMode, max_turns: u32) -> Run {
+    start_in(provider, approval, max_turns, Mode::Auto, false).await
+}
+
+async fn start_in(
+    provider: Arc<dyn Provider>,
+    approval: ApprovalMode,
+    max_turns: u32,
+    mode: Mode,
+    full_access: bool,
+) -> Run {
     let dir = tempfile::tempdir().unwrap();
     let mut tools = ToolRegistry::new();
     tools.register(Arc::new(Echo)).unwrap();
@@ -217,6 +227,8 @@ async fn start(provider: Arc<dyn Provider>, approval: ApprovalMode, max_turns: u
         cwd: dir.path().to_path_buf(),
         persona: builtin_default(),
         approval,
+        mode,
+        full_access,
         max_turns,
         output_cap_tokens: TEST_CAP_TOKENS,
         max_parallel_tools: 2,
@@ -1156,6 +1168,30 @@ async fn approval_requests_carry_the_policys_reason() {
 }
 
 #[tokio::test]
+async fn approval_requests_carry_the_models_one_line_description() {
+    let fake = FakeProvider::new()
+        .with_tool_call_turn(
+            "c1",
+            "exec",
+            &json!({"command": "ls", "description": "  List the\n files  "}),
+        )
+        .with_text_turn("ok")
+        .with_tool_call_turn("c2", "exec", &json!({"command": "ls -a"}))
+        .with_text_turn("ok");
+    let mut run = start(Arc::new(fake), ApprovalMode::Ask, 10).await;
+    let mut events = submit(&mut run, "go", OnApproval::Approve).await;
+    events.extend(submit(&mut run, "again", OnApproval::Approve).await);
+    let summaries: Vec<Option<String>> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::ApprovalRequested { summary, .. } => Some(summary.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(summaries, [Some("List the files".to_owned()), None]);
+}
+
+#[tokio::test]
 async fn approving_for_the_session_skips_the_next_question() {
     let fake = FakeProvider::new()
         .with_tool_call_turn("c1", "exec", &json!({"command": "ls"}))
@@ -1251,5 +1287,172 @@ async fn a_call_needing_approval_splits_parallel_batches_in_order() {
         .map(|r| r.0)
         .collect();
     assert_eq!(ids, ["c1", "c2", "c3"]);
+    assert_invariants(&fake);
+}
+
+// ---------- permission modes (ADR-042) ----------
+
+/// Sends `SetMode` and returns the `ModeChanged` that follows (or the warning).
+async fn switch_mode(run: &mut Run, mode: Mode) -> Event {
+    run.handle
+        .send(Op::SetMode {
+            session: run.handle.id(),
+            mode,
+        })
+        .await
+        .unwrap();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(10), run.events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .event;
+        if matches!(event, Event::ModeChanged { .. } | Event::Warning { .. }) {
+            return event;
+        }
+    }
+}
+
+fn text_of(message: &harness_types::Message) -> String {
+    message
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[tokio::test]
+async fn a_mode_switch_is_recorded_and_the_model_hears_of_it_with_the_next_message() {
+    let fake = FakeProvider::new()
+        .with_text_turn("hi")
+        .with_text_turn("planning");
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
+    submit(&mut run, "hello", OnApproval::Approve).await;
+    let changed = switch_mode(&mut run, Mode::Plan).await;
+    let Event::ModeChanged { from, to, note } = changed else {
+        panic!("{changed:?}")
+    };
+    assert_eq!((from, to), (Mode::Auto, Mode::Plan));
+    assert!(note.contains("propose_plan"), "{note}");
+    // Switching to the same mode again records nothing.
+    let again = Op::SetMode {
+        session: run.handle.id(),
+        mode: Mode::Plan,
+    };
+    assert!(first_problem_or_none(&mut run, again).await.is_none());
+    submit(&mut run, "add a feature", OnApproval::Approve).await;
+    let sent = text_of(fake.requests()[1].messages.last().unwrap());
+    assert!(
+        sent.starts_with("<system-note>\nThe permission mode is now plan"),
+        "{sent}"
+    );
+    assert!(sent.ends_with("add a feature"), "{sent}");
+    assert_invariants(&fake);
+}
+
+/// Sends `op`, then a harmless op that always answers, and returns any warning
+/// or `ModeChanged` seen before that answer.
+async fn first_problem_or_none(run: &mut Run, op: Op) -> Option<Event> {
+    run.handle.send(op).await.unwrap();
+    run.handle
+        .send(Op::Approve {
+            request: harness_types::ApprovalId::new(),
+            decision: Decision::Once,
+        })
+        .await
+        .unwrap();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(10), run.events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .event;
+        match event {
+            Event::Warning { ref kind, .. } if kind == "unknown_approval" => return None,
+            Event::ModeChanged { .. } | Event::Warning { .. } => return Some(event),
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_mode_chosen_before_the_first_message_is_stated_in_the_environment_only() {
+    let fake = FakeProvider::new().with_text_turn("ok");
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
+    switch_mode(&mut run, Mode::ReadOnly).await;
+    submit(&mut run, "hello", OnApproval::Approve).await;
+    let sent = text_of(&fake.requests()[0].messages[0]);
+    assert!(sent.contains("Permission mode: read-only"), "{sent}");
+    assert!(!sent.contains("<system-note>"), "{sent}");
+}
+
+#[tokio::test]
+async fn full_mode_is_refused_without_full_access() {
+    let mut run = start(Arc::new(FakeProvider::new()), ApprovalMode::Ask, 10).await;
+    let refused = switch_mode(&mut run, Mode::Full).await;
+    assert_eq!(kind_of(&refused), "mode");
+    let mut run = start_in(
+        Arc::new(FakeProvider::new()),
+        ApprovalMode::Ask,
+        10,
+        Mode::Auto,
+        true,
+    )
+    .await;
+    assert!(matches!(
+        switch_mode(&mut run, Mode::Full).await,
+        Event::ModeChanged { to: Mode::Full, .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_switch_while_a_task_runs_applies_to_its_next_call() {
+    let fake = FakeProvider::new()
+        .with_tool_call_turn("c1", "exec", &json!({"command": "one"}))
+        .with_tool_call_turn("c2", "exec", &json!({"command": "two"}))
+        .with_text_turn("done");
+    let mut run = start(Arc::new(fake.clone()), ApprovalMode::Ask, 10).await;
+    run.handle
+        .send(Op::Submit {
+            session: run.handle.id(),
+            input: vec![InputItem::Text { text: "go".into() }],
+        })
+        .await
+        .unwrap();
+    let mut switched = false;
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(10), run.events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .event;
+        if let Event::ApprovalRequested { id, .. } = event {
+            if !switched {
+                run.handle
+                    .send(Op::SetMode {
+                        session: run.handle.id(),
+                        mode: Mode::ReadOnly,
+                    })
+                    .await
+                    .unwrap();
+                switched = true;
+            }
+            run.handle
+                .send(Op::Approve {
+                    request: id,
+                    decision: Decision::Once,
+                })
+                .await
+                .unwrap();
+        }
+        if ends_task(&event) {
+            break;
+        }
+    }
+    assert_eq!(run.policy.modes(), [Mode::Auto, Mode::ReadOnly]);
     assert_invariants(&fake);
 }

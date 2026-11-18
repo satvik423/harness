@@ -320,6 +320,9 @@ pub struct PtyStart(pub Arc<PtyManager>);
 struct StartInput {
     command: String,
     wait_ms: Option<u64>,
+    /// For the user's approval panel only (ADR-043).
+    #[serde(default, rename = "description")]
+    _description: Option<String>,
 }
 
 #[async_trait]
@@ -336,9 +339,10 @@ impl Tool for PtyStart {
                 "type": "object",
                 "properties": {
                     "command": {"type": "string"},
+                    "description": {"type": "string", "description": crate::DESCRIPTION_FIELD},
                     "wait_ms": {"type": "integer", "minimum": 0, "maximum": MAX_PTY_WAIT_MS, "description": "How long to wait for first output (default 500)."}
                 },
-                "required": ["command"],
+                "required": ["command", "description"],
                 "additionalProperties": false
             }),
             strict: false,
@@ -386,6 +390,9 @@ struct WriteInput {
     id: String,
     input: String,
     wait_ms: Option<u64>,
+    /// For the user's approval panel only (ADR-043).
+    #[serde(default, rename = "description")]
+    _description: Option<String>,
 }
 
 #[async_trait]
@@ -401,9 +408,10 @@ impl Tool for PtyWrite {
                 "properties": {
                     "id": {"type": "string"},
                     "input": {"type": "string"},
+                    "description": {"type": "string", "description": crate::DESCRIPTION_FIELD},
                     "wait_ms": {"type": "integer", "minimum": 0, "maximum": MAX_PTY_WAIT_MS, "description": "How long to wait for output (default 200)."}
                 },
-                "required": ["id", "input"],
+                "required": ["id", "input", "description"],
                 "additionalProperties": false
             }),
             strict: false,

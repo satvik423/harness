@@ -32,6 +32,7 @@
 
 mod credentials;
 mod ledger;
+mod mode;
 mod policy;
 mod provider;
 mod registry;
@@ -47,6 +48,7 @@ mod user;
 
 pub use credentials::ApiKey;
 pub use ledger::{FileStamp, LedgerCheck, ReadLedger};
+pub use mode::{FixedMode, ModeControl, ModeError};
 pub use policy::{GrantScope, Policy, PolicyCall, PolicyError, Verdict};
 pub use provider::{
     CachePlan, CacheStyle, Capabilities, Effort, ModelRequest, Provider, ProviderError,
@@ -65,7 +67,7 @@ pub use tool::{
     InvalidToolName, RiskCtx, Tool, ToolCtx, ToolError, ToolName, ToolOutput, ToolSpec,
 };
 pub use untrusted::wrap_untrusted;
-pub use user::{AskError, NoUser, UserChannel, UserQuestion};
+pub use user::{AskError, NO_ANSWER, NoUser, UserChannel, UserQuestion};
 
 #[cfg(test)]
 mod object_safety {
@@ -90,5 +92,6 @@ mod object_safety {
         assert_dyn_compatible::<dyn SessionStore>();
         assert_dyn_compatible::<dyn SnapshotStore>();
         assert_dyn_compatible::<dyn FileSnapshots>();
+        assert_dyn_compatible::<dyn ModeControl>();
     }
 }

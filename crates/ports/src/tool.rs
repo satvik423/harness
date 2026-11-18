@@ -138,6 +138,8 @@ pub struct ToolCtx {
     pub user: Arc<dyn UserChannel>,
     /// Records files before they are written, for undo; [`crate::NoSnapshots`] outside a session.
     pub snapshots: Arc<dyn FileSnapshots>,
+    /// The session's permission mode ([`crate::FixedMode`] outside a session).
+    pub mode: Arc<dyn crate::ModeControl>,
 }
 
 impl fmt::Debug for ToolCtx {
@@ -148,6 +150,7 @@ impl fmt::Debug for ToolCtx {
             .field("task", &self.task)
             .field("call_id", &self.call_id)
             .field("writable_roots", &self.writable_roots)
+            .field("mode", &self.mode.current())
             .finish_non_exhaustive()
     }
 }

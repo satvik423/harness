@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
 use harness_ports::Effort;
 use harness_protocol::{Decision, Envelope, Event, InputItem, Op, RuleScope, TaskState};
-use harness_types::{ApprovalId, ContentBlock, Message, ModelRef, QuestionId, SessionId, TaskId};
+use harness_types::{
+    ApprovalId, ContentBlock, Message, Mode, ModelRef, QuestionId, SessionId, TaskId,
+};
 use ratatui::text::Line;
 use ratatui_textarea::TextArea;
 use serde_json::Value;
@@ -113,6 +115,9 @@ pub enum Prompt {
         id: ApprovalId,
         /// What is asked about.
         reason: String,
+        /// The model's one-line description of the call (ADR-043), shown
+        /// above `reason`, never instead of it.
+        summary: Option<String>,
         /// Diff preview, if the call changes files.
         preview: Vec<DiffLine>,
     },
@@ -288,6 +293,8 @@ pub fn summarize(name: &str, input: &Value) -> String {
         "read_file" | "write_file" | "edit_file" => input["path"].as_str().map(str::to_owned),
         "glob" | "grep" => input["pattern"].as_str().map(str::to_owned),
         "ask_user" => input["question"].as_str().map(str::to_owned),
+        // The plan itself is shown in full below the card.
+        "propose_plan" => Some("a plan for your approval".to_owned()),
         "pty_write" => input["input"]
             .as_str()
             .map(|s| format!("{} ← {}", input["id"].as_str().unwrap_or("?"), s.trim_end())),
@@ -627,6 +634,7 @@ impl App {
                 id,
                 call_id,
                 reason,
+                summary,
                 ..
             } => {
                 let preview = self
@@ -636,17 +644,30 @@ impl App {
                 self.prompt = Some(Prompt::Approval {
                     id: *id,
                     reason: reason.clone(),
+                    summary: summary.clone(),
                     preview,
                 });
-                effects.push(Effect::Notify(format!("approval needed: {reason}")));
+                let what = summary.as_deref().unwrap_or(reason);
+                effects.push(Effect::Notify(format!("approval needed: {what}")));
             }
             Event::QuestionAsked {
                 id,
+                call_id,
                 question,
                 options,
                 multi,
                 ..
             } => {
+                // A plan is long Markdown: it goes in the transcript, rendered,
+                // and the panel only asks for the decision.
+                let is_plan = self.card(call_id).is_some_and(|c| c.name == "propose_plan");
+                let question = if is_plan {
+                    self.notice(Level::Info, "proposed plan:");
+                    self.items.push(Item::assistant_done(question.clone()));
+                    "Approve this plan? (or type what to change)".to_owned()
+                } else {
+                    question.clone()
+                };
                 self.prompt = Some(Prompt::Question {
                     id: *id,
                     question: question.clone(),
@@ -713,6 +734,13 @@ impl App {
                 self.notice(Level::Info, format!("↺ restored {}", paths.join(", ")));
             }
             Event::SegmentOpened { segment, .. } => self.segment = *segment,
+            Event::SessionOpened {
+                mode: Some(mode), ..
+            } => self.view.mode = *mode,
+            Event::ModeChanged { to, .. } => {
+                self.view.mode = *to;
+                self.notice(Level::Info, format!("mode: {to} · {}", to.describe()));
+            }
             _ => {}
         }
         if history {
@@ -880,6 +908,10 @@ impl App {
                 vec![Action::Quit]
             }
             KeyCode::Char('p') if ctrl => self.command(Slash::Pause),
+            KeyCode::BackTab => {
+                let next = self.view.mode.next(self.view.full_access);
+                self.switch_mode(next)
+            }
             KeyCode::Esc if self.busy() => self.interrupt(),
             KeyCode::Esc => {
                 self.attachments.clear();
@@ -923,6 +955,15 @@ impl App {
         }
     }
 
+    /// Asks the runtime to switch modes; the header changes when the
+    /// `ModeChanged` event arrives, so it never shows a mode not in force.
+    fn switch_mode(&mut self, mode: Mode) -> Vec<Action> {
+        vec![Action::Send(Op::SetMode {
+            session: self.view.id,
+            mode,
+        })]
+    }
+
     fn interrupt(&mut self) -> Vec<Action> {
         match self.task {
             Some((task, _)) => vec![Action::Send(Op::Interrupt { task })],
@@ -940,6 +981,7 @@ impl App {
             Prompt::Approval {
                 id,
                 reason,
+                summary,
                 preview,
             } => {
                 let decided = match key.code {
@@ -969,6 +1011,7 @@ impl App {
                         self.prompt = Some(Prompt::Approval {
                             id,
                             reason,
+                            summary,
                             preview,
                         });
                         return Some(self.interrupt());
@@ -979,6 +1022,7 @@ impl App {
                     self.prompt = Some(Prompt::Approval {
                         id,
                         reason,
+                        summary,
                         preview,
                     });
                     return Some(Vec::new());
@@ -1211,6 +1255,24 @@ impl App {
                     Vec::new()
                 }
             },
+            Slash::Mode(None) => {
+                self.overlay = Some(crate::view::modes_overlay(self));
+                Vec::new()
+            }
+            Slash::Mode(Some(name)) => match name.parse::<Mode>() {
+                Ok(Mode::Full) if !self.view.full_access => {
+                    self.notice(
+                        Level::Warning,
+                        "full mode needs harness to be started with --dangerously-full-access",
+                    );
+                    Vec::new()
+                }
+                Ok(mode) => self.switch_mode(mode),
+                Err(e) => {
+                    self.notice(Level::Warning, e.to_string());
+                    Vec::new()
+                }
+            },
             Slash::Clear => {
                 if self.busy() {
                     self.notice(
@@ -1263,7 +1325,8 @@ mod tests {
                 persona: "default".into(),
                 model: "openai/gpt-6-luna".parse().unwrap(),
                 effort: Some(Effort::High),
-                profile: "auto".into(),
+                mode: Mode::Auto,
+                full_access: false,
                 context_limit: 250_000,
                 priced: false,
                 cwd: dir.to_path_buf(),
@@ -1466,6 +1529,7 @@ mod tests {
             task,
             call_id: "c1".into(),
             reason: "write a.rs".into(),
+            summary: None,
         }));
         assert_eq!(
             effects,
@@ -1478,6 +1542,32 @@ mod tests {
     }
 
     #[test]
+    fn approvals_keep_the_description_and_notify_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(&attached(dir.path()), false);
+        let task = running(&mut app);
+        let effects = app.apply(&env(Event::ApprovalRequested {
+            id: ApprovalId::new(),
+            task,
+            call_id: "c1".into(),
+            reason: "run `cargo test -p x`".into(),
+            summary: Some("Run the tests".into()),
+        }));
+        assert_eq!(
+            effects,
+            [Effect::Notify("approval needed: Run the tests".into())]
+        );
+        let Some(Prompt::Approval {
+            summary, reason, ..
+        }) = &app.prompt
+        else {
+            panic!()
+        };
+        assert_eq!(summary.as_deref(), Some("Run the tests"));
+        assert_eq!(reason, "run `cargo test -p x`");
+    }
+
+    #[test]
     fn approval_keys_send_decisions_and_d_asks_for_a_reason() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::new(&attached(dir.path()), false);
@@ -1486,6 +1576,7 @@ mod tests {
             app.prompt = Some(Prompt::Approval {
                 id,
                 reason: "r".into(),
+                summary: None,
                 preview: vec![],
             })
         };
@@ -1661,6 +1752,7 @@ mod tests {
         app.prompt = Some(Prompt::Approval {
             id: ApprovalId::new(),
             reason: "r".into(),
+            summary: None,
             preview: vec![],
         });
         app.apply(&env(Event::TaskState {
@@ -1711,6 +1803,7 @@ mod tests {
                 task,
                 call_id: "c".into(),
                 reason: "r".into(),
+                summary: None,
             }),
         ];
         let app = App::new(&a, false);
@@ -1796,6 +1889,115 @@ mod tests {
                 "anthropic/claude-opus-5-5".into()
             )))]
         );
+    }
+
+    #[test]
+    fn shift_tab_asks_for_the_next_mode_and_skips_full_unless_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(&attached(dir.path()), false);
+        let id = app.view.id;
+        let set = |mode| [Action::Send(Op::SetMode { session: id, mode })];
+        assert_eq!(app.key(key(KeyCode::BackTab)), set(Mode::Plan));
+        // The header follows the runtime, not the key press.
+        assert_eq!(app.view.mode, Mode::Auto);
+        app.view.mode = Mode::Plan;
+        assert_eq!(app.key(key(KeyCode::BackTab)), set(Mode::ReadOnly));
+        app.view.full_access = true;
+        assert_eq!(app.key(key(KeyCode::BackTab)), set(Mode::Full));
+        // Not while a question waits for an answer.
+        app.prompt = Some(Prompt::Approval {
+            id: ApprovalId::new(),
+            reason: "r".into(),
+            summary: None,
+            preview: vec![],
+        });
+        assert!(app.key(key(KeyCode::BackTab)).is_empty());
+    }
+
+    #[test]
+    fn mode_changes_update_the_header_and_history_restores_the_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(&attached(dir.path()), false);
+        app.apply(&env(Event::ModeChanged {
+            from: Mode::Auto,
+            to: Mode::Plan,
+            note: "n".into(),
+        }));
+        assert_eq!(app.view.mode, Mode::Plan);
+        assert!(
+            matches!(app.items.last(), Some(Item::Notice { text, .. }) if text.starts_with("mode: plan"))
+        );
+
+        let mut stored = attached(dir.path());
+        stored.history = vec![env(Event::SessionOpened {
+            persona: "default".into(),
+            segment: 0,
+            mode: Some(Mode::ReadOnly),
+        })];
+        assert_eq!(App::new(&stored, false).view.mode, Mode::ReadOnly);
+    }
+
+    #[test]
+    fn the_mode_command_switches_lists_or_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(&attached(dir.path()), false);
+        let id = app.view.id;
+        assert_eq!(
+            app.command(Slash::Mode(Some("plan".into()))),
+            [Action::Send(Op::SetMode {
+                session: id,
+                mode: Mode::Plan
+            })]
+        );
+        assert!(app.command(Slash::Mode(Some("full".into()))).is_empty());
+        assert!(
+            matches!(app.items.last(), Some(Item::Notice { text, .. }) if text.contains("--dangerously-full-access"))
+        );
+        assert!(app.command(Slash::Mode(Some("yolo".into()))).is_empty());
+        assert!(app.command(Slash::Mode(None)).is_empty());
+        let overlay = app.overlay.clone().unwrap();
+        assert_eq!(overlay.picks.len(), 3, "full is not offered");
+        assert_eq!(
+            app.key(key(KeyCode::Char('1'))),
+            [Action::Command(Slash::Mode(Some("read-only".into())))]
+        );
+    }
+
+    #[test]
+    fn plan_cards_do_not_repeat_the_plan() {
+        assert_eq!(
+            summarize("propose_plan", &serde_json::json!({"plan": "## Plan"})),
+            "a plan for your approval"
+        );
+    }
+
+    #[test]
+    fn a_proposed_plan_goes_in_the_transcript_and_the_panel_asks_to_approve() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(&attached(dir.path()), false);
+        let task = running(&mut app);
+        app.apply(&env(Event::ToolCall {
+            task,
+            id: "p1".into(),
+            name: "propose_plan".into(),
+            input: serde_json::json!({"plan": "## Plan\n1. Fix it"}),
+            risk: Risk::ReadOnly { paths: vec![] },
+        }));
+        app.apply(&env(Event::QuestionAsked {
+            id: QuestionId::new(),
+            task,
+            call_id: "p1".into(),
+            question: "## Plan\n1. Fix it".into(),
+            options: vec!["Yes, and auto-accept edits".into()],
+            multi: false,
+        }));
+        assert!(
+            matches!(app.items.last(), Some(Item::Assistant { text, .. }) if text.starts_with("## Plan"))
+        );
+        let Some(Prompt::Question { question, .. }) = &app.prompt else {
+            panic!("{:?}", app.prompt)
+        };
+        assert!(question.starts_with("Approve this plan?"), "{question}");
     }
 
     #[test]

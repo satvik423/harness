@@ -35,11 +35,13 @@ harness run "How many .rs files are here, and which is the largest?"
 ```
 
 - The answer streams to **stdout**; tool activity (`▸ shell: …`, `✓ …`) goes to **stderr**.
-- Reading, searching and editing inside the project run without asking (profile
-  `auto`). Shell commands ask first, until the sandbox arrives:
+- Reading, searching and editing inside the project run without asking (mode
+  `auto`). Shell commands ask first, until the sandbox arrives. The line under the call
+  is the agent's own description of it; the exact command follows:
 
   ```
   ▸ shell: find . -name '*.rs' | wc -l
+    Count the Rust files
   Allow run `find . -name '*.rs' | wc -l` (commands run without a sandbox)? [y]es once / [s]ession / [a]lways / [p]roject always / [n]o (n <why>):
   ```
 
@@ -55,8 +57,9 @@ harness run "How many .rs files are here, and which is the largest?"
 |---|---|---|
 | `--model provider/model` | `default_model` from config | `anthropic/…` or `openai/…` |
 | `--max-turns N` | 50 | Maximum model calls |
+| `--mode read-only\|auto\|plan\|full` | from `policy.profile` | The permission mode; `plan` makes no changes and ends with a plan. A resumed session switches to it |
 | `--approval on-request\|never` | from `policy.profile` | `never` denies every action that needs approval, without asking |
-| `--dangerously-full-access` | off | The `full` profile: no approvals, no protections except deny rules |
+| `--dangerously-full-access` | off | Start in `full` mode (no approvals, no protections except deny rules) and allow switching to it |
 | `--json` | off | Print every event as one JSON line on stdout (approval answers are still read from stdin) |
 
 ## Exit codes

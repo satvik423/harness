@@ -38,7 +38,7 @@ use harness_store_sqlite::SqliteStore;
 use harness_testkit::FakeProvider;
 use harness_testkit::invariants::check_all;
 use harness_tools::{MemoryReadLedger, Unsandboxed};
-use harness_types::{Risk, Seq, SessionId};
+use harness_types::{Mode, Risk, Seq, SessionId};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
@@ -158,6 +158,8 @@ fn config(dir: &Path) -> SessionConfig {
         cwd: dir.to_path_buf(),
         persona: builtin_default(),
         approval: ApprovalMode::Ask,
+        mode: Mode::Auto,
+        full_access: false,
         max_turns: 50,
         output_cap_tokens: 2_000,
         max_parallel_tools: 4,

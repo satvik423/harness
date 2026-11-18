@@ -31,6 +31,9 @@ const PIPE_GRACE: Duration = Duration::from_millis(200);
 struct Input {
     command: String,
     timeout_s: Option<u64>,
+    /// For the user's approval panel only (ADR-043); never part of the command.
+    #[serde(default, rename = "description")]
+    _description: Option<String>,
 }
 
 /// Runs a shell command in the working directory and returns its combined
@@ -168,9 +171,10 @@ impl Tool for Shell {
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "The command line to run."},
+                    "description": {"type": "string", "description": crate::DESCRIPTION_FIELD},
                     "timeout_s": {"type": "integer", "minimum": 1, "maximum": MAX_TIMEOUT_S, "description": "Timeout in seconds."}
                 },
-                "required": ["command"],
+                "required": ["command", "description"],
                 "additionalProperties": false
             }),
             strict: true,
@@ -356,6 +360,17 @@ mod tests {
         let t = text(&out.unwrap());
         assert!(t.contains("out") && t.contains("err"), "{t}");
         assert!(t.ends_with("[exit code 3]"), "{t}");
+    }
+
+    #[tokio::test]
+    async fn the_description_is_accepted_and_not_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let (out, _) = run(
+            dir.path(),
+            json!({"command": "echo hi", "description": "Say hi"}),
+        )
+        .await;
+        assert_eq!(text(&out.unwrap()), "hi\n[exit code 0]");
     }
 
     #[tokio::test]

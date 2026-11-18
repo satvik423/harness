@@ -29,6 +29,11 @@ pub enum AskError {
     Cancelled,
 }
 
+/// The answer a front-end sends when its input closed before the user answered
+/// (a headless run reading from a closed stdin). Tools treat it like
+/// [`AskError::NoUser`] where that matters (`propose_plan`).
+pub const NO_ANSWER: &str = "(no answer: the input was closed)";
+
 /// Asks the user a question and waits for the answer.
 #[async_trait]
 pub trait UserChannel: Send + Sync {

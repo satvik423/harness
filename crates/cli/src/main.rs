@@ -31,10 +31,10 @@ use harness_cli::wiring::{Offline, build_provider, session_model};
 use harness_config::{ConfigLoader, LoadedConfig, Paths};
 use harness_policy::ApprovalPolicy;
 use harness_ports::{EventLog, Provider, SessionStore, TaskControl};
-use harness_protocol::TaskState;
+use harness_protocol::{Op, TaskState};
 use harness_store_sqlite::SqliteStore;
 use harness_tui::{Backend as _, TuiOptions};
-use harness_types::{ModelRef, Seq, SessionId};
+use harness_types::{Mode, ModelRef, Seq, SessionId};
 use tokio::sync::Notify;
 
 /// A general-purpose, persona-driven agent harness.
@@ -103,9 +103,13 @@ struct RunFlags {
     #[arg(long, value_enum)]
     approval: Option<ApprovalArg>,
     /// Run with the `full` profile: no approvals and no protections except deny
-    /// rules. Only for throwaway environments.
+    /// rules. Only for throwaway environments. Also allows switching to `full`.
     #[arg(long)]
     dangerously_full_access: bool,
+    /// Permission mode to start in: read-only, auto, plan or full (default: from
+    /// `policy.profile`). A resumed session switches to it.
+    #[arg(long, value_name = "MODE")]
+    mode: Option<Mode>,
 }
 
 #[derive(Debug, Args)]
@@ -527,6 +531,7 @@ impl App {
                 ApprovalArg::Never => ApprovalPolicy::Never,
             }),
             full_access: flags.dangerously_full_access,
+            mode: flags.mode,
             store: Arc::clone(&self.store),
         }
     }
@@ -559,6 +564,7 @@ impl App {
             .unwrap_or_else(|| config.default_model.clone());
         let show_thinking = config.ui.show_thinking;
         let mouse = config.ui.mouse;
+        let mode = flags.mode;
         let factory = Arc::new(self.factory(flags));
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -566,11 +572,22 @@ impl App {
         let result = runtime.block_on(async move {
             let backend = Arc::new(CliBackend::new(factory));
             // A stored session keeps its own model; --model applies to new ones.
+            let resuming = session.is_some();
             let attached = match session {
                 Some(id) => backend.open_session(id).await,
                 None => backend.new_session(model, None).await,
             }
             .map_err(anyhow::Error::msg)?;
+            // A stored session keeps its mode unless --mode asks for another.
+            if resuming && let Some(mode) = mode {
+                backend
+                    .send(Op::SetMode {
+                        session: attached.view.id,
+                        mode,
+                    })
+                    .await
+                    .map_err(anyhow::Error::msg)?;
+            }
             let options = TuiOptions {
                 first_prompt: prompt,
                 show_thinking,
@@ -700,6 +717,9 @@ impl App {
             approval,
             cwd: self.cwd.clone(),
             price: factory.price(&persona.model),
+            mode: factory.start_mode()?,
+            mode_given: flags.mode.is_some(),
+            full_access: flags.dangerously_full_access,
         };
         let target = session.map_or(Target::New, Target::Existing);
         tracing::info!(model = %persona.model, ?target, "driving a session");
@@ -763,6 +783,7 @@ impl RunFlags {
             max_turns: 1,
             approval: Some(ApprovalArg::Never),
             dangerously_full_access: false,
+            mode: None,
         }
     }
 }

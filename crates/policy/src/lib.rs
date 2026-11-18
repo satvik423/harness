@@ -16,7 +16,7 @@
 //! ```
 //! use harness_policy::{PolicyEngine, PolicySettings, Profile};
 //! use harness_ports::{Policy, PolicyCall, Verdict};
-//! use harness_types::Risk;
+//! use harness_types::{Mode, Risk};
 //!
 //! let engine = PolicyEngine::new(PolicySettings {
 //!     profile: Profile::Auto,
@@ -26,6 +26,7 @@
 //!     home: None,
 //!     user_rules: None,
 //!     project_rules: None,
+//!     full_access: false,
 //! })?;
 //! let call = PolicyCall {
 //!     tool: "read_file".into(),
@@ -33,6 +34,7 @@
 //!     risk: Risk::ReadOnly { paths: vec!["/proj/.env".into()] },
 //!     cwd: "/proj".into(),
 //!     writable_roots: vec!["/proj".into()],
+//!     mode: Mode::Auto,
 //! };
 //! assert!(matches!(engine.evaluate(&call), Verdict::Deny { .. }));
 //! # Ok::<(), harness_policy::RuleError>(())
@@ -44,6 +46,6 @@ mod engine;
 mod rules;
 mod shell;
 
-pub use engine::{ApprovalPolicy, PolicyEngine, PolicySettings, Profile};
+pub use engine::{ApprovalPolicy, PLAN_MODE_REFUSAL, PolicyEngine, PolicySettings, Profile};
 pub use rules::{Decision, Origin, RawRule, RuleError, RulesFile};
 pub use shell::{Analysis, Part, analyze};

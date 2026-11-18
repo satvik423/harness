@@ -223,6 +223,7 @@ pub fn summarize_input(name: &str, input: &Value) -> String {
         "read_file" | "write_file" | "edit_file" => input["path"].as_str().map(str::to_owned),
         "glob" | "grep" => input["pattern"].as_str().map(str::to_owned),
         "ask_user" => input["question"].as_str().map(str::to_owned),
+        "propose_plan" => Some("a plan for your approval".to_owned()),
         "apply_patch" => input["patch"]
             .as_str()
             .and_then(|p| harness_tools::patch::parse_patch(p).ok())

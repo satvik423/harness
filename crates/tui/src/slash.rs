@@ -9,6 +9,8 @@ pub enum Slash {
     Model(Option<String>),
     /// Show the effort, or pick one for the next session.
     Effort(Option<String>),
+    /// Show the permission modes, or switch to one (ADR-042).
+    Mode(Option<String>),
     /// Pause the running task at its next safe point.
     Pause,
     /// Resume the paused task.
@@ -41,6 +43,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     (
         "/effort [low|medium|high|xhigh|max]",
         "show or pick the effort for a new session",
+    ),
+    (
+        "/mode [read-only|auto|plan|full]",
+        "show or switch the permission mode (also Shift+Tab)",
     ),
     ("/pause", "pause the task at its next safe point"),
     ("/resume", "resume the paused task"),
@@ -85,6 +91,7 @@ pub fn parse(input: &str) -> Option<Result<Slash, String>> {
         "help" | "?" => Ok(Slash::Help),
         "model" => Ok(Slash::Model(arg)),
         "effort" => Ok(Slash::Effort(arg)),
+        "mode" => Ok(Slash::Mode(arg)),
         "pause" => Ok(Slash::Pause),
         "resume" => Ok(Slash::Resume),
         "tasks" => Ok(Slash::Tasks),
@@ -112,6 +119,10 @@ mod tests {
             Some(Ok(Slash::Effort(Some("high".into()))))
         );
         assert_eq!(parse("/model"), Some(Ok(Slash::Model(None))));
+        assert_eq!(
+            parse("/mode plan"),
+            Some(Ok(Slash::Mode(Some("plan".into()))))
+        );
         assert_eq!(parse("/exit"), Some(Ok(Slash::Quit)));
         assert!(matches!(parse("/frobnicate"), Some(Err(m)) if m.contains("/help")));
     }
@@ -126,7 +137,7 @@ mod tests {
     #[test]
     fn help_lists_every_command() {
         for name in [
-            "help", "model", "effort", "pause", "resume", "tasks", "diff", "undo", "clear",
+            "help", "model", "effort", "mode", "pause", "resume", "tasks", "diff", "undo", "clear",
             "sessions", "cost", "context", "quit",
         ] {
             assert!(

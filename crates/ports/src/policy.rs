@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use harness_types::Risk;
+use harness_types::{Mode, Risk};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -24,6 +24,8 @@ pub struct PolicyCall {
     pub cwd: PathBuf,
     /// Roots the task may write to.
     pub writable_roots: Vec<PathBuf>,
+    /// The session's permission mode when the call was made (ADR-042).
+    pub mode: Mode,
 }
 
 /// The policy's answer for one call.

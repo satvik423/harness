@@ -322,7 +322,7 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
   <h1>Building Harness</h1>
   <p class="sub">The complete plan for a general-purpose, persona-driven agent harness written in Rust. It combines the best ideas from Claude Code, Codex CLI and Hermes, and adds a context engine that never loses details. This one document is enough to build the whole project.</p>
   <div class="docctl">
-    <div><span>Version</span>1.5 · updated after the Phase 4 trial (v0.1 released)</div>
+    <div><span>Version</span>1.6 · permission modes and approval descriptions, from the Phase 4 trial (v0.1 released)</div>
     <div><span>Date</span>18 Nov 2026</div>
     <div><span>Status</span>Approved for build</div>
     <div><span>Working name</span><code>harness</code> (rename freely)</div>
@@ -408,6 +408,8 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
     <tr><td class="id">1.5</td><td><code>harness session delete ID</code> removes a whole session and frees unreferenced blobs (only when no other session is open); the TUI drops sessions nobody typed into. Transcripts are never trimmed: a session is kept whole or removed whole</td><td>3.12, 3.16</td><td>ADR-041</td></tr>
     <tr><td class="id">1.5</td><td>Getting back to sessions in the TUI: <code>harness -c</code>, <code>/sessions</code> picker, a hint naming the last session, the short session id in the header. Also ↑/↓ prompt history (from the log), mouse-wheel scrolling (<code>[ui] mouse</code>), a <code>/model</code> picker, last output lines on shell cards</td><td>3.16, 3.17, Ph 4</td><td>Phase 4 report (trial follow-up)</td></tr>
     <tr><td class="id">1.5</td><td>Built-in prices for OpenAI's gpt-6 models (Standard tier, read from OpenAI's pricing page on 18 Nov 2026); prices are never fetched at run time</td><td>3.17</td><td>Phase 4 report</td></tr>
+    <tr><td class="id">1.6</td><td>Permission modes <code>read-only</code>, <code>auto</code>, <code>plan</code>, <code>full</code> belong to the session and switch at any time (Shift+Tab, <code>/mode</code>, <code>--mode</code>, <code>Op::SetMode</code>, <code>ModeChanged</code>). Plan mode refuses edits before rules are matched; <code>propose_plan</code> asks the user to approve a plan and switches to <code>auto</code> or <code>read-only</code>. Profiles pick the starting mode. A real "auto" waits for the Phase 13 sandbox (user decisions)</td><td>1.7, 3.3, 3.5, 3.6, 3.16</td><td>ADR-042</td></tr>
+    <tr><td class="id">1.6</td><td>Command tools ask the model for a one-line <code>description</code>; approvals show it above the exact command (<code>ApprovalRequested.summary</code>). Rules match the command, never the description</td><td>3.3, 3.5, 3.16</td><td>ADR-043</td></tr>
   </tbody></table></div>
 </section>
 
@@ -568,6 +570,8 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
     <tr><td class="id">FR-SAFE-05</td><td>Project trust: project config, hooks and rules load only after <code>harness trust</code>.</td><td><span class="pr p1">P1</span></td><td><span class="ph">Ph 6</span></td></tr>
     <tr><td class="id">FR-SAFE-06</td><td>Content from tools, the web, MCP and files MUST be marked as untrusted data in the transcript.</td><td><span class="pr p1">P1</span></td><td><span class="ph">Ph 2</span></td></tr>
     <tr><td class="id">FR-SAFE-07</td><td>Secret redaction in logs and exports (API keys, tokens, private keys).</td><td><span class="pr p1">P1</span></td><td><span class="ph">Ph 7</span></td></tr>
+    <tr><td class="id">FR-SAFE-08</td><td>Permission modes (read-only, auto, plan, full) that the user switches while a session runs. In plan mode the agent only investigates and proposes a plan; edits wait for the user's approval. <span class="src cc">Claude Code</span></td><td><span class="pr p1">P1</span></td><td><span class="ph">Ph 4</span></td></tr>
+    <tr><td class="id">FR-SAFE-09</td><td>Every approval explains the action in one plain line, next to the exact command or files.</td><td><span class="pr p1">P1</span></td><td><span class="ph">Ph 4</span></td></tr>
   </tbody></table></div>
 
   <h3>Hooks (HOOK) · Skills (SKL) · MCP (MCP)</h3>
@@ -1235,6 +1239,7 @@ pub enum Risk { ReadOnly { paths: Vec<PathBuf> }, Write { paths: Vec<PathBuf> },
     Answer   { request: QuestionId, answer: String },             // ask_user (ADR-028)
     Compact  { session: SessionId, focus: Option<String> },
     Undo     { session: SessionId },                               // ADR-034
+    SetMode  { session: SessionId, mode: Mode },                   // ADR-042
     SwitchPersona { session: SessionId, persona: String },
     Fork     { session: SessionId, at: Seq },
     Shutdown,
@@ -1245,7 +1250,7 @@ pub enum InputItem { Text { text: String }, File { path: PathBuf }, Blob { blob:
     <div class="cwrap"><div class="fname">crates/protocol: Event (out of the core)</div><script type="text/plain" data-code="rust">pub struct Envelope { pub seq: Seq, pub ts: i64,
                       pub session: SessionId, pub event: Event }
 pub enum Event {
-    SessionOpened { persona: String, segment: u32 },
+    SessionOpened { persona: String, segment: u32, mode: Option<Mode> },   // mode: ADR-042
     UserInput  { task: TaskId, message: Message },                 // ADR-015
     SystemNote { task: TaskId, text: String },                     // ADR-015
     TaskState  { task: TaskId, from: TaskState, to: TaskState, reason: String },
@@ -1255,7 +1260,8 @@ pub enum Event {
     AssistantMessage { task: TaskId, message: Message },
     AssistantAborted { task: TaskId, partial_text: String },     // ADR-015
     ToolCall   { task: TaskId, id: String, name: String, input: Value, risk: Risk },
-    ApprovalRequested { id: ApprovalId, task: TaskId, call_id: String, reason: String },
+    ApprovalRequested { id: ApprovalId, task: TaskId, call_id: String, reason: String,
+                        summary: Option<String> },               // summary: ADR-043
     ApprovalResolved  { id: ApprovalId, decision: Decision },   // ADR-015
     QuestionAsked { id: QuestionId, task: TaskId, call_id: String,   // ADR-028
                     question: String, options: Vec<String>, multi: bool },
@@ -1270,6 +1276,7 @@ pub enum Event {
     Recalled   { anchor: Option<String>, tokens: u64, auto: bool },
     SubagentSpawned { parent: TaskId, child: TaskId, persona: String },
     UndoApplied { task: TaskId, paths: Vec<String> },            // ADR-015
+    ModeChanged { from: Mode, to: Mode, note: String },          // ADR-042
     Usage      { task: TaskId, usage: Usage, cost_micros: u64 },
     Warning    { kind: String, message: String },
     Error      { kind: String, message: String, hint: Option<String> },
@@ -1504,7 +1511,9 @@ decision = "allow"</script></div>
     <tr><td class="id">auto (default)</td><td>workspace-write, network off</td><td>on-request</td><td>Edits and runs inside the project. Asks to leave it, use the network or escalate.</td></tr>
     <tr><td class="id">ci</td><td>workspace-write</td><td>never</td><td>Never stops to ask. Anything that would need approval is denied with a reason.</td></tr>
     <tr><td class="id">full</td><td>none</td><td>never</td><td>No walls and no questions. Requires <code>--dangerously-full-access</code> and prints a warning.</td></tr>
+    <tr><td class="id">plan</td><td>read-only</td><td>on-request</td><td>Starts in plan mode: reads only, edits refused until the user approves a plan.</td></tr>
   </tbody></table></div>
+  <div class="card"><h4>Modes (ADR-042)</h4><p>A profile only picks how a session <em>starts</em>. The session's <b>mode</b> (<code>read-only</code>, <code>auto</code>, <code>plan</code>, <code>full</code>) can switch at any time: Shift+Tab or <code>/mode</code> in the TUI, <code>--mode</code> on the command line, <code>Op::SetMode</code> from any front-end. Every <code>PolicyCall</code> carries the mode in force, and the policy judges by it (<code>ci</code> = <code>auto</code> with approval <code>never</code>). In <code>plan</code> mode, writes are denied before rules are matched, so no allow rule or grant overrides it; commands, network and other calls still ask. <code>full</code> counts only with <code>--dangerously-full-access</code>. A switch is recorded as <code>ModeChanged</code> and the model learns of it in a system note with the next user message (the prompt and tools stay frozen). A resumed session keeps its mode. The <code>propose_plan</code> tool shows a plan with three choices (approve and auto-accept edits → <code>auto</code>; approve and ask → <code>read-only</code>; keep planning or type feedback). Approvals show the model's one-line <code>description</code> of the call above the exact command (ADR-043).</p></div>
   <div class="grid2">
     <div class="cwrap"><div class="fname">bwrap invocation (workspace-write)</div><script type="text/plain" data-code="sh">bwrap --die-with-parent --new-session --unshare-pid \
   --unshare-net \                          # omit only when network is approved
@@ -1954,6 +1963,7 @@ harness --session ID                     # TUI in a stored session
 harness run PROMPT [--persona P] [--model M] [--json]
     [--output-schema FILE] [--max-turns N] [--attach FILE]...
     [--approval never|on-request] [--sandbox MODE] [--session ID]
+    [--mode read-only|auto|plan|full]    # also for the TUI; ADR-042
 harness session list | show ID | resume ID | fork ID --at SEQ
                 | export ID --format md|jsonl | delete ID [--yes]
 harness task    list | pause ID | resume ID | cancel ID
@@ -1978,16 +1988,18 @@ harness doctor                           # bwrap, keyring, providers, MCP
 │ ▸ edit   src/auth.ts  (+1 −1)                                │
 │ assistant › The check used < instead of <= …                 │
 ├──────────────────────────────────────────────────────────────┤
-│ ⚠ Approve: shell "git push origin fix/login"                 │
+│ ⚠ Push the fix branch so CI runs                             │
+│   run `git push origin fix/login`                            │
 │   [o]nce  [s]ession  [a]lways  [d]eny                        │
 ├──────────────────────────────────────────────────────────────┤
 │ > _                                                          │
 └ 41.2k/250k ctx · cache 86% · $0.42 · task running · ^P pause ┘
 
-slash: /persona /model /effort /compact /recall /context /cost
+slash: /persona /model /effort /mode /compact /recall /context /cost
        /pause /resume /tasks /agents /skills /mcp /hooks /memory
        /attach /diff /undo /fork /clear /sessions /trust /help /quit
-keys:  ↑/↓ earlier prompts · mouse wheel scrolls (Shift+drag selects)</script></div>
+keys:  ↑/↓ earlier prompts · mouse wheel scrolls (Shift+drag selects)
+       Shift+Tab next mode: read-only → auto → plan (→ full with the flag)</script></div>
   </div>
   <div class="card"><h4>JSON-RPC server (newline-delimited JSON over stdio)</h4><p>Methods: <code>initialize</code>, <code>session/create</code>, <code>session/resume</code>, <code>session/list</code>, <code>turn/submit</code>, <code>task/interrupt</code>, <code>task/pause</code>, <code>task/resume</code>, <code>task/cancel</code>, <code>approval/respond</code>, <code>session/compact</code>, <code>persona/list</code>. Each method maps one-to-one onto an <code>Op</code>. Notifications: <code>event</code> carrying an <code>Envelope</code>. The protocol is versioned with <code>protocolVersion</code> in <code>initialize</code>.</p></div>
 </section>
@@ -2167,6 +2179,8 @@ mouse = true                           # TUI captures the mouse: wheel scrolls, 
     <div><div class="h"><code>ADR-038</code><b>/model and /effort start a new session</b><span class="st">accepted</span></div><p><b>Context:</b> a segment's model and effort are frozen; switching mid-segment breaks thinking and the cache. <b>Decision:</b> they pick values for a new session and offer to start it now. <b>Consequences:</b> Phase 5 adds switching via compaction. Approved by the user.</p></div>
     <div><div class="h"><code>ADR-039</code><b>Attachments as reference notes</b><span class="st">accepted</span></div><p><b>Context:</b> file conversion is Phase 11. <b>Decision:</b> <code>InputItem::File</code> becomes a note with path, size and kind; the model reads the file itself. <b>Consequences:</b> Phase 11 replaces the note with converted content. Approved by the user.</p></div>
     <div><div class="h"><code>ADR-040</code><b>Costs, debug bodies, session changes</b><span class="st">accepted</span></div><p><b>Context:</b> the spec asks for costs, exact request bodies and <code>/diff</code> without saying how. <b>Decision:</b> the runtime prices each <code>Usage</code>; <code>request_history</code> rebuilds requests from the log and the adapter builds the body; <code>/diff</code> uses each file's first snapshot; the TUI uses a <code>Backend</code> trait. <b>Consequences:</b> costs are stored; nothing extra is recorded for debugging.</p></div>
+    <div><div class="h"><code>ADR-042</code><b>Switchable permission modes and plan mode</b><span class="st">accepted</span></div><p><b>Context:</b> profiles were chosen once at startup; the user wanted modes like other harnesses, including plan mode. <b>Decision:</b> the session owns a <code>Mode</code> that every policy call carries; <code>Op::SetMode</code> and <code>ModeChanged</code> switch it with a system note for the model; plan mode refuses edits before rules; <code>propose_plan</code> ends plan mode on approval; names <code>read-only</code>/<code>auto</code> kept, commands ask in plan mode, no AI judge. <b>Consequences:</b> append-only is kept (notes only); a real "auto" arrives with the Phase 13 sandbox. Approved by the user.</p></div>
+    <div><div class="h"><code>ADR-043</code><b>Approval descriptions</b><span class="st">accepted</span></div><p><b>Context:</b> users could not judge commands they did not understand. <b>Decision:</b> command tools require a one-line <code>description</code>; <code>ApprovalRequested.summary</code> carries it; front-ends show it above the exact command. <b>Consequences:</b> it is the model's claim (an injection can make it lie), so the command is always shown and rules match only the command.</p></div>
   </div>
 </section>
 

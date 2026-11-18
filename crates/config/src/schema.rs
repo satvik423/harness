@@ -154,6 +154,8 @@ pub enum PolicyProfile {
     ReadOnly,
     /// Edit and run inside the project; ask to go further.
     Auto,
+    /// Start in plan mode: read only until the user approves a plan.
+    Plan,
     /// Never ask; deny what would need approval.
     Ci,
     /// No walls, no questions.

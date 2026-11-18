@@ -16,6 +16,7 @@ use crate::ledger::{money, tokens};
 use crate::markdown;
 use crate::slash::COMMANDS;
 use crate::slash::Slash;
+use harness_types::Mode;
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const DIM: Style = Style::new().fg(Color::DarkGray);
@@ -177,11 +178,23 @@ fn header(app: &App) -> Line<'static> {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(
-            " {} · {}{effort} · seg {} · {} · ",
-            app.view.persona, app.view.model, app.segment, app.view.profile
+            " {} · {}{effort} · seg {} · ",
+            app.view.persona, app.view.model, app.segment
         )),
+        Span::styled(app.view.mode.name(), mode_style(app.view.mode)),
+        Span::raw(" · "),
         Span::styled(short_id(&app.view.id.to_string()), DIM),
     ])
+}
+
+/// How a mode is drawn: plan and full stand out, so neither is missed.
+fn mode_style(mode: Mode) -> Style {
+    match mode {
+        Mode::ReadOnly => Style::new(),
+        Mode::Auto => ACCENT,
+        Mode::Plan => Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        Mode::Full => Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+    }
 }
 
 /// The first 8 characters of an id: enough to tell this project's sessions
@@ -254,9 +267,18 @@ struct Panel {
 fn prompt_panel(prompt: &Prompt) -> Panel {
     let (title, lines) = match prompt {
         Prompt::Approval {
-            reason, preview, ..
+            reason,
+            summary,
+            preview,
+            ..
         } => {
-            let mut lines = vec![Line::raw(reason.clone())];
+            // The description is the model's claim; the exact call is always
+            // shown under it, so the user judges what will actually run (ADR-043).
+            let mut lines: Vec<Line<'static>> = summary
+                .iter()
+                .map(|s| Line::styled(s.clone(), Style::new().add_modifier(Modifier::BOLD)))
+                .collect();
+            lines.push(Line::raw(reason.clone()));
             lines.extend(preview.iter().take(10).map(diff_line));
             let keys = Line::from(vec![
                 Span::raw(" "),
@@ -477,6 +499,7 @@ pub fn help_overlay() -> Overlay {
         ("Alt+Enter, Ctrl+J", "new line"),
         ("Esc, Ctrl+C", "interrupt the running task"),
         ("Ctrl+P", "pause at the next safe point"),
+        ("Shift+Tab", "next permission mode: read-only → auto → plan"),
         ("↑ / ↓", "earlier prompts (from the first / last line)"),
         (
             "mouse wheel, PgUp / PgDn, Shift+↑↓",
@@ -680,6 +703,42 @@ pub fn models_overlay(app: &App, models: &[harness_types::ModelRef]) -> Overlay 
     o
 }
 
+/// `/mode`: the permission modes; picking one switches to it (ADR-042).
+#[must_use]
+pub fn modes_overlay(app: &App) -> Overlay {
+    let mut lines = vec![
+        Line::raw(format!("Now: {}", app.view.mode)),
+        Line::default(),
+        Line::styled("Pick a mode (Shift+Tab also cycles them):", DIM),
+    ];
+    let mut picks = Vec::new();
+    for (i, mode) in Mode::ALL
+        .into_iter()
+        .filter(|m| *m != Mode::Full || app.view.full_access)
+        .enumerate()
+    {
+        picks.push(Pick {
+            line: lines.len(),
+            action: Action::Command(Slash::Mode(Some(mode.name().to_owned()))),
+        });
+        lines.push(Line::from(vec![
+            Span::raw(format!(" {} ", i + 1)),
+            Span::styled(format!("{:<10}", mode.name()), mode_style(mode)),
+            Span::raw(mode.describe()),
+        ]));
+    }
+    if !app.view.full_access {
+        lines.push(Line::default());
+        lines.push(Line::styled(
+            "full is available when harness starts with --dangerously-full-access",
+            DIM,
+        ));
+    }
+    let mut o = overlay("Modes", lines);
+    o.picks = picks;
+    o
+}
+
 /// `/sessions`: this project's sessions, most recently active first; picking
 /// one switches to it.
 #[must_use]
@@ -744,7 +803,8 @@ mod tests {
                 persona: "default".into(),
                 model: "openai/gpt-6-luna".parse().unwrap(),
                 effort: Some(Effort::High),
-                profile: "auto".into(),
+                mode: Mode::Auto,
+                full_access: false,
                 context_limit: 250_000,
                 priced: true,
                 cwd: "/proj".into(),
@@ -801,6 +861,7 @@ mod tests {
         app.prompt = Some(Prompt::Approval {
             id: harness_types::ApprovalId::new(),
             reason: "write src/auth.rs".into(),
+            summary: None,
             preview: vec![
                 DiffLine::Removed("x < y".into()),
                 DiffLine::Added("x <= y".into()),
@@ -843,15 +904,31 @@ mod tests {
         app.prompt = Some(Prompt::Approval {
             id: harness_types::ApprovalId::new(),
             reason: format!(
-                "write /{} (the read-only profile asks before writes)",
+                "write /{} (read-only mode asks before writes)",
                 "very-long-directory-name/".repeat(6)
             ),
+            summary: Some("Save the new login check".into()),
             preview: (0..20)
                 .map(|i| DiffLine::Added(format!("line {i}")))
                 .collect(),
         });
         let s = screen(&app, 60, 24);
         assert!(s.contains("[o]nce") && s.contains("[d]eny"), "{s}");
+    }
+
+    #[test]
+    fn the_approval_panel_puts_the_description_above_the_exact_command() {
+        let mut app = sample();
+        app.prompt = Some(Prompt::Approval {
+            id: harness_types::ApprovalId::new(),
+            reason: "run `find . -name '*.rs' | xargs wc -l`".into(),
+            summary: Some("Count the lines of Rust code".into()),
+            preview: vec![],
+        });
+        let s = screen(&app, 90, 24);
+        let said = s.find("Count the lines of Rust code").expect(&s);
+        let command = s.find("xargs wc -l").expect(&s);
+        assert!(said < command, "{s}");
     }
 
     #[test]

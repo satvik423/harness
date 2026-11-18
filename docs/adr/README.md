@@ -45,3 +45,5 @@ Each record states the context, the decision and its consequences. Records 0001â
 | [ADR-039](0039-attachments-as-reference-notes.md) | Attached files become reference notes until Phase 11 (user decision) | Accepted |
 | [ADR-040](0040-costs-debug-bodies-and-session-changes.md) | Costs in the runtime, debug bodies rebuilt from the log, session changes from snapshots | Accepted |
 | [ADR-041](0041-deleting-sessions.md) | Deleting sessions, and empty sessions left by the TUI | Accepted |
+| [ADR-042](0042-switchable-permission-modes.md) | Permission modes switch while a session runs; plan mode and `propose_plan` (user decision) | Accepted |
+| [ADR-043](0043-approval-descriptions.md) | Approvals show a one-line description written by the model, next to the exact command | Accepted |

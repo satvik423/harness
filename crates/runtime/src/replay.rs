@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use harness_context::{SegmentContext, SegmentFrame};
 use harness_ports::{BlobStore, EventLog, ModelRequest};
 use harness_protocol::{BlobOrText, Event, TaskState};
-use harness_types::{ContentBlock, Seq, SessionId, TaskId};
+use harness_types::{ContentBlock, Mode, Seq, SessionId, TaskId};
 
 use crate::RuntimeError;
 use crate::journal::Journal;
@@ -35,6 +35,8 @@ pub(crate) struct Rebuilt {
     pub(crate) started: BTreeSet<String>,
     /// Whether the latest task's input reached the log.
     pub(crate) task_input: bool,
+    /// The permission mode in force at the end of the log, if it says.
+    pub(crate) mode: Option<Mode>,
 }
 
 fn corrupt(seq: Seq, e: impl std::fmt::Display) -> RuntimeError {
@@ -89,6 +91,7 @@ async fn replay(
         round: None,
         started: BTreeSet::new(),
         task_input: false,
+        mode: None,
     };
     for logged in events {
         let seq = logged.envelope.seq;
@@ -110,6 +113,15 @@ async fn replay(
                 }
             }
             Event::SystemNote { text, .. } => segment(&mut out, seq)?.push_note(text),
+            Event::SessionOpened { mode, .. } => out.mode = mode.or(out.mode),
+            // Live, the note waits for the next user message only when a segment
+            // is open; a new segment's environment states the mode instead.
+            Event::ModeChanged { to, note, .. } => {
+                out.mode = Some(to);
+                if let Some(segment) = &mut out.segment {
+                    segment.push_note(note);
+                }
+            }
             Event::AssistantMessage { message, .. } => {
                 let has_calls = !message.tool_call_ids().is_empty();
                 segment(&mut out, seq)?

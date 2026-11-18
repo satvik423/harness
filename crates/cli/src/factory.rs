@@ -11,7 +11,7 @@ use harness_ports::{Provider, SystemClock};
 use harness_runtime::{ModelPrice, RuntimeDeps};
 use harness_store_sqlite::SqliteStore;
 use harness_tools::{MemoryReadLedger, Unsandboxed};
-use harness_types::ModelRef;
+use harness_types::{Mode, ModelRef};
 
 use crate::wiring::{PolicyInputs, WiringError, build_policy};
 
@@ -29,6 +29,8 @@ pub struct SessionFactory {
     pub approval: Option<ApprovalPolicy>,
     /// `--dangerously-full-access`.
     pub full_access: bool,
+    /// `--mode`: the mode to start in (a resumed session switches to it).
+    pub mode: Option<Mode>,
     /// The project's store.
     pub store: Arc<SqliteStore>,
 }
@@ -96,17 +98,22 @@ impl SessionFactory {
             })
     }
 
-    /// The profile name shown in the TUI header.
-    #[must_use]
-    pub fn profile_name(&self) -> &'static str {
-        if self.full_access {
-            return "full";
-        }
-        match self.config.policy.profile {
-            PolicyProfile::ReadOnly => "read-only",
-            PolicyProfile::Auto => "auto",
-            PolicyProfile::Ci => "ci",
-            PolicyProfile::Full => "full",
+    /// The mode a new session starts in: `--mode`, else `full` with
+    /// `--dangerously-full-access`, else the configured profile's mode.
+    ///
+    /// # Errors
+    /// [`WiringError::FullModeNotConfirmed`] for `--mode full` without the flag.
+    pub fn start_mode(&self) -> Result<Mode, WiringError> {
+        match (self.mode, self.full_access) {
+            (Some(Mode::Full), false) => Err(WiringError::FullModeNotConfirmed),
+            (Some(mode), _) => Ok(mode),
+            (None, true) => Ok(Mode::Full),
+            (None, false) => Ok(match self.config.policy.profile {
+                PolicyProfile::ReadOnly => Mode::ReadOnly,
+                PolicyProfile::Auto | PolicyProfile::Ci => Mode::Auto,
+                PolicyProfile::Plan => Mode::Plan,
+                PolicyProfile::Full => Mode::Full,
+            }),
         }
     }
 
@@ -140,6 +147,7 @@ mod tests {
             trusted: false,
             approval: None,
             full_access: false,
+            mode: None,
             store: Arc::new(SqliteStore::open(dir).unwrap()),
         }
     }
@@ -163,9 +171,9 @@ mod tests {
     }
 
     #[test]
-    fn models_start_with_the_default_and_profiles_have_names() {
+    fn models_start_with_the_default() {
         let dir = tempfile::tempdir().unwrap();
-        let mut f = factory(dir.path());
+        let f = factory(dir.path());
         let models = f.models();
         assert_eq!(models[0], f.config.default_model);
         assert_eq!(
@@ -175,8 +183,24 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(f.profile_name(), "auto");
+    }
+
+    #[test]
+    fn the_start_mode_comes_from_the_flag_then_full_access_then_the_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut f = factory(dir.path());
+        assert_eq!(f.start_mode().unwrap(), Mode::Auto);
+        f.config.policy.profile = PolicyProfile::Plan;
+        assert_eq!(f.start_mode().unwrap(), Mode::Plan);
         f.full_access = true;
-        assert_eq!(f.profile_name(), "full");
+        assert_eq!(f.start_mode().unwrap(), Mode::Full);
+        f.mode = Some(Mode::ReadOnly);
+        assert_eq!(f.start_mode().unwrap(), Mode::ReadOnly);
+        f.full_access = false;
+        f.mode = Some(Mode::Full);
+        assert!(matches!(
+            f.start_mode(),
+            Err(WiringError::FullModeNotConfirmed)
+        ));
     }
 }

@@ -18,7 +18,7 @@ use harness_provider_openai::OpenAiSettings;
 use harness_runtime::{
     ApprovalMode, Resumed, RuntimeDeps, SessionConfig, SessionHandle, resume_session, spawn_session,
 };
-use harness_types::{QuestionId, SessionId, TaskId};
+use harness_types::{Mode, QuestionId, SessionId, TaskId};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 use tokio::sync::{Notify, broadcast, mpsc};
 
@@ -51,6 +51,13 @@ pub struct RunOptions {
     pub price: Option<harness_runtime::ModelPrice>,
     /// Working directory.
     pub cwd: PathBuf,
+    /// The permission mode a new session starts in (ADR-042).
+    pub mode: Mode,
+    /// Whether `--mode` was given: a resumed session then switches to `mode`
+    /// instead of keeping its own.
+    pub mode_given: bool,
+    /// Whether `full` mode may be chosen (`--dangerously-full-access`).
+    pub full_access: bool,
 }
 
 /// Which session to drive.
@@ -143,6 +150,8 @@ pub async fn execute(
             ApprovalArg::OnRequest => ApprovalMode::Ask,
             ApprovalArg::Never => ApprovalMode::Never,
         },
+        mode: options.mode,
+        full_access: options.full_access,
         max_turns: options.max_turns,
         output_cap_tokens: options.output_cap_tokens,
         max_parallel_tools: options.max_parallel_tools,
@@ -235,6 +244,15 @@ pub async fn execute(
             return Ok(code);
         }
     };
+    if options.mode_given && matches!(target, Target::Existing(_)) {
+        handle
+            .send(Op::SetMode {
+                session,
+                mode: options.mode,
+            })
+            .await
+            .map_err(std::io::Error::other)?;
+    }
     handle.send(first).await.map_err(std::io::Error::other)?;
     let mut code = drive(
         &handle,
@@ -322,8 +340,12 @@ async fn drive(
                     Event::UserInput { task, .. } if interrupted => {
                         let _ = handle.send(Op::Interrupt { task: *task }).await;
                     }
-                    Event::ApprovalRequested { id, reason, .. } => {
+                    Event::ApprovalRequested { id, reason, summary, .. } => {
                         if !options.json {
+                            // The model's description first, then the exact call (ADR-043).
+                            if let Some(summary) = summary {
+                                writeln!(io.err, "  {summary}")?;
+                            }
                             write!(io.err, "Allow {reason}? {APPROVAL_CHOICES}: ")?;
                             io.err.flush()?;
                         }
@@ -410,7 +432,7 @@ async fn answer(
             request: id,
             answer: match &line {
                 Some(line) => parse_answer(line, &options, multi),
-                None => "(no answer: the input was closed)".into(),
+                None => harness_ports::NO_ANSWER.into(),
             },
         },
     };
@@ -564,6 +586,9 @@ mod tests {
             approval,
             price: None,
             cwd: dir.to_path_buf(),
+            mode: Mode::Auto,
+            mode_given: false,
+            full_access: false,
         };
         let code = run_session(
             options,
@@ -614,7 +639,11 @@ mod tests {
     async fn approved_shell_command_runs() {
         let dir = tempfile::tempdir().unwrap();
         let fake = FakeProvider::new()
-            .with_tool_call_turn("c1", "shell", &json!({"command": "echo approved-run"}))
+            .with_tool_call_turn(
+                "c1",
+                "shell",
+                &json!({"command": "echo approved-run", "description": "Print a word"}),
+            )
             .with_text_turn("Done.");
         let (code, o) = run(
             fake.clone(),
@@ -627,7 +656,7 @@ mod tests {
         assert_eq!(code, exit::OK);
         assert!(
             o.err.text().contains(
-                "Allow run `echo approved-run` (commands run without a sandbox)? [y]es once"
+                "  Print a word\nAllow run `echo approved-run` (commands run without a sandbox)? [y]es once"
             ),
             "{}",
             o.err.text()

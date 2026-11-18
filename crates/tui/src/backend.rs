@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use harness_ports::{Effort, TaskRecord};
 use harness_protocol::{Envelope, Op, TaskState};
-use harness_types::{ModelRef, SessionId};
+use harness_types::{Mode, ModelRef, SessionId};
 use tokio::sync::broadcast;
 
 /// What the TUI shows about the current session.
@@ -20,8 +20,11 @@ pub struct SessionView {
     pub model: ModelRef,
     /// The session's effort, if set.
     pub effort: Option<Effort>,
-    /// Policy profile name (`auto`, `read-only`, …).
-    pub profile: String,
+    /// The permission mode the session starts in; `ModeChanged` events in its
+    /// history and live update it (ADR-042).
+    pub mode: Mode,
+    /// Whether `full` mode may be chosen (`--dangerously-full-access`).
+    pub full_access: bool,
     /// Input tokens at which the context counts as full (`context.compact_at_tokens`).
     pub context_limit: u64,
     /// Whether the model has a price in the config (else costs show `$?`).

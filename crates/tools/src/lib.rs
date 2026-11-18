@@ -9,12 +9,18 @@
 //!   (parser and planner in [`patch`])
 //! - [`Glob`] (`glob`), [`Grep`] (`grep`): gitignore-aware search on the ripgrep libraries
 //! - [`Todo`] (`todo`): the model's checklist; [`AskUser`] (`ask_user`): ask the user
+//! - [`ProposePlan`] (`propose_plan`): in plan mode, ask the user to approve a plan
+//!   and leave plan mode when they do (ADR-042)
 //! - [`PtyStart`], [`PtyWrite`], [`PtyRead`], [`PtyKill`]: interactive programs on
 //!   pseudo-terminals, owned by a [`PtyManager`]
 //!
+//! - [`Shell`] (`shell`): `/bin/sh -c` in its own process group, live output, timeout
+//!
+//! Command tools ask the model for a one-line `description` ([`DESCRIPTION_FIELD`])
+//! that front-ends show in approvals, next to the exact command (ADR-043).
+//!
 //! File contents are returned inside an `<untrusted>` wrapper
 //! ([`harness_ports::wrap_untrusted`]): data, never instructions.
-//! - [`Shell`] (`shell`): `/bin/sh -c` in its own process group, live output, timeout
 //!
 //! Support implementations of the ports: [`MemoryReadLedger`],
 //! [`MemoryBlobStore`] and [`Unsandboxed`].
@@ -27,8 +33,8 @@
 //! assert_eq!(
 //!     names,
 //!     [
-//!         "apply_patch", "ask_user", "edit_file", "glob", "grep", "pty_kill", "pty_read",
-//!         "pty_start", "pty_write", "read_file", "shell", "todo", "write_file"
+//!         "apply_patch", "ask_user", "edit_file", "glob", "grep", "propose_plan", "pty_kill",
+//!         "pty_read", "pty_start", "pty_write", "read_file", "shell", "todo", "write_file"
 //!     ]
 //! );
 //! ```
@@ -41,6 +47,7 @@ mod fs_write;
 mod glob;
 mod grep;
 pub mod patch;
+mod propose_plan;
 mod pty;
 mod read_file;
 mod shell;
@@ -57,6 +64,7 @@ pub use edit_file::EditFile;
 pub use glob::{Glob, MAX_GLOB_RESULTS};
 pub use grep::{Grep, MAX_GREP_LINES};
 pub use patch::ApplyPatch;
+pub use propose_plan::{PLAN_CHOICES, ProposePlan};
 pub use pty::{
     MAX_PTY_BUFFER, MAX_PTY_SESSIONS, MAX_PTY_WAIT_MS, PtyKill, PtyManager, PtyRead, PtyStart,
     PtyWrite, pty_tools,
@@ -66,6 +74,12 @@ pub use shell::{DEFAULT_TIMEOUT_S, MAX_KEPT_BYTES, MAX_TIMEOUT_S, Shell};
 pub use support::{MemoryBlobStore, MemoryReadLedger, Unsandboxed, stamp_of};
 pub use todo::Todo;
 pub use write_file::WriteFile;
+
+/// Schema text of the `description` field that command tools ask for: one
+/// plain line the user reads before approving (ADR-043). It is the model's own
+/// claim, so front-ends always show the exact command next to it.
+pub const DESCRIPTION_FIELD: &str = "One short line in plain words for the user deciding \
+    whether to approve, for example 'Run the login tests'. Say what it does and why.";
 
 /// A registry holding every built-in tool.
 ///
@@ -82,6 +96,7 @@ pub fn builtin_registry() -> Result<ToolRegistry, DuplicateTool> {
     registry.register(Arc::new(Shell))?;
     registry.register(Arc::new(Todo))?;
     registry.register(Arc::new(AskUser))?;
+    registry.register(Arc::new(ProposePlan))?;
     for tool in pty_tools(&Arc::new(PtyManager::default())) {
         registry.register(tool)?;
     }
@@ -117,6 +132,7 @@ pub(crate) mod test_support {
             writable_roots: vec![dir.to_path_buf()],
             user: Arc::new(harness_ports::NoUser),
             snapshots: Arc::new(harness_ports::NoSnapshots),
+            mode: Arc::new(harness_ports::FixedMode(harness_types::Mode::Auto)),
         };
         (ctx, sink, ledger)
     }
@@ -143,6 +159,31 @@ pub(crate) mod test_support {
                 .unwrap()
                 .push((path.to_path_buf(), current.map(<[u8]>::to_vec)));
             Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_tools_ask_for_a_one_line_description() {
+        let registry = builtin_registry().unwrap();
+        for spec in registry.specs() {
+            let schema = &spec.input_schema;
+            let wants = ["shell", "pty_start", "pty_write"].contains(&spec.name.as_str());
+            let has = schema["properties"]["description"].is_object();
+            assert_eq!(has, wants, "{}", spec.name.as_str());
+            if wants {
+                let required: Vec<&str> = schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .collect();
+                assert!(required.contains(&"description"), "{}", spec.name.as_str());
+            }
         }
     }
 }

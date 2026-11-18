@@ -31,9 +31,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::approval::{Approvals, Questions};
 use crate::journal::Journal;
+use crate::mode::SessionMode;
 use crate::snapshots::TurnSnapshots;
 use crate::user::{SessionUser, transition};
 use crate::{ApprovalMode, RuntimeDeps};
+use harness_ports::ModeControl as _;
 
 /// Why a task was asked to stop early.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +126,9 @@ pub(crate) struct TaskCtx {
     pub(crate) journal: Arc<Journal>,
     pub(crate) approvals: Arc<Approvals>,
     pub(crate) questions: Arc<Questions>,
+    /// The session's permission mode; read on every call, so a switch applies
+    /// from the next call even while the task runs.
+    pub(crate) mode: Arc<SessionMode>,
     pub(crate) cancel: CancellationToken,
     pub(crate) stop: StopSlot,
     pub(crate) pause: Arc<PauseFlag>,
@@ -223,6 +228,9 @@ pub(crate) async fn run_task(
                 format!("started with persona {persona}"),
             )
             .await;
+            for note in ctx.mode.take_notes() {
+                segment.push_note(note);
+            }
             if let Err(e) = segment.push_user(input) {
                 ctx.internal_error(e.to_string()).await;
                 return finish(
@@ -543,6 +551,7 @@ fn assess(
         risk: risk.clone(),
         cwd: risk_ctx.cwd.clone(),
         writable_roots: risk_ctx.writable_roots.clone(),
+        mode: ctx.mode.current(),
     };
     let assessed = match ctx.deps.policy.evaluate(&call) {
         Verdict::Allow { reason } => {
@@ -760,6 +769,7 @@ fn tool_ctx(ctx: &TaskCtx, risk_ctx: &RiskCtx, id: &str, turn: Seq) -> ToolCtx {
             blobs: Arc::clone(&ctx.deps.blobs),
             store: Arc::clone(&ctx.deps.snapshots),
         }),
+        mode: Arc::clone(&ctx.mode) as _,
     }
 }
 
@@ -921,6 +931,31 @@ async fn record_result(
     })
 }
 
+/// Longest approval summary kept, in characters.
+const MAX_SUMMARY_CHARS: usize = 120;
+
+/// The call's `description` input on one line, for the approval panel (ADR-043).
+///
+/// Any tool's `description` string counts, so MCP tools that ask for one get it
+/// too. Squeezed and cut here so every front-end shows the same line.
+fn summary_of(input: &serde_json::Value) -> Option<String> {
+    let line = input
+        .get("description")?
+        .as_str()?
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if line.is_empty() {
+        return None;
+    }
+    Some(if line.chars().count() > MAX_SUMMARY_CHARS {
+        let cut: String = line.chars().take(MAX_SUMMARY_CHARS - 1).collect();
+        format!("{cut}…")
+    } else {
+        line
+    })
+}
+
 /// Asks the user about one call (or refuses under [`ApprovalMode::Never`]), and
 /// remembers session and permanent grants with the policy.
 async fn approve(
@@ -948,6 +983,7 @@ async fn approve(
         task: ctx.task,
         call_id: call_id.to_owned(),
         reason: reason.to_owned(),
+        summary: summary_of(&call.input),
     })
     .await?;
     let decision = tokio::select! {
@@ -1051,4 +1087,20 @@ async fn provider_failure(ctx: &TaskCtx, e: &ProviderError) -> End {
     })
     .await;
     End::Failed(format!("provider error: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn summaries_are_one_trimmed_line_cut_at_the_limit() {
+        assert_eq!(summary_of(&json!({"command": "ls"})), None);
+        assert_eq!(summary_of(&json!({"description": " \n "})), None);
+        assert_eq!(summary_of(&json!({"description": 3})), None);
+        let long = summary_of(&json!({"description": "word ".repeat(60)})).unwrap();
+        assert_eq!(long.chars().count(), MAX_SUMMARY_CHARS);
+        assert!(long.ends_with('…'));
+    }
 }
