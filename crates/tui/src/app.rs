@@ -5,15 +5,15 @@
 
 use std::path::{Path, PathBuf};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
 use harness_ports::Effort;
 use harness_protocol::{Decision, Envelope, Event, InputItem, Op, RuleScope, TaskState};
-use harness_types::{ApprovalId, ContentBlock, Message, ModelRef, QuestionId, TaskId};
+use harness_types::{ApprovalId, ContentBlock, Message, ModelRef, QuestionId, SessionId, TaskId};
 use ratatui::text::Line;
 use ratatui_textarea::TextArea;
 use serde_json::Value;
 
-use crate::backend::{Attached, SessionView};
+use crate::backend::{Attached, SessionSummary, SessionView};
 use crate::diff::{DiffLine, patch_lines, unified};
 use crate::ledger::Ledger;
 use crate::slash::{Slash, parse};
@@ -22,6 +22,8 @@ use crate::slash::{Slash, parse};
 const PREVIEW_LINES: usize = 40;
 /// Live output kept per tool card (the tail).
 const LIVE_CHARS: usize = 4_000;
+/// Result lines kept on a finished command's card.
+const COMMAND_RESULT_LINES: usize = 5;
 
 /// How serious a notice is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,8 +49,9 @@ pub struct ToolCard {
     pub live: String,
     /// `None` while running, then whether it succeeded.
     pub ok: Option<bool>,
-    /// The last line of the result.
-    pub result: String,
+    /// The end of the result: the last lines of a command's output, or the
+    /// last line for other tools.
+    pub result: Vec<String>,
     /// Diff preview for file changes.
     pub preview: Vec<DiffLine>,
     /// Checklist items for `todo` (`status`, `text`).
@@ -71,6 +74,9 @@ pub enum Item {
         text: String,
         /// `false` while streaming.
         done: bool,
+        /// The rendered Markdown, made once when the reply is done (a streaming
+        /// reply is rendered on each frame), so long sessions stay fast.
+        rendered: Vec<Line<'static>>,
     },
     /// A reasoning summary.
     Thinking(String),
@@ -83,6 +89,19 @@ pub enum Item {
         /// The message.
         text: String,
     },
+}
+
+impl Item {
+    /// A finished reply, rendered.
+    #[must_use]
+    pub fn assistant_done(text: impl Into<String>) -> Self {
+        let text = text.into();
+        Self::Assistant {
+            rendered: crate::markdown::render(&text),
+            text,
+            done: true,
+        }
+    }
 }
 
 /// A question waiting for the user.
@@ -135,6 +154,19 @@ pub struct Overlay {
     pub lines: Vec<Line<'static>>,
     /// First visible line.
     pub scroll: u16,
+    /// Lines that can be picked (`/sessions`, `/model`); empty for plain panels.
+    pub picks: Vec<Pick>,
+    /// The highlighted pick.
+    pub selected: usize,
+}
+
+/// A line of an [`Overlay`] that does something when picked.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pick {
+    /// Index into [`Overlay::lines`].
+    pub line: usize,
+    /// What picking it does.
+    pub action: Action,
 }
 
 /// Something the run loop must do.
@@ -151,6 +183,8 @@ pub enum Action {
         /// Effort.
         effort: Option<Effort>,
     },
+    /// Switch to a stored session.
+    OpenSession(SessionId),
     /// Leave harness.
     Quit,
 }
@@ -203,7 +237,18 @@ pub struct App {
     pub tick: u64,
     /// Set when the user asked to leave.
     pub quit: bool,
+    /// Earlier prompts, oldest first.
+    pub prompts: Vec<String>,
+    /// Which earlier prompt the input shows (`None`: the user's own draft).
+    recalled: Option<usize>,
+    /// What was typed before ↑ started recalling.
+    draft: String,
 }
+
+/// Earlier prompts kept for ↑.
+pub const PROMPT_HISTORY: usize = 500;
+/// Lines one notch of the mouse wheel scrolls.
+pub const WHEEL_LINES: u16 = 3;
 
 /// Input box placeholder.
 pub const PLACEHOLDER: &str = "Ask anything · /help for commands · Alt+Enter for a new line";
@@ -336,6 +381,9 @@ impl App {
             show_thinking,
             tick: 0,
             quit: false,
+            prompts: attached.prompts.clone(),
+            recalled: None,
+            draft: String::new(),
         };
         for envelope in &attached.history {
             app.replay(envelope);
@@ -349,6 +397,58 @@ impl App {
         let focused = self.focused;
         *self = Self::new(attached, keep_thinking);
         self.focused = focused;
+    }
+
+    /// Shows `text` in the input box with the cursor at its end.
+    fn set_input(&mut self, text: &str) {
+        self.input = new_input();
+        self.input.insert_str(text);
+    }
+
+    /// ↑ on the first line of the input: the previous prompt.
+    fn recall_older(&mut self) -> bool {
+        let next = match self.recalled {
+            None if self.prompts.is_empty() => return false,
+            None => {
+                self.draft = self.input.lines().join("\n");
+                self.prompts.len() - 1
+            }
+            Some(i) => i.saturating_sub(1),
+        };
+        self.recalled = Some(next);
+        let text = self.prompts[next].clone();
+        self.set_input(&text);
+        true
+    }
+
+    /// ↓ on the last line of the input: the next prompt, then the draft.
+    fn recall_newer(&mut self) -> bool {
+        let Some(i) = self.recalled else {
+            return false;
+        };
+        if i + 1 < self.prompts.len() {
+            self.recalled = Some(i + 1);
+            let text = self.prompts[i + 1].clone();
+            self.set_input(&text);
+        } else {
+            self.recalled = None;
+            let draft = std::mem::take(&mut self.draft);
+            self.set_input(&draft);
+        }
+        true
+    }
+
+    /// Adds a sent prompt to the history (not twice in a row).
+    fn remember(&mut self, prompt: &str) {
+        self.recalled = None;
+        self.draft.clear();
+        if self.prompts.last().map(String::as_str) != Some(prompt) {
+            self.prompts.push(prompt.to_owned());
+        }
+        if self.prompts.len() > PROMPT_HISTORY {
+            let extra = self.prompts.len() - PROMPT_HISTORY;
+            self.prompts.drain(..extra);
+        }
     }
 
     fn notice(&mut self, level: Level, text: impl Into<String>) {
@@ -403,10 +503,12 @@ impl App {
                 Some(Item::Assistant {
                     text: t,
                     done: false,
+                    ..
                 }) => t.push_str(text),
                 _ => self.items.push(Item::Assistant {
                     text: text.clone(),
                     done: false,
+                    rendered: Vec::new(),
                 }),
             },
             Event::ThinkingDelta { text, .. } if self.show_thinking => {
@@ -418,20 +520,21 @@ impl App {
             Event::AssistantMessage { message, .. } => {
                 let text = message.text();
                 match self.items.last_mut() {
-                    Some(Item::Assistant { text: t, done }) if !*done => {
-                        *t = text;
-                        *done = true;
+                    Some(last @ Item::Assistant { done: false, .. }) => {
+                        *last = Item::assistant_done(text);
                     }
-                    _ if !text.is_empty() => self.items.push(Item::Assistant { text, done: true }),
+                    _ if !text.is_empty() => self.items.push(Item::assistant_done(text)),
                     _ => {}
                 }
             }
             Event::AssistantAborted { .. } => {
-                if let Some(Item::Assistant { text, done }) = self.items.last_mut()
-                    && !*done
+                if let Some(last) = self.items.last_mut()
+                    && let Item::Assistant {
+                        text, done: false, ..
+                    } = last
                 {
-                    text.push_str(" ⏹");
-                    *done = true;
+                    let text = format!("{text} ⏹");
+                    *last = Item::assistant_done(text);
                 }
             }
             Event::ToolCall {
@@ -464,7 +567,7 @@ impl App {
                         summary: summarize(name, input),
                         live: String::new(),
                         ok: None,
-                        result: String::new(),
+                        result: Vec::new(),
                         preview,
                         todo,
                     }));
@@ -493,20 +596,31 @@ impl App {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                let last = text
+                let mut tail: Vec<String> = text
                     .lines()
                     .rev()
-                    .map(str::trim)
-                    .find(|l| !l.is_empty() && *l != "</untrusted>")
-                    .unwrap_or("")
-                    .to_owned();
+                    .map(str::trim_end)
+                    .filter(|l| {
+                        !l.trim().is_empty()
+                            && *l != "</untrusted>"
+                            && !l.starts_with("<untrusted source=")
+                    })
+                    .take(COMMAND_RESULT_LINES)
+                    .map(str::to_owned)
+                    .collect();
+                tail.reverse();
                 match self.card(call_id) {
                     Some(card) => {
+                        let command =
+                            matches!(card.name.as_str(), "shell" | "pty_read" | "pty_kill");
+                        if !command && tail.len() > 1 {
+                            tail.drain(..tail.len() - 1);
+                        }
                         card.ok = Some(*ok);
-                        card.result = last;
+                        card.result = tail;
                     }
                     // A call refused before it was announced (unknown tool).
-                    None => self.notice(Level::Warning, last),
+                    None => self.notice(Level::Warning, tail.pop().unwrap_or_default()),
                 }
             }
             Event::ApprovalRequested {
@@ -617,35 +731,137 @@ impl App {
         }
     }
 
+    /// Handles a mouse event (only the wheel does something): scrolls the open
+    /// panel, else the transcript.
+    pub fn mouse(&mut self, event: MouseEvent) {
+        let up = match event.kind {
+            MouseEventKind::ScrollUp => true,
+            MouseEventKind::ScrollDown => false,
+            _ => return,
+        };
+        let scroll = match &mut self.overlay {
+            Some(overlay) => &mut overlay.scroll,
+            // The transcript counts lines back from the bottom: up means more.
+            None => {
+                self.scroll_back = if up {
+                    self.scroll_back.saturating_add(WHEEL_LINES)
+                } else {
+                    self.scroll_back.saturating_sub(WHEEL_LINES)
+                };
+                return;
+            }
+        };
+        *scroll = if up {
+            scroll.saturating_sub(WHEEL_LINES)
+        } else {
+            scroll.saturating_add(WHEEL_LINES)
+        };
+    }
+
     /// Handles a key press.
     #[allow(clippy::too_many_lines)]
     pub fn key(&mut self, key: KeyEvent) -> Vec<Action> {
         if key.kind == KeyEventKind::Release {
             return Vec::new();
         }
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
-        if let Some(overlay) = &mut self.overlay {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => self.overlay = None,
-                KeyCode::Down | KeyCode::Char('j') => {
-                    overlay.scroll = overlay.scroll.saturating_add(1)
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    overlay.scroll = overlay.scroll.saturating_sub(1)
-                }
-                KeyCode::PageDown | KeyCode::Char(' ') => {
-                    overlay.scroll = overlay.scroll.saturating_add(10)
-                }
-                KeyCode::PageUp => overlay.scroll = overlay.scroll.saturating_sub(10),
-                KeyCode::Char('c') if ctrl => self.overlay = None,
-                _ => {}
-            }
-            return Vec::new();
+        if self.overlay.is_some() {
+            return self.overlay_key(key);
         }
         if let Some(actions) = self.prompt_key(key) {
             return actions;
         }
+        self.input_key(key)
+    }
+
+    /// Keys while an overlay is open: scrolling, and choosing for pickers.
+    fn overlay_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let Some(overlay) = &mut self.overlay else {
+            return Vec::new();
+        };
+        if !overlay.picks.is_empty() {
+            let last = overlay.picks.len() - 1;
+            let chosen = match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    overlay.selected = overlay.selected.saturating_sub(1);
+                    let line = u16::try_from(overlay.picks[overlay.selected].line).unwrap_or(0);
+                    overlay.scroll = overlay.scroll.min(line);
+                    return Vec::new();
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    overlay.selected = (overlay.selected + 1).min(last);
+                    return Vec::new();
+                }
+                KeyCode::Enter => Some(overlay.selected),
+                KeyCode::Char(c @ '1'..='9') => c
+                    .to_digit(10)
+                    .and_then(|d| usize::try_from(d).ok())
+                    .map(|d| d - 1)
+                    .filter(|&i| i <= last),
+                _ => None,
+            };
+            if let Some(i) = chosen {
+                let action = overlay.picks[i].action.clone();
+                self.overlay = None;
+                return self.pick(action);
+            }
+        }
+        let Some(overlay) = &mut self.overlay else {
+            return Vec::new();
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.overlay = None,
+            KeyCode::Down | KeyCode::Char('j') => overlay.scroll = overlay.scroll.saturating_add(1),
+            KeyCode::Up | KeyCode::Char('k') => overlay.scroll = overlay.scroll.saturating_sub(1),
+            KeyCode::PageDown | KeyCode::Char(' ') => {
+                overlay.scroll = overlay.scroll.saturating_add(10)
+            }
+            KeyCode::PageUp => overlay.scroll = overlay.scroll.saturating_sub(10),
+            KeyCode::Char('c') if ctrl => self.overlay = None,
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    /// What picking an overlay line does; switching sessions is refused
+    /// while a task runs.
+    fn pick(&mut self, action: Action) -> Vec<Action> {
+        match action {
+            Action::OpenSession(id) if id == self.view.id => {
+                self.notice(Level::Info, "you are in this session already");
+                Vec::new()
+            }
+            Action::OpenSession(_) if self.busy() => {
+                self.notice(
+                    Level::Warning,
+                    "wait for the task (or interrupt it) before switching sessions",
+                );
+                Vec::new()
+            }
+            other => vec![other],
+        }
+    }
+
+    /// On a new session: mention the most recent other one, and how to get back to it.
+    pub fn hint_last_session(&mut self, sessions: &[SessionSummary], now_ms: i64) {
+        let Some(last) = sessions.iter().find(|s| s.id != self.view.id) else {
+            return;
+        };
+        let title = last.title.as_deref().unwrap_or("(no prompt yet)");
+        self.notice(
+            Level::Info,
+            format!(
+                "last session: “{}” · {} · /sessions to switch, or `harness -c` to start in it",
+                crate::view::shorten(title, 60),
+                crate::view::ago(now_ms, last.last_active)
+            ),
+        );
+    }
+
+    /// Keys for the input box (no overlay or prompt took them).
+    fn input_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
             KeyCode::Char('c') if ctrl => {
                 if self.busy() {
@@ -683,6 +899,12 @@ impl App {
             }
             KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.scroll_back = self.scroll_back.saturating_sub(1);
+                Vec::new()
+            }
+            KeyCode::Up if self.input.cursor().0 == 0 && self.recall_older() => Vec::new(),
+            KeyCode::Down
+                if self.input.cursor().0 + 1 >= self.input.lines().len() && self.recall_newer() =>
+            {
                 Vec::new()
             }
             KeyCode::Enter if alt || key.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -869,6 +1091,8 @@ impl App {
             return Vec::new();
         }
         if let Some(parsed) = parse(trimmed) {
+            let typed = trimmed.to_owned();
+            self.remember(&typed);
             self.input = new_input();
             return match parsed {
                 Ok(slash) => self.command(slash),
@@ -896,6 +1120,10 @@ impl App {
                 .drain(..)
                 .map(|path| InputItem::File { path }),
         );
+        if !trimmed.is_empty() {
+            let prompt = trimmed.to_owned();
+            self.remember(&prompt);
+        }
         self.input = new_input();
         self.scroll_back = 0;
         vec![Action::Send(Op::Submit {
@@ -1008,7 +1236,11 @@ impl App {
                 self.quit = true;
                 vec![Action::Quit]
             }
-            other @ (Slash::Model(None) | Slash::Effort(None) | Slash::Tasks | Slash::Diff) => {
+            other @ (Slash::Model(None)
+            | Slash::Effort(None)
+            | Slash::Tasks
+            | Slash::Diff
+            | Slash::Sessions) => {
                 vec![Action::Command(other)]
             }
         }
@@ -1018,6 +1250,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::SessionSummary;
     use harness_protocol::BlobOrText;
     use harness_types::{Risk, Seq, SessionId, Usage};
     use tokio::sync::broadcast;
@@ -1037,6 +1270,7 @@ mod tests {
             },
             events: rx,
             history: Vec::new(),
+            prompts: Vec::new(),
         }
     }
 
@@ -1126,7 +1360,8 @@ mod tests {
             app.items[1],
             Item::Assistant {
                 text: "Hello".into(),
-                done: false
+                done: false,
+                rendered: Vec::new(),
             }
         );
         app.apply(&env(Event::AssistantMessage {
@@ -1140,8 +1375,10 @@ mod tests {
             app.items[1],
             Item::Assistant {
                 text: "Hello!".into(),
-                done: true
-            }
+                done: true,
+                rendered: crate::markdown::render("Hello!"),
+            },
+            "a finished reply is rendered once"
         );
     }
 
@@ -1169,16 +1406,47 @@ mod tests {
             full: BlobOrText::Text {
                 text: String::new(),
             },
-            sent: vec![ContentBlock::text("ok\n[exit code 0]")],
+            sent: vec![ContentBlock::text(
+                "<untrusted source=\"shell\">\nrunning 3 tests\ntest a ... ok\ntest b ... ok\n\ntest c ... ok\ntest result: ok. 3 passed\n[exit code 0]\n</untrusted>",
+            )],
         }));
         let Item::Tool(card) = &app.items[1] else {
             panic!()
         };
+        assert_eq!((card.summary.as_str(), card.ok), ("cargo test", Some(true)));
         assert_eq!(
-            (card.summary.as_str(), card.ok, card.result.as_str()),
-            ("cargo test", Some(true), "[exit code 0]")
+            card.result,
+            [
+                "test a ... ok",
+                "test b ... ok",
+                "test c ... ok",
+                "test result: ok. 3 passed",
+                "[exit code 0]"
+            ],
+            "a finished command keeps its last lines"
         );
         assert_eq!(card.live, "running 3 tests\n");
+
+        // Other tools keep one line.
+        app.apply(&env(Event::ToolCall {
+            task,
+            id: "c2".into(),
+            name: "read_file".into(),
+            input: serde_json::json!({"path": "a.rs"}),
+            risk: Risk::ReadOnly { paths: vec![] },
+        }));
+        app.apply(&env(Event::ToolFinished {
+            call_id: "c2".into(),
+            ok: true,
+            full: BlobOrText::Text {
+                text: String::new(),
+            },
+            sent: vec![ContentBlock::text("1 fn a() {}\n2 fn b() {}")],
+        }));
+        let Item::Tool(card) = &app.items[2] else {
+            panic!()
+        };
+        assert_eq!(card.result, ["2 fn b() {}"]);
     }
 
     #[test]
@@ -1454,6 +1722,179 @@ mod tests {
             }
         );
         assert!(app.prompt.is_none());
+    }
+
+    fn summary(title: &str, minutes_ago: i64) -> SessionSummary {
+        SessionSummary {
+            id: SessionId::new(),
+            title: Some(title.into()),
+            last_active: NOW - minutes_ago * 60_000,
+            state: Some(TaskState::Completed),
+        }
+    }
+
+    const NOW: i64 = 1_800_000_000_000;
+
+    #[test]
+    fn the_sessions_picker_opens_a_session_by_arrows_enter_or_number() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(&attached(dir.path()), false);
+        let mut current = summary("this one", 0);
+        current.id = app.view.id;
+        let list = vec![current, summary("login bug", 30), summary("readme", 600)];
+        assert_eq!(
+            app.command(Slash::Sessions),
+            [Action::Command(Slash::Sessions)]
+        );
+
+        app.overlay = Some(crate::view::sessions_overlay(&app, &list, NOW));
+        app.key(key(KeyCode::Down));
+        app.key(key(KeyCode::Down));
+        app.key(key(KeyCode::Up));
+        assert_eq!(
+            app.key(key(KeyCode::Enter)),
+            [Action::OpenSession(list[1].id)]
+        );
+        assert!(app.overlay.is_none(), "picking closes the list");
+
+        app.overlay = Some(crate::view::sessions_overlay(&app, &list, NOW));
+        assert_eq!(
+            app.key(key(KeyCode::Char('3'))),
+            [Action::OpenSession(list[2].id)]
+        );
+
+        // The current session, or any while a task runs: nothing to do.
+        app.overlay = Some(crate::view::sessions_overlay(&app, &list, NOW));
+        assert!(app.key(key(KeyCode::Char('1'))).is_empty());
+        assert!(
+            matches!(app.items.last(), Some(Item::Notice { text, .. }) if text.contains("already"))
+        );
+        running(&mut app);
+        app.overlay = Some(crate::view::sessions_overlay(&app, &list, NOW));
+        assert!(app.key(key(KeyCode::Char('2'))).is_empty());
+        assert!(matches!(
+            app.items.last(),
+            Some(Item::Notice {
+                level: Level::Warning,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn the_model_list_picks_a_model_for_a_new_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(&attached(dir.path()), false);
+        let models: Vec<ModelRef> = vec![
+            "openai/gpt-6-luna".parse().unwrap(),
+            "anthropic/claude-opus-5-5".parse().unwrap(),
+        ];
+        app.overlay = Some(crate::view::models_overlay(&app, &models));
+        assert_eq!(
+            app.key(key(KeyCode::Char('2'))),
+            [Action::Command(Slash::Model(Some(
+                "anthropic/claude-opus-5-5".into()
+            )))]
+        );
+    }
+
+    #[test]
+    fn a_new_session_mentions_the_last_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(&attached(dir.path()), false);
+        app.hint_last_session(&[summary("fix the login test", 120)], NOW);
+        let Some(Item::Notice { text, .. }) = app.items.last() else {
+            panic!("{:?}", app.items)
+        };
+        assert!(
+            text.contains("fix the login test")
+                && text.contains("2 h ago")
+                && text.contains("/sessions")
+                && text.contains("harness -c"),
+            "{text}"
+        );
+        let mut alone = App::new(&attached(dir.path()), false);
+        let mut me = summary("me", 0);
+        me.id = alone.view.id;
+        alone.hint_last_session(&[me], NOW);
+        assert!(alone.items.is_empty(), "only the current session: no hint");
+    }
+
+    fn input_text(app: &App) -> String {
+        app.input.lines().join("\n")
+    }
+
+    #[test]
+    fn up_and_down_walk_through_earlier_prompts_and_back_to_the_draft() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = attached(dir.path());
+        a.prompts = vec!["first".into(), "second".into()];
+        let mut app = App::new(&a, false);
+
+        type_text(&mut app, "dra");
+        app.key(key(KeyCode::Up));
+        assert_eq!(input_text(&app), "second");
+        app.key(key(KeyCode::Up));
+        app.key(key(KeyCode::Up));
+        assert_eq!(input_text(&app), "first", "stops at the oldest");
+        app.key(key(KeyCode::Down));
+        assert_eq!(input_text(&app), "second");
+        app.key(key(KeyCode::Down));
+        assert_eq!(input_text(&app), "dra", "back to what was being typed");
+
+        // A sent prompt joins the history (once, even if sent twice).
+        app.input = new_input();
+        type_text(&mut app, "third");
+        app.key(key(KeyCode::Enter));
+        type_text(&mut app, "third");
+        app.key(key(KeyCode::Enter));
+        app.key(key(KeyCode::Up));
+        assert_eq!(input_text(&app), "third");
+        app.key(key(KeyCode::Up));
+        assert_eq!(input_text(&app), "second");
+    }
+
+    #[test]
+    fn up_moves_within_a_multi_line_prompt_before_recalling_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = attached(dir.path());
+        a.prompts = vec!["old".into()];
+        let mut app = App::new(&a, false);
+        type_text(&mut app, "one");
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+        type_text(&mut app, "two");
+        app.key(key(KeyCode::Up));
+        assert_eq!(input_text(&app), "one\ntwo", "first Up moves to line one");
+        app.key(key(KeyCode::Up));
+        assert_eq!(input_text(&app), "old");
+    }
+
+    #[test]
+    fn the_mouse_wheel_scrolls_the_transcript_or_the_open_panel() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        let wheel = |kind| MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(&attached(dir.path()), false);
+        app.mouse(wheel(MouseEventKind::ScrollUp));
+        app.mouse(wheel(MouseEventKind::ScrollUp));
+        assert_eq!(app.scroll_back, 2 * WHEEL_LINES);
+        app.mouse(wheel(MouseEventKind::ScrollDown));
+        assert_eq!(app.scroll_back, WHEEL_LINES);
+        app.mouse(wheel(MouseEventKind::Moved));
+        assert_eq!(
+            app.scroll_back, WHEEL_LINES,
+            "other mouse events do nothing"
+        );
+
+        app.overlay = Some(crate::view::help_overlay());
+        app.mouse(wheel(MouseEventKind::ScrollDown));
+        assert_eq!(app.overlay.as_ref().unwrap().scroll, WHEEL_LINES);
+        assert_eq!(app.scroll_back, WHEEL_LINES, "the transcript stays put");
     }
 
     #[test]

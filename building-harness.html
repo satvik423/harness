@@ -322,8 +322,8 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
   <h1>Building Harness</h1>
   <p class="sub">The complete plan for a general-purpose, persona-driven agent harness written in Rust. It combines the best ideas from Claude Code, Codex CLI and Hermes, and adds a context engine that never loses details. This one document is enough to build the whole project.</p>
   <div class="docctl">
-    <div><span>Version</span>1.4 · updated after Phases 0–4 (v0.1 released)</div>
-    <div><span>Date</span>17 Nov 2026</div>
+    <div><span>Version</span>1.5 · updated after the Phase 4 trial (v0.1 released)</div>
+    <div><span>Date</span>18 Nov 2026</div>
     <div><span>Status</span>Approved for build</div>
     <div><span>Working name</span><code>harness</code> (rename freely)</div>
   </div>
@@ -405,6 +405,9 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-si
     <tr><td class="id">1.4</td><td>Attached files become a reference note (path, size, kind) until Phase 11 ingest</td><td>3.15, Ph 4, Ph 11</td><td>ADR-039</td></tr>
     <tr><td class="id">1.4</td><td>Costs computed in the runtime from <code>[pricing]</code>; <code>harness debug</code> rebuilds request bodies from the log; <code>/diff</code> compares first snapshots with files now; the TUI talks to the core through a <code>Backend</code> trait</td><td>2.4, 3.12, 3.16</td><td>ADR-040</td></tr>
     <tr><td class="id">1.4</td><td>Phase 4 exit criterion (a working day) is checked by the user after automated and live checks</td><td>Ph 4</td><td>Phase 4 report</td></tr>
+    <tr><td class="id">1.5</td><td><code>harness session delete ID</code> removes a whole session and frees unreferenced blobs (only when no other session is open); the TUI drops sessions nobody typed into. Transcripts are never trimmed: a session is kept whole or removed whole</td><td>3.12, 3.16</td><td>ADR-041</td></tr>
+    <tr><td class="id">1.5</td><td>Getting back to sessions in the TUI: <code>harness -c</code>, <code>/sessions</code> picker, a hint naming the last session, the short session id in the header. Also ↑/↓ prompt history (from the log), mouse-wheel scrolling (<code>[ui] mouse</code>), a <code>/model</code> picker, last output lines on shell cards</td><td>3.16, 3.17, Ph 4</td><td>Phase 4 report (trial follow-up)</td></tr>
+    <tr><td class="id">1.5</td><td>Built-in prices for OpenAI's gpt-6 models (Standard tier, read from OpenAI's pricing page on 18 Nov 2026); prices are never fetched at run time</td><td>3.17</td><td>Phase 4 report</td></tr>
   </tbody></table></div>
 </section>
 
@@ -1946,11 +1949,13 @@ read_attachment {"id":"att_3","pages":"14-16"}
   <div class="sh"><span class="sid">3.16</span><h2>Front-end spec</h2></div>
   <div class="grid2">
     <div class="cwrap"><div class="fname">CLI (clap)</div><script type="text/plain" data-code="sh">harness [PROMPT]                         # open TUI, optional first prompt
+harness -c | --continue                  # TUI in the most recently active session
+harness --session ID                     # TUI in a stored session
 harness run PROMPT [--persona P] [--model M] [--json]
     [--output-schema FILE] [--max-turns N] [--attach FILE]...
     [--approval never|on-request] [--sandbox MODE] [--session ID]
 harness session list | show ID | resume ID | fork ID --at SEQ
-                | export ID --format md|jsonl | delete ID
+                | export ID --format md|jsonl | delete ID [--yes]
 harness task    list | pause ID | resume ID | cancel ID
 harness persona list | show NAME | new NAME | validate [NAME] | trust NAME
 harness skill   list | show NAME
@@ -1981,7 +1986,8 @@ harness doctor                           # bwrap, keyring, providers, MCP
 
 slash: /persona /model /effort /compact /recall /context /cost
        /pause /resume /tasks /agents /skills /mcp /hooks /memory
-       /attach /diff /undo /fork /clear /trust /help /quit</script></div>
+       /attach /diff /undo /fork /clear /sessions /trust /help /quit
+keys:  ↑/↓ earlier prompts · mouse wheel scrolls (Shift+drag selects)</script></div>
   </div>
   <div class="card"><h4>JSON-RPC server (newline-delimited JSON over stdio)</h4><p>Methods: <code>initialize</code>, <code>session/create</code>, <code>session/resume</code>, <code>session/list</code>, <code>turn/submit</code>, <code>task/interrupt</code>, <code>task/pause</code>, <code>task/resume</code>, <code>task/cancel</code>, <code>approval/respond</code>, <code>session/compact</code>, <code>persona/list</code>. Each method maps one-to-one onto an <code>Op</code>. Notifications: <code>event</code> carrying an <code>Envelope</code>. The protocol is versioned with <code>protocolVersion</code> in <code>initialize</code>.</p></div>
 </section>
@@ -2028,10 +2034,15 @@ op_channel_capacity = 64
 "anthropic/claude-opus-5-5"   = { input = 4.00, output = 20.00, cache_read = 0.20 }
 "anthropic/claude-sonnet-5-5" = { input = 2.00, output = 10.00, cache_read = 0.10 }
 "anthropic/claude-haiku-5-5"  = { input = 0.10, output = 0.50 }
+"openai/gpt-6-luna"  = { input = 0.10, output = 0.50, cache_read = 0.01, cache_write = 0.125 }
+"openai/gpt-6-sol"   = { input = 2.00, output = 10.00, cache_read = 0.20 }
+# … and gpt-6.1-sol, gpt-6.1-terra, gpt-6.2-sol, gpt-6-astra, gpt-6.2-astra
+# (OpenAI Standard tier, ≤272K input; from openai.com pricing, 18 Nov 2026)
 
 [ui]
 show_thinking = false
-theme = "auto"</script></div>
+theme = "auto"
+mouse = true                           # TUI captures the mouse: wheel scrolls, Shift+drag selects</script></div>
 </section>
 
 <section class="sec spec-s" id="s3-18">

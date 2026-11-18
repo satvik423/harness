@@ -35,6 +35,7 @@
 #![deny(missing_docs)]
 
 mod blobs;
+mod delete;
 mod lock;
 mod schema;
 mod store;

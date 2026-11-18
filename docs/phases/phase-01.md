@@ -130,13 +130,15 @@ CDLA-Permissive-2.0 (webpki root certificate data).
 
 ## Known issues
 
-- With piped input (as in the exit check), the `✓` line appears on the same line as the
-  approval prompt, because nothing echoes the answer. Interactive use is fine.
+- ~~With piped input (as in the exit check), the `✓` line appears on the same line as the
+  approval prompt, because nothing echoes the answer.~~ Resolved in Phase 2: piped answers
+  are echoed.
 - Anthropic is unverified against the live API (see deviation 9).
 - OpenAI `count_tokens` is a local estimate (characters ÷ 4); exact usage comes from each response.
 - OpenAI capabilities are conservative defaults; the Models API reports no limits.
-- `Usage.cost_micros` is always 0; cost accounting arrives in Phase 4.
-- Every event, including streaming deltas, gets a sequence number from the runtime's counter.
+- ~~`Usage.cost_micros` is always 0~~. Resolved in Phase 4 (`ModelPrice` in the runtime).
+- ~~Every event, including streaming deltas, gets a sequence number from the runtime's
+  counter.~~ Resolved in Phase 3: the journal numbers only committed events (ADR-033).
 
 ## Notes for later phases
 

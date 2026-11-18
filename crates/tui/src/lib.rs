@@ -30,5 +30,5 @@ pub mod slash;
 pub mod view;
 
 pub use app::App;
-pub use backend::{Attached, Backend, ChangedFile, SessionView};
+pub use backend::{Attached, Backend, ChangedFile, SessionSummary, SessionView};
 pub use run::{TuiOptions, run};

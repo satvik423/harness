@@ -44,3 +44,4 @@ Each record states the context, the decision and its consequences. Records 0001â
 | [ADR-038](0038-model-and-effort-start-a-new-session.md) | `/model` and `/effort` apply to a new session (user decision) | Accepted |
 | [ADR-039](0039-attachments-as-reference-notes.md) | Attached files become reference notes until Phase 11 (user decision) | Accepted |
 | [ADR-040](0040-costs-debug-bodies-and-session-changes.md) | Costs in the runtime, debug bodies rebuilt from the log, session changes from snapshots | Accepted |
+| [ADR-041](0041-deleting-sessions.md) | Deleting sessions, and empty sessions left by the TUI | Accepted |

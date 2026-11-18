@@ -91,16 +91,16 @@ pub fn build_policy(inputs: &PolicyInputs<'_>) -> Result<Arc<PolicyEngine>, Wiri
     Ok(Arc::new(engine))
 }
 
-/// The model a stored session's current segment was opened with, read from
-/// its frozen frame (ADR-032). `None` if the session has no segment yet.
+/// The frozen frame (ADR-032) of a stored session's current segment: its
+/// model, effort and prompt. `None` if the session has no segment yet.
 ///
 /// # Errors
 /// A store error, or [`harness_ports::StoreError::Corrupt`] for a bad frame.
-pub async fn session_model(
+pub async fn session_frame(
     log: &dyn harness_ports::EventLog,
     blobs: &dyn harness_ports::BlobStore,
     session: harness_types::SessionId,
-) -> Result<Option<ModelRef>, harness_ports::StoreError> {
+) -> Result<Option<harness_context::SegmentFrame>, harness_ports::StoreError> {
     let events = log
         .range(
             session,
@@ -115,8 +115,24 @@ pub async fn session_model(
         return Ok(None);
     };
     let bytes = blobs.get(&frame).await?;
-    let frame: harness_context::SegmentFrame = serde_json::from_slice(&bytes)
-        .map_err(|e| harness_ports::StoreError::Corrupt(format!("segment frame: {e}")))?;
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|e| harness_ports::StoreError::Corrupt(format!("segment frame: {e}")))
+}
+
+/// The model a stored session's current segment was opened with, read from
+/// its frozen frame (ADR-032). `None` if the session has no segment yet.
+///
+/// # Errors
+/// A store error, or [`harness_ports::StoreError::Corrupt`] for a bad frame.
+pub async fn session_model(
+    log: &dyn harness_ports::EventLog,
+    blobs: &dyn harness_ports::BlobStore,
+    session: harness_types::SessionId,
+) -> Result<Option<ModelRef>, harness_ports::StoreError> {
+    let Some(frame) = session_frame(log, blobs, session).await? else {
+        return Ok(None);
+    };
     format!("{}/{}", frame.provider, frame.model)
         .parse()
         .map(Some)

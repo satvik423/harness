@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{
-    DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange, Event,
-    EventStream,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, Event, EventStream,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -30,6 +30,17 @@ pub struct TuiOptions {
     pub first_prompt: Option<String>,
     /// Show reasoning summaries (`ui.show_thinking`).
     pub show_thinking: bool,
+    /// A note to show first (for example "no earlier session to continue").
+    pub notice: Option<String>,
+    /// Capture the mouse so the wheel scrolls (`ui.mouse`).
+    pub mouse: bool,
+}
+
+/// Unix milliseconds now (for "how long ago" in session lists).
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
 /// Puts the terminal back as it was, also when the TUI panics.
@@ -43,8 +54,10 @@ impl Drop for Restore {
 
 fn restore_terminal() {
     let _ = disable_raw_mode();
+    // Turning off mouse capture that was never on is harmless.
     let _ = execute!(
         std::io::stdout(),
+        DisableMouseCapture,
         DisableBracketedPaste,
         DisableFocusChange,
         LeaveAlternateScreen
@@ -68,6 +81,9 @@ pub async fn run(
         EnableBracketedPaste,
         EnableFocusChange
     )?;
+    if options.mouse {
+        execute!(std::io::stdout(), EnableMouseCapture)?;
+    }
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore_terminal();
@@ -87,6 +103,18 @@ async fn event_loop(
     options: TuiOptions,
 ) -> std::io::Result<()> {
     let mut app = App::new(&attached, options.show_thinking);
+    if let Some(notice) = options.notice {
+        app.items.push(crate::app::Item::Notice {
+            level: Level::Info,
+            text: notice,
+        });
+    }
+    // A fresh session: point at the previous one, so it is easy to get back to.
+    if attached.history.is_empty()
+        && let Ok(sessions) = backend.sessions().await
+    {
+        app.hint_last_session(&sessions, now_ms());
+    }
     let mut events = attached.events;
     let mut events_open = true;
     let mut input = EventStream::new();
@@ -117,6 +145,7 @@ async fn event_loop(
             event = input.next() => match event {
                 Some(Ok(Event::Key(key))) => pending = app.key(key),
                 Some(Ok(Event::Paste(text))) => app.paste(&text),
+                Some(Ok(Event::Mouse(mouse))) => app.mouse(mouse),
                 Some(Ok(Event::FocusGained)) => app.focused = true,
                 Some(Ok(Event::FocusLost)) => app.focused = false,
                 Some(Ok(_)) => {}
@@ -204,6 +233,24 @@ async fn perform(
                 Err(e) => failed(app, format!("could not start a new session: {e}")),
             }
         }
+        Action::OpenSession(id) => {
+            app.items.push(crate::app::Item::Notice {
+                level: Level::Info,
+                text: format!("opening session {id}…"),
+            });
+            match backend.open_session(id).await {
+                Ok(attached) => {
+                    app.attach(&attached);
+                    *events = attached.events;
+                    *events_open = true;
+                }
+                Err(e) => failed(app, format!("could not open session {id}: {e}")),
+            }
+        }
+        Action::Command(Slash::Sessions) => match backend.sessions().await {
+            Ok(sessions) => app.overlay = Some(view::sessions_overlay(app, &sessions, now_ms())),
+            Err(e) => failed(app, e),
+        },
         Action::Command(Slash::Tasks) => match backend.tasks().await {
             Ok(tasks) => app.overlay = Some(view::tasks_overlay(&tasks)),
             Err(e) => failed(app, e),

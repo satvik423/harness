@@ -407,6 +407,21 @@ async fn session_1_text_only_reply_completes() {
 }
 
 #[tokio::test]
+async fn closed_resolves_once_the_actor_has_shut_down() {
+    let run = start(Arc::new(FakeProvider::new()), ApprovalMode::Ask, 10).await;
+    let waiting = run.handle.clone();
+    let closed = tokio::spawn(async move { waiting.closed().await });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(!closed.is_finished(), "still running before Shutdown");
+    run.handle.send(Op::Shutdown).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), closed)
+        .await
+        .expect("closed() resolves after Shutdown")
+        .unwrap();
+    assert!(run.handle.send(Op::Shutdown).await.is_err());
+}
+
+#[tokio::test]
 async fn session_2_read_only_tool_runs_without_approval() {
     let fake = FakeProvider::new()
         .with_tool_call_turn("c1", "echo", &json!({"text": "pong"}))

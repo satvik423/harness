@@ -156,7 +156,10 @@ mod tests {
             (opus.cache_write - 4.0).abs() < 1e-9,
             "cache writes default to the input price"
         );
-        assert!(f.price(&"openai/gpt-6-luna".parse().unwrap()).is_none());
+        assert!(
+            f.price(&"openai/not-a-priced-model".parse().unwrap())
+                .is_none()
+        );
     }
 
     #[test]

@@ -1,10 +1,20 @@
-# Sessions: resume, pause, undo, export
+# Sessions: resume, pause, undo, export, delete
 
-Every `harness run` is a session saved in the project's `.harness/state.db`. Nothing
-is lost: each event is saved before harness acts on it, so even a crash or `kill -9`
-leaves a session you can continue.
+Every conversation, in the terminal UI or with `harness run`, is a session saved in the
+project's `.harness/state.db`. Nothing is lost: each event is saved before harness acts
+on it, so even a crash or `kill -9` leaves a session you can continue.
 
 ## Continue a conversation
+
+In the terminal UI:
+
+- **`harness -c`** (`--continue`) opens this project's most recently active session.
+- **`/sessions`** lists the project's sessions, most recently active first. Pick one with
+  ↑↓ and Enter, or its number, to switch to it. The one you leave stays saved.
+- Starting plain `harness` shows the last session on the first line, with how to get back.
+- The header ends with the session's short id; `harness --session ID` opens any session.
+
+Headless:
 
 ```sh
 harness run "add input validation to the signup form"
@@ -14,6 +24,8 @@ harness run --session 01M7P3 "now write tests for it"
 ```
 
 Ids can be shortened to any unique prefix. A session keeps the model it started with.
+A session nobody typed into is deleted when the terminal UI leaves it, so opening and
+closing harness leaves nothing behind.
 
 ## Pause and resume
 
@@ -61,6 +73,17 @@ harness session show ID                       # every event, one per line
 harness session export ID                     # Markdown transcript in .harness/exports/
 harness session export ID --format jsonl --output session.jsonl
 ```
+
+## Delete
+
+```sh
+harness session delete ID          # asks first
+harness session delete ID --yes    # in scripts
+```
+
+Removes the session and everything stored for it. This cannot be undone. Stored files
+that no other session uses are freed too (when no other session is open). A session
+that is open in a harness process cannot be deleted.
 
 ## Files
 

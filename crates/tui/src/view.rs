@@ -9,12 +9,13 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-use crate::app::{App, Item, Level, Overlay, Prompt, ToolCard};
-use crate::backend::ChangedFile;
+use crate::app::{Action, App, Item, Level, Overlay, Pick, Prompt, ToolCard};
+use crate::backend::{ChangedFile, SessionSummary};
 use crate::diff::{DiffLine, counts, unified};
 use crate::ledger::{money, tokens};
 use crate::markdown;
 use crate::slash::COMMANDS;
+use crate::slash::Slash;
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const DIM: Style = Style::new().fg(Color::DarkGray);
@@ -100,7 +101,11 @@ fn tool_lines(card: &ToolCard, tick: u64, out: &mut Vec<Line<'static>>) {
         } else {
             DIM
         };
-        out.push(Line::styled(format!("    {}", card.result), style));
+        out.extend(
+            card.result
+                .iter()
+                .map(|line| Line::styled(format!("    {line}"), style)),
+        );
     }
 }
 
@@ -123,7 +128,12 @@ pub fn transcript_lines(app: &App) -> Vec<Line<'static>> {
                     out.push(Line::styled(format!("      📎 {path}"), DIM));
                 }
             }
-            Item::Assistant { text, done } => {
+            Item::Assistant {
+                text,
+                done: true,
+                rendered,
+            } if !rendered.is_empty() || text.is_empty() => out.extend(rendered.iter().cloned()),
+            Item::Assistant { text, done, .. } => {
                 let mut lines = markdown::render(text);
                 if !done && let Some(last) = lines.last_mut() {
                     last.spans.push(Span::styled("▍", ACCENT));
@@ -167,10 +177,39 @@ fn header(app: &App) -> Line<'static> {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(
-            " {} · {}{effort} · seg {} · {}",
+            " {} · {}{effort} · seg {} · {} · ",
             app.view.persona, app.view.model, app.segment, app.view.profile
         )),
+        Span::styled(short_id(&app.view.id.to_string()), DIM),
     ])
+}
+
+/// The first 8 characters of an id: enough to tell this project's sessions
+/// apart, and accepted wherever a session id is (as a prefix).
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+/// `text` on one line, cut to `max` characters with `…`.
+pub(crate) fn shorten(text: &str, max: usize) -> String {
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= max {
+        one_line
+    } else {
+        format!("{}…", one_line.chars().take(max).collect::<String>())
+    }
+}
+
+/// How long ago `then_ms` was, in words.
+pub(crate) fn ago(now_ms: i64, then_ms: i64) -> String {
+    let minutes = (now_ms - then_ms).max(0) / 60_000;
+    match minutes {
+        0 => "just now".into(),
+        1..60 => format!("{minutes} min ago"),
+        60..1_440 => format!("{} h ago", minutes / 60),
+        1_440..2_880 => "yesterday".into(),
+        _ => format!("{} days ago", minutes / 1_440),
+    }
 }
 
 /// The status bar text: context, cache, cost, task state and key hints.
@@ -380,16 +419,32 @@ fn render_overlay(overlay: &Overlay, frame: &mut Frame<'_>) {
         h,
     );
     frame.render_widget(Clear, rect);
+    let keys = if overlay.picks.is_empty() {
+        " Esc to close · ↑↓ PgUp PgDn to scroll "
+    } else {
+        " ↑↓ choose · Enter to open (or its number) · Esc to close "
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(ACCENT)
         .title(format!(" {} ", overlay.title))
-        .title_bottom(Line::styled(" Esc to close · ↑↓ PgUp PgDn to scroll ", DIM));
+        .title_bottom(Line::styled(keys, DIM));
+    let mut lines = overlay.lines.clone();
+    let mut scroll = overlay.scroll;
+    if let Some(pick) = overlay.picks.get(overlay.selected)
+        && let Some(line) = lines.get_mut(pick.line)
+    {
+        line.style = line.style.add_modifier(Modifier::REVERSED);
+        // Keep the highlighted line in view.
+        let inner = rect.height.saturating_sub(2).max(1);
+        let at = u16::try_from(pick.line).unwrap_or(u16::MAX);
+        scroll = scroll.clamp(at.saturating_sub(inner - 1), at);
+    }
     frame.render_widget(
-        Paragraph::new(overlay.lines.clone())
+        Paragraph::new(lines)
             .block(block)
             .wrap(Wrap { trim: false })
-            .scroll((overlay.scroll, 0)),
+            .scroll((scroll, 0)),
         rect,
     );
 }
@@ -399,6 +454,8 @@ fn overlay(title: &str, lines: Vec<Line<'static>>) -> Overlay {
         title: title.into(),
         lines,
         scroll: 0,
+        picks: Vec::new(),
+        selected: 0,
     }
 }
 
@@ -420,7 +477,15 @@ pub fn help_overlay() -> Overlay {
         ("Alt+Enter, Ctrl+J", "new line"),
         ("Esc, Ctrl+C", "interrupt the running task"),
         ("Ctrl+P", "pause at the next safe point"),
-        ("PgUp / PgDn, Shift+↑↓", "scroll the transcript"),
+        ("↑ / ↓", "earlier prompts (from the first / last line)"),
+        (
+            "mouse wheel, PgUp / PgDn, Shift+↑↓",
+            "scroll the transcript",
+        ),
+        (
+            "Shift+drag",
+            "select text (ui.mouse = false frees the mouse)",
+        ),
         ("Ctrl+D (empty input)", "quit"),
         ("paste or drop files", "attach them"),
         (
@@ -597,10 +662,67 @@ pub fn models_overlay(app: &App, models: &[harness_types::ModelRef]) -> Overlay 
         )),
         Line::raw(format!("Next session: {}", app.next.model)),
         Line::default(),
-        Line::styled("Pick one with /model provider/model:", DIM),
+        Line::styled(
+            "Pick one for a new session (or type /model provider/model):",
+            DIM,
+        ),
     ];
-    lines.extend(models.iter().map(|m| Line::raw(format!("  {m}"))));
-    overlay("Models", lines)
+    let mut picks = Vec::new();
+    for (i, m) in models.iter().enumerate() {
+        picks.push(Pick {
+            line: lines.len(),
+            action: Action::Command(Slash::Model(Some(m.to_string()))),
+        });
+        lines.push(Line::raw(format!(" {} {m}", i + 1)));
+    }
+    let mut o = overlay("Models", lines);
+    o.picks = picks;
+    o
+}
+
+/// `/sessions`: this project's sessions, most recently active first; picking
+/// one switches to it.
+#[must_use]
+pub fn sessions_overlay(app: &App, sessions: &[SessionSummary], now_ms: i64) -> Overlay {
+    let mut lines = Vec::new();
+    let mut picks = Vec::new();
+    for (i, s) in sessions.iter().enumerate() {
+        let id = s.id.to_string();
+        let current = if s.id == app.view.id {
+            "  (current)"
+        } else {
+            ""
+        };
+        let state = s.state.map_or("-", state_name);
+        picks.push(Pick {
+            line: lines.len(),
+            action: Action::OpenSession(s.id),
+        });
+        // Fixed-width columns first, the title last: a narrow terminal then
+        // wraps only the end of the title, never the columns.
+        lines.push(Line::from(vec![
+            Span::raw(format!("{:>2}  ", i + 1)),
+            Span::styled(
+                format!(
+                    "{:<12} {:<15} {}  ",
+                    ago(now_ms, s.last_active),
+                    state,
+                    short_id(&id)
+                ),
+                DIM,
+            ),
+            Span::raw(shorten(s.title.as_deref().unwrap_or("(no prompt yet)"), 50)),
+            Span::styled(current, ACCENT),
+        ]));
+    }
+    if lines.is_empty() {
+        lines.push(Line::raw(
+            "No other sessions in this project yet. Each prompt you send keeps this one.",
+        ));
+    }
+    let mut o = overlay("Sessions", lines);
+    o.picks = picks;
+    o
 }
 
 #[cfg(test)]
@@ -617,7 +739,8 @@ mod tests {
         let (_tx, rx) = tokio::sync::broadcast::channel(4);
         let attached = Attached {
             view: SessionView {
-                id: SessionId::new(),
+                // Fixed, so snapshots are stable.
+                id: "01KAB3XYZ0QRSTVWXYZ0123456".parse().unwrap(),
                 persona: "default".into(),
                 model: "openai/gpt-6-luna".parse().unwrap(),
                 effort: Some(Effort::High),
@@ -628,6 +751,7 @@ mod tests {
             },
             events: rx,
             history: Vec::new(),
+            prompts: Vec::new(),
         };
         App::new(&attached, false)
     }
@@ -659,17 +783,14 @@ mod tests {
                 text: "fix the login test".into(),
                 attachments: vec!["spec.md".into()],
             },
-            Item::Assistant {
-                text: "The check used `<` instead of `<=`.".into(),
-                done: true,
-            },
+            Item::assistant_done("The check used `<` instead of `<=`."),
             Item::Tool(ToolCard {
                 id: "c1".into(),
                 name: "edit_file".into(),
                 summary: "src/auth.rs".into(),
                 live: String::new(),
                 ok: None,
-                result: String::new(),
+                result: Vec::new(),
                 preview: vec![
                     DiffLine::Removed("x < y".into()),
                     DiffLine::Added("x <= y".into()),
@@ -777,6 +898,114 @@ mod tests {
             "{text:?}"
         );
         assert!(text.iter().any(|l| l.contains("1 turns")));
+    }
+
+    #[test]
+    fn finished_replies_are_drawn_from_their_rendered_lines() {
+        let mut app = app();
+        app.items = vec![Item::Assistant {
+            text: "**raw**".into(),
+            done: true,
+            rendered: vec![Line::raw("cached")],
+        }];
+        let lines: Vec<String> = transcript_lines(&app)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(lines, ["cached"]);
+    }
+
+    #[test]
+    fn the_header_shows_the_short_session_id() {
+        let app = sample();
+        let id = app.view.id.to_string();
+        assert!(
+            header(&app)
+                .to_string()
+                .ends_with(&format!("· {}", &id[..8]))
+        );
+    }
+
+    #[test]
+    fn times_read_as_how_long_ago() {
+        let now = 1_800_000_000_000;
+        let min = 60_000;
+        assert_eq!(ago(now, now - 10_000), "just now");
+        assert_eq!(ago(now, now - 5 * min), "5 min ago");
+        assert_eq!(ago(now, now - 3 * 60 * min), "3 h ago");
+        assert_eq!(ago(now, now - 30 * 60 * min), "yesterday");
+        assert_eq!(ago(now, now - 4 * 24 * 60 * min), "4 days ago");
+        assert_eq!(ago(now, now + min), "just now", "clock skew");
+    }
+
+    #[test]
+    fn the_session_list_numbers_sessions_and_marks_the_current_one() {
+        use crate::backend::SessionSummary;
+        let app = sample();
+        let now = 1_800_000_000_000;
+        let list = vec![
+            SessionSummary {
+                id: app.view.id,
+                title: Some("fix the login test".into()),
+                last_active: now,
+                state: Some(TaskState::AwaitingApproval),
+            },
+            SessionSummary {
+                id: SessionId::new(),
+                title: Some("x".repeat(200)),
+                last_active: now - 2 * 3_600_000,
+                state: Some(TaskState::Paused),
+            },
+        ];
+        let o = sessions_overlay(&app, &list, now);
+        assert_eq!(o.picks.len(), 2);
+        let first = o.lines[o.picks[0].line].to_string();
+        let second = o.lines[o.picks[1].line].to_string();
+        assert!(
+            first.starts_with(" 1 ")
+                && first.contains("fix the login test")
+                && first.contains("(current)"),
+            "{first}"
+        );
+        assert!(
+            second.contains("2 h ago") && second.contains("paused") && second.contains('…'),
+            "{second}"
+        );
+        assert!(
+            second.chars().count() < 120,
+            "long titles are cut: {second}"
+        );
+        let empty = sessions_overlay(&app, &[], now);
+        assert!(empty.picks.is_empty());
+        assert!(empty.lines[0].to_string().contains("No other sessions"));
+    }
+
+    #[test]
+    fn the_selected_pick_is_highlighted() {
+        let mut app = sample();
+        app.prompt = None;
+        let models: Vec<harness_types::ModelRef> =
+            vec!["openai/a".parse().unwrap(), "openai/b".parse().unwrap()];
+        let mut o = models_overlay(&app, &models);
+        o.selected = 1;
+        app.overlay = Some(o);
+        let s = screen(&app, 90, 30);
+        assert!(s.contains("Enter to open"), "{s}");
+        let mut terminal = Terminal::new(TestBackend::new(90, 30)).unwrap();
+        terminal.draw(|f| render(&app, f)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let row = (0..30u16)
+            .find(|&y| {
+                (0..90u16)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("openai/b")
+            })
+            .unwrap();
+        let x = (0..90u16)
+            .find(|&x| buffer[(x, row)].symbol() == "o" && buffer[(x + 7, row)].symbol() == "b")
+            .unwrap();
+        assert!(buffer[(x, row)].modifier.contains(Modifier::REVERSED));
     }
 
     #[test]

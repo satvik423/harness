@@ -4,7 +4,7 @@
 use std::fmt::Write as _;
 
 use harness_context::civil_date;
-use harness_ports::{LoggedEvent, SessionRecord, TaskRecord};
+use harness_ports::{LoggedEvent, SessionRecord, SessionStore, StoreError, TaskRecord};
 use harness_protocol::{BlobOrText, Event, TaskState};
 use harness_types::{ContentBlock, Message};
 use thiserror::Error;
@@ -85,6 +85,55 @@ pub fn resolve_task<'a>(
     prefix: &str,
 ) -> Result<&'a TaskRecord, ResolveError> {
     resolve(tasks, prefix, |t| t.id.to_string(), "task")
+}
+
+/// A session that has a prompt, with its latest task and when it was last active.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentSession {
+    /// The session.
+    pub record: SessionRecord,
+    /// Its most recently changed task.
+    pub last_task: Option<TaskRecord>,
+    /// Its latest task change, else its creation (Unix ms).
+    pub last_active: i64,
+}
+
+/// Sessions that have a prompt, most recently active first. Sessions nobody
+/// typed into are left out: they have nothing to go back to.
+fn rank(sessions: Vec<SessionRecord>, tasks: &[TaskRecord]) -> Vec<RecentSession> {
+    let mut out: Vec<RecentSession> = sessions
+        .into_iter()
+        .filter(|s| s.title.is_some())
+        .map(|record| {
+            let last_task = tasks
+                .iter()
+                .filter(|t| t.session == record.id)
+                .max_by_key(|t| t.updated_at)
+                .cloned();
+            let last_active = last_task
+                .as_ref()
+                .map_or(record.created_at, |t| t.updated_at.max(record.created_at));
+            RecentSession {
+                record,
+                last_task,
+                last_active,
+            }
+        })
+        .collect();
+    // Stable: equal times keep the store's newest-first order.
+    out.sort_by_key(|r| std::cmp::Reverse(r.last_active));
+    out
+}
+
+/// This project's sessions that have a prompt, most recently active first
+/// (`harness -c`, `/sessions`).
+///
+/// # Errors
+/// A store error.
+pub async fn recent_sessions(store: &dyn SessionStore) -> Result<Vec<RecentSession>, StoreError> {
+    let sessions = store.sessions().await?;
+    let tasks = store.tasks(None).await?;
+    Ok(rank(sessions, &tasks))
 }
 
 /// `YYYY-MM-DD HH:MM` (UTC) from Unix milliseconds.
@@ -348,6 +397,45 @@ mod tests {
             forked_at: None,
             current_segment: 0,
         }
+    }
+
+    fn task(session: SessionId, updated_at: i64, state: TaskState) -> TaskRecord {
+        TaskRecord {
+            id: TaskId::new(),
+            session,
+            persona: "default".into(),
+            state,
+            reason: None,
+            created_at: updated_at - 10,
+            updated_at,
+        }
+    }
+
+    #[test]
+    fn recent_sessions_skip_empty_ones_and_put_the_last_active_first() {
+        let (old, busy, empty) = (SessionId::new(), SessionId::new(), SessionId::new());
+        let mut newer = session(old, Some("old but newer record"));
+        newer.created_at = 5_000;
+        let mut used = session(busy, Some("worked on yesterday"));
+        used.created_at = 1_000;
+        let mut blank = session(empty, None);
+        blank.created_at = 9_000;
+        let tasks = vec![
+            task(busy, 2_000, TaskState::Completed),
+            task(busy, 8_000, TaskState::Paused),
+        ];
+        let ranked = rank(vec![newer, used, blank], &tasks);
+        let order: Vec<_> = ranked.iter().map(|r| r.record.id).collect();
+        assert_eq!(order, vec![busy, old], "no prompt yet: not listed");
+        assert_eq!(ranked[0].last_active, 8_000);
+        assert_eq!(
+            ranked[0].last_task.as_ref().map(|t| t.state),
+            Some(TaskState::Paused)
+        );
+        assert_eq!(
+            (ranked[1].last_active, ranked[1].last_task.as_ref()),
+            (5_000, None)
+        );
     }
 
     fn logged(seq: u64, event: Event) -> LoggedEvent {

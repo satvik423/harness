@@ -127,10 +127,79 @@ All are the latest stable releases on 18 Nov 2026. `cargo deny` is clean (`binco
 
 - Not yet verified in practice: a full working day (your trial).
 - Focus events and OSC 9 notifications depend on the terminal (tmux forwards neither by default; a bell still rings).
-- The shell tool card shows the last line of output (`[exit code 0]`), not the whole output. The live output is visible while the command runs.
-- Pricing for OpenAI models is not in the default table (I won't invent prices); add `[pricing."openai/…"]`.
-- Long transcripts re-render their Markdown every frame. Fine so far; worth caching if large sessions feel slow.
+- ~~The shell card shows only the last line~~: it keeps five lines (trial follow-up).
+- ~~No OpenAI prices~~: the gpt-6 models have built-in prices (trial follow-up). Prompts over 272K input tokens cost more at OpenAI; the table does not model that.
+- ~~Markdown re-rendered every frame~~: finished replies are cached (trial follow-up).
+- A tool refused by the policy shows its reason twice: on the card and as a warning notice (the runtime records a `Warning` event too).
+- With mouse capture on, selecting text needs Shift+drag (`[ui] mouse = false` turns capture off).
 - `ratatui`'s `unstable-rendered-line-info` API may change in a minor release.
+
+## Trial follow-up: gaps filled before Phase 5
+
+During your trial you could not get back to a saved session: the TUI showed no session
+id and had no command for it. You asked me to audit everything left on purpose or
+unfinished in Phases 0–4 and fill the gaps before Phase 5. This follow-up commit does
+that.
+
+| Change | Why | Evidence |
+|---|---|---|
+| `harness -c` / `--continue` opens the most recently active session | Getting back without knowing an id | binary test; live in tmux |
+| `/sessions`: the project's sessions, most recently active first; ↑↓ Enter or a number switches | Same | `App` and view tests, backend test; live |
+| A new session's first line names the last one and how to return | Same | `App` test; live |
+| The header ends with the session's short id | You could not find the id | view test, snapshot |
+| `harness session delete ID [--yes]` (ADR-041) | Spec 3.16 lists it; no phase task built it | store tests (rows, blobs, locks, forks), binary test; live |
+| Sessions nobody typed into are deleted when the TUI leaves them | Every start opened one, so empty sessions piled up | backend test; live |
+| Finished shell cards keep their last five output lines | Only `[exit code 0]` was left | `App` test; live |
+| Finished replies keep their rendered Markdown | Every frame re-rendered every reply | view test |
+| ↑ / ↓ prompt history, from the store (no new file) | Daily-driver basic (your choice) | `App` tests, store test, backend test; live |
+| Mouse-wheel scrolling; `[ui] mouse = false` frees the mouse | Your choice; Shift+drag selects while it is on | `App` test, config test |
+| `/model` lists models to pick from | Same picker as `/sessions`, at no cost | `App` and view tests |
+| Built-in prices for OpenAI's gpt-6 models | `$?` for gpt-6-luna (your choice) | config test; live status bar showed `$0.0001` |
+| Phase 1 known issues marked resolved | They were fixed in Phases 2–4 | `phase-01.md` |
+
+The OpenAI prices are the Standard tier for prompts up to 272K input tokens. They come
+from https://developers.openai.com/api/docs/pricing and the gpt-6-luna model page, both
+read on 18 Nov 2026. gpt-6-luna: input $0.10, cached input $0.01, cache write $0.125,
+output $0.50 per million tokens. They are fixed in the code and change only with an
+update. Your `[pricing]` entries win.
+
+New public items:
+
+- `SessionStore::delete_session` and `DeletedSession` (ports);
+- `SqliteStore::recent_inputs`;
+- `SessionHandle::closed`;
+- `Backend::sessions` / `open_session` and `SessionSummary`;
+- `Overlay.picks` / `Pick`, `Action::OpenSession`, `Slash::Sessions`, `App::mouse`;
+- `TuiOptions.notice` / `mouse`, `Attached.prompts`;
+- `UiConfig.mouse`;
+- `CliBackend::with_providers`, `recent_sessions`, `session_frame`.
+
+No new dependencies.
+
+**Checks after the follow-up (all pass):**
+
+| Check | Result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean |
+| `cargo nextest run --workspace --all-features` | 641 passed (+23) |
+| `cargo test --workspace --doc` | 56 passed |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | clean |
+| `cargo deny check` | advisories ok, bans ok, licenses ok, sources ok |
+| `cargo llvm-cov --workspace --summary-only` | 91.4% lines: runtime 89.7%, context 97.7%, policy 92.9%, tui 80.7%, cli 88.6%, store 91.6% |
+
+**Left for the phases that own them** (unchanged, see the plan):
+
+- compaction, recall, fork (5);
+- personas, `harness trust`, cost per persona (6);
+- hooks and skills (7);
+- subagents and queued tasks (8);
+- several sessions in one process (10);
+- attachment contents (11);
+- sandbox, `harness doctor` (13);
+- the NFR-01/02 performance measurements (15).
+
+Anthropic still has no live test (no key).
 
 ## Notes for later phases
 

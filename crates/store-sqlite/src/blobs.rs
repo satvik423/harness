@@ -16,6 +16,11 @@ pub(crate) fn address(bytes: &[u8]) -> BlobRef {
     BlobRef::from_bytes(*blake3::hash(bytes).as_bytes())
 }
 
+/// Removes a blob file; `true` if it was there.
+pub(crate) fn remove(dir: &Path, blob: &BlobRef) -> bool {
+    std::fs::remove_file(blob_path(dir, blob)).is_ok()
+}
+
 fn io(e: std::io::Error) -> StoreError {
     StoreError::Backend(e.to_string())
 }

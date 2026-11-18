@@ -5,8 +5,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
 use harness_ports::{
-    BlobMeta, BlobStore, EventLog, LoggedEvent, SearchHit, SessionRecord, SessionStore, Snapshot,
-    SnapshotStore, StoreError, TaskControl, TaskRecord, Undone,
+    BlobMeta, BlobStore, DeletedSession, EventLog, LoggedEvent, SearchHit, SessionRecord,
+    SessionStore, Snapshot, SnapshotStore, StoreError, TaskControl, TaskRecord, Undone,
 };
 use harness_protocol::Event;
 use harness_types::{BlobRef, Seq, SessionId, TaskId};
@@ -220,6 +220,28 @@ impl SessionStore for MemoryStore {
         };
         inner.controls.push((session, task, control));
         Ok(())
+    }
+
+    /// Removes the session's rows; blobs are kept (memory is cheap in tests).
+    async fn delete_session(&self, id: SessionId) -> Result<DeletedSession, StoreError> {
+        let mut inner = self.lock();
+        if !inner.sessions.iter().any(|s| s.id == id) {
+            return Err(StoreError::NotFound(format!("session {id}")));
+        }
+        if inner.sessions.iter().any(|s| s.parent == Some(id)) {
+            return Err(StoreError::Conflict(format!(
+                "sessions were forked from {id}"
+            )));
+        }
+        inner.sessions.retain(|s| s.id != id);
+        inner.tasks.retain(|t| t.session != id);
+        inner.controls.retain(|(s, _, _)| *s != id);
+        inner.snapshots.remove(&id);
+        let events = inner.events.remove(&id).map_or(0, |e| e.len());
+        Ok(DeletedSession {
+            events: u64::try_from(events).unwrap_or(0),
+            blobs_freed: 0,
+        })
     }
 
     async fn take_controls(

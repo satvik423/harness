@@ -275,6 +275,10 @@ pub struct UiConfig {
     pub show_thinking: bool,
     /// Colour theme.
     pub theme: Theme,
+    /// The TUI captures the mouse, so the wheel scrolls the transcript.
+    /// Selecting text then needs Shift+drag in most terminals; `false` gives
+    /// the mouse back to the terminal.
+    pub mouse: bool,
 }
 
 impl Default for UiConfig {
@@ -282,6 +286,7 @@ impl Default for UiConfig {
         Self {
             show_thinking: false,
             theme: Theme::Auto,
+            mouse: true,
         }
     }
 }
@@ -314,6 +319,26 @@ impl Default for Config {
                     price(2.00, 10.00, Some(0.10)),
                 ),
                 ("anthropic/claude-haiku-5-5".into(), price(0.10, 0.50, None)),
+                // OpenAI Standard tier, prompts up to 272K input tokens (longer ones
+                // cost 2x input and 1.5x output, which this table does not model). From
+                // https://developers.openai.com/api/docs/pricing, read 2026-11-18.
+                // Unlisted cache-write prices fall back to the input price.
+                (
+                    "openai/gpt-6-luna".into(),
+                    Price {
+                        cache_write: Some(0.125),
+                        ..price(0.10, 0.50, Some(0.01))
+                    },
+                ),
+                ("openai/gpt-6-sol".into(), price(2.00, 10.00, Some(0.20))),
+                ("openai/gpt-6.1-sol".into(), price(2.00, 10.00, Some(0.10))),
+                ("openai/gpt-6.1-terra".into(), price(1.00, 5.00, Some(0.05))),
+                ("openai/gpt-6.2-sol".into(), price(2.00, 10.00, Some(0.10))),
+                ("openai/gpt-6-astra".into(), price(10.00, 50.00, Some(1.00))),
+                (
+                    "openai/gpt-6.2-astra".into(),
+                    price(8.00, 40.00, Some(0.40)),
+                ),
             ]),
             ui: UiConfig::default(),
         }
@@ -429,6 +454,23 @@ mod tests {
     fn delegate_settings_no_longer_exist() {
         // ADR-026: harness never hands tasks to external agent CLIs.
         assert!(toml::from_str::<Config>("[providers.delegate]\nenabled = true").is_err());
+    }
+
+    #[test]
+    fn openai_models_have_default_prices() {
+        let luna = &Config::default().pricing["openai/gpt-6-luna"];
+        assert_eq!(
+            (luna.input, luna.output, luna.cache_read, luna.cache_write),
+            (0.10, 0.50, Some(0.01), Some(0.125))
+        );
+        assert!(Config::default().validate().is_ok());
+    }
+
+    #[test]
+    fn mouse_capture_is_on_unless_switched_off() {
+        assert!(Config::default().ui.mouse);
+        let config: Config = toml::from_str("[ui]\nmouse = false").unwrap();
+        assert!(!config.ui.mouse);
     }
 
     #[test]

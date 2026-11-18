@@ -63,6 +63,23 @@ A plain key in a config file is rejected with an error that does not repeat the 
 See Building Harness, Tech spec 3.17, for every key and its default. The
 defaults are defined in `crates/config/src/schema.rs`.
 
+## Interface and prices
+
+```toml
+[ui]
+show_thinking = false   # show reasoning summaries
+mouse = true            # the wheel scrolls the TUI; Shift+drag selects text. false frees the mouse
+
+[pricing."openai/gpt-6-luna"]   # US dollars per million tokens; overrides the built-in table
+input = 0.10
+output = 0.50
+cache_read = 0.01
+cache_write = 0.125
+```
+
+The built-in prices (Claude 5.5 and OpenAI gpt-6 models) are fixed in harness and change
+only with an update; harness never fetches prices.
+
 ## Permissions
 
 `[policy] profile` and `default_deny_paths` control what runs without asking; rules

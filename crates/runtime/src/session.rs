@@ -131,6 +131,12 @@ impl SessionHandle {
     pub async fn send(&self, op: Op) -> Result<(), RuntimeError> {
         self.ops.send(op).await.map_err(|_| RuntimeError::Closed)
     }
+
+    /// Waits until the session actor has stopped (after [`Op::Shutdown`]).
+    /// Every event it recorded is committed by then.
+    pub async fn closed(&self) {
+        self.ops.closed().await;
+    }
 }
 
 /// Capacity of each session's op channel.

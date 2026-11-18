@@ -342,6 +342,30 @@ fn cancelling_a_crashed_task_recovers_it_then_cancels_it_without_a_model() {
 }
 
 #[test]
+fn deleting_a_session_asks_for_yes_then_removes_it() {
+    let home = tempfile::tempdir().unwrap();
+    let (session, _) = stored::crashed_project(home.path());
+    let id = session.to_string();
+
+    // No terminal to confirm on, and no --yes: nothing is deleted.
+    let refused = run(home.path(), &["session", "delete", &id[..20]], &[]);
+    assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("--yes"));
+    let list = run(home.path(), &["session", "list"], &[]);
+    assert!(String::from_utf8_lossy(&list.stdout).contains(&id));
+
+    let deleted = run(home.path(), &["session", "delete", &id, "--yes"], &[]);
+    assert!(deleted.status.success(), "{deleted:?}");
+    let text = String::from_utf8_lossy(&deleted.stdout);
+    assert!(
+        text.contains(&format!("deleted session {id}")) && text.contains("8 events"),
+        "{text}"
+    );
+    let list = run(home.path(), &["session", "list"], &[]);
+    assert!(String::from_utf8_lossy(&list.stdout).contains("No sessions"));
+}
+
+#[test]
 fn unknown_or_ambiguous_ids_are_errors() {
     let home = tempfile::tempdir().unwrap();
     let out = run(home.path(), &["session", "show", "ZZZZ"], &[]);
@@ -386,4 +410,16 @@ fn bare_harness_without_a_terminal_explains_the_tui_needs_one() {
         text.contains("Usage:") && text.contains("needs a terminal"),
         "{text}"
     );
+}
+
+#[test]
+fn continue_is_a_tui_flag_that_excludes_session() {
+    let home = tempfile::tempdir().unwrap();
+    let out = run(home.path(), &["-c"], &[]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("needs a terminal"));
+    let help = String::from_utf8_lossy(&run(home.path(), &["--help"], &[]).stdout).into_owned();
+    assert!(help.contains("--continue"), "{help}");
+    let both = run(home.path(), &["-c", "--session", "01J"], &[]);
+    assert_eq!(both.status.code(), Some(2), "{both:?}");
 }

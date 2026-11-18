@@ -537,3 +537,221 @@ async fn concurrent_appends_to_many_sessions_all_commit() {
         assert_eq!(store.last_seq(id).await.unwrap(), Some(Seq(50)));
     }
 }
+
+fn blob_file(dir: &Path, blob: &harness_types::BlobRef) -> std::path::PathBuf {
+    let hex = blob.to_hex();
+    dir.join(".harness/blobs").join(&hex[..2]).join(&hex[2..])
+}
+
+/// A session with a task, a searchable reply, usage, a control request, a
+/// frame blob of its own, a snapshot blob, and a reference to `shared`.
+async fn busy_session(
+    store: &SqliteStore,
+    dir: &Path,
+    own: &str,
+    shared: harness_types::BlobRef,
+) -> (SessionId, harness_types::BlobRef, harness_types::BlobRef) {
+    let id = new_session(store, dir).await;
+    let task = TaskId::new();
+    let frame = store
+        .put(own.as_bytes().to_vec(), "application/json", None)
+        .await
+        .unwrap();
+    let before = store
+        .put(format!("{own} before").into_bytes(), "text/plain", None)
+        .await
+        .unwrap();
+    let events = vec![
+        Event::SegmentOpened {
+            segment: 0,
+            opener: Message::user_text("opener"),
+            frame,
+        },
+        Event::TaskState {
+            task,
+            from: TaskState::Queued,
+            to: TaskState::Running,
+            reason: "started".into(),
+        },
+        Event::AssistantMessage {
+            task,
+            message: Message::new(
+                Role::Assistant,
+                vec![ContentBlock::text(format!("{own} zebra"))],
+            ),
+        },
+        Event::ToolFinished {
+            call_id: "c1".into(),
+            ok: true,
+            sent: vec![ContentBlock::text("out")],
+            full: BlobOrText::Blob { blob: shared },
+        },
+        Event::Usage {
+            task,
+            usage: Usage::default(),
+            cost_micros: 1,
+        },
+    ];
+    for (i, event) in events.into_iter().enumerate() {
+        let seq = u64::try_from(i).unwrap() + 1;
+        store
+            .append(logged(id, seq, Some(task), event))
+            .await
+            .unwrap();
+    }
+    store
+        .record_snapshot(
+            id,
+            Seq(3),
+            Snapshot {
+                path: dir.join(format!("{own}.txt")),
+                before: Some(before),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .request_control(task, TaskControl::Pause)
+        .await
+        .unwrap();
+    (id, frame, before)
+}
+
+#[tokio::test]
+async fn deleting_a_session_removes_its_rows_and_frees_unshared_blobs() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(dir.path()).unwrap();
+    let shared = store
+        .put(b"shared".to_vec(), "text/plain", None)
+        .await
+        .unwrap();
+    let (gone, gone_frame, gone_before) = busy_session(&store, dir.path(), "alpha", shared).await;
+    let (kept, kept_frame, _) = busy_session(&store, dir.path(), "beta", shared).await;
+
+    let deleted = store.delete_session(gone).await.unwrap();
+
+    assert_eq!(deleted.events, 5);
+    assert_eq!(deleted.blobs_freed, 2, "its frame and its snapshot blob");
+    assert!(store.session(gone).await.unwrap().is_none());
+    assert_eq!(
+        store
+            .sessions()
+            .await
+            .unwrap()
+            .iter()
+            .map(|s| s.id)
+            .collect::<Vec<_>>(),
+        vec![kept]
+    );
+    assert!(
+        store
+            .range(gone, Seq::FIRST, Seq(u64::MAX))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(store.last_seq(gone).await.unwrap(), None);
+    assert!(store.tasks(Some(gone)).await.unwrap().is_empty());
+    assert!(store.session_snapshots(gone).await.unwrap().is_empty());
+    assert!(store.take_controls(gone).await.unwrap().is_empty());
+    assert!(store.search(gone, "zebra", 10).await.unwrap().is_empty());
+    assert_eq!(store.search(kept, "zebra", 10).await.unwrap().len(), 1);
+    assert!(!blob_file(dir.path(), &gone_frame).exists());
+    assert!(!blob_file(dir.path(), &gone_before).exists());
+    assert!(store.meta(&gone_frame).await.unwrap().is_none());
+    // Still referenced by the other session.
+    assert!(blob_file(dir.path(), &shared).exists());
+    assert!(blob_file(dir.path(), &kept_frame).exists());
+    assert_eq!(store.tasks(Some(kept)).await.unwrap().len(), 1);
+    assert_eq!(store.take_controls(kept).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn sessions_that_are_open_or_unknown_are_not_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(dir.path()).unwrap();
+    let shared = store
+        .put(b"shared".to_vec(), "text/plain", None)
+        .await
+        .unwrap();
+    let (id, _, _) = busy_session(&store, dir.path(), "alpha", shared).await;
+
+    let lock = store.lock_session(id).unwrap();
+    assert!(matches!(
+        store.delete_session(id).await,
+        Err(StoreError::Conflict(_))
+    ));
+    drop(lock);
+    assert!(matches!(
+        store.delete_session(SessionId::new()).await,
+        Err(StoreError::NotFound(_))
+    ));
+    assert!(store.session(id).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn blobs_stay_while_another_session_is_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(dir.path()).unwrap();
+    let shared = store
+        .put(b"shared".to_vec(), "text/plain", None)
+        .await
+        .unwrap();
+    let (gone, gone_frame, _) = busy_session(&store, dir.path(), "alpha", shared).await;
+    let (open, _, _) = busy_session(&store, dir.path(), "beta", shared).await;
+
+    // The open session may be writing a blob with the same contents right now.
+    let lock = store.lock_session(open).unwrap();
+    let deleted = store.delete_session(gone).await.unwrap();
+    assert_eq!(deleted.blobs_freed, 0);
+    assert!(blob_file(dir.path(), &gone_frame).exists());
+    drop(lock);
+
+    // A later delete frees everything nothing references, the earlier leftovers too.
+    let deleted = store.delete_session(open).await.unwrap();
+    assert_eq!(
+        deleted.blobs_freed, 5,
+        "both frames, both snapshots, the shared blob"
+    );
+    assert!(!blob_file(dir.path(), &gone_frame).exists());
+}
+
+#[tokio::test]
+async fn recent_inputs_come_from_every_session_newest_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(dir.path()).unwrap();
+    let (a, b) = (
+        new_session(&store, dir.path()).await,
+        new_session(&store, dir.path()).await,
+    );
+    let task = TaskId::new();
+    let input = |text: &str| Event::UserInput {
+        task,
+        message: Message::user_text(text),
+    };
+    store
+        .append(logged(a, 1, Some(task), input("first")))
+        .await
+        .unwrap();
+    store
+        .append(logged(b, 1, Some(task), input("second")))
+        .await
+        .unwrap();
+    store
+        .append(logged(b, 2, Some(task), started("c")))
+        .await
+        .unwrap();
+    store
+        .append(logged(a, 2, Some(task), input("third")))
+        .await
+        .unwrap();
+
+    let texts: Vec<String> = store
+        .recent_inputs(2)
+        .await
+        .unwrap()
+        .iter()
+        .map(Message::text)
+        .collect();
+    assert_eq!(texts, ["third", "second"]);
+}

@@ -14,6 +14,14 @@ All notable changes to harness. Versions follow the release plan in
 - **Costs** per turn, task and session from the `[pricing]` table.
 - **`harness debug last-request` and `diff-requests`:** the exact request bodies and
   the append-only check.
+- **Getting back to sessions:** `harness -c` opens the most recently active session;
+  `/sessions` lists them and switches; a new session names the last one; the header
+  shows the session id. Sessions nobody typed into are not kept.
+- **`harness session delete ID`** (asks first, or `--yes`); unused stored files are freed.
+- **TUI:** ↑/↓ prompt history (kept across restarts), mouse-wheel scrolling
+  (`[ui] mouse = false` to turn off), shell cards keep their last output lines, a model
+  picker in `/model`, faster redraws in long sessions.
+- **Prices for OpenAI's gpt-6 models** in the built-in pricing table.
 
 ## 0.1.0 — "It works" (2026-11-18)
 

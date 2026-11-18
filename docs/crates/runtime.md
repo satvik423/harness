@@ -9,7 +9,7 @@ context only (ADR-001, ADR-016).
 |---|---|
 | `spawn_session(deps, config)` | Registers a new session, records `SessionOpened`, starts its actor; returns a `SessionHandle` and an event receiver subscribed before the first event |
 | `resume_session(deps, config, id)` | Rebuilds a stored session from its events, recovers a task that was running when harness stopped, starts its actor; returns `Resumed { paused, recovered }` |
-| `SessionHandle` | `id()`, `send(Op)`, `subscribe()` |
+| `SessionHandle` | `id()`, `send(Op)`, `subscribe()`, `closed()` (waits until the actor has stopped) |
 | `RuntimeDeps` | Provider, tools, clock, sandbox, blob store, read ledger, policy, event log, session store, snapshot store (all `Arc<dyn Port>`) |
 | `SessionConfig` | Working directory, persona, approval mode, max model calls per task run, output cap, parallel-call limit |
 | `ApprovalMode` | `Ask` (someone can answer prompts) or `Never` (headless: asks become denials, `ask_user` gets "no user available") |

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use harness_ports::{Effort, TaskRecord};
-use harness_protocol::{Envelope, Op};
+use harness_protocol::{Envelope, Op, TaskState};
 use harness_types::{ModelRef, SessionId};
 use tokio::sync::broadcast;
 
@@ -39,6 +39,8 @@ pub struct Attached {
     pub events: broadcast::Receiver<Envelope>,
     /// Events stored before attaching (a resumed session's history).
     pub history: Vec<Envelope>,
+    /// The user's earlier prompts in this project, oldest first (↑ recalls them).
+    pub prompts: Vec<String>,
 }
 
 /// One file the session changed: its contents before the session's first
@@ -51,6 +53,19 @@ pub struct ChangedFile {
     pub before: Option<String>,
     /// Contents now.
     pub after: Option<String>,
+}
+
+/// A stored session, as listed by `/sessions`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSummary {
+    /// The session.
+    pub id: SessionId,
+    /// Its title (the start of its first prompt).
+    pub title: Option<String>,
+    /// When it was last active (its latest task change, else its creation), Unix ms.
+    pub last_active: i64,
+    /// The state of its latest task.
+    pub state: Option<TaskState>,
 }
 
 /// The TUI's view of harness.
@@ -83,6 +98,19 @@ pub trait Backend: Send + Sync {
         model: ModelRef,
         effort: Option<Effort>,
     ) -> Result<Attached, String>;
+
+    /// This project's sessions that have a prompt, most recently active first.
+    ///
+    /// # Errors
+    /// A message if the store cannot be read.
+    async fn sessions(&self) -> Result<Vec<SessionSummary>, String>;
+
+    /// Opens a stored session with the model it was started with and makes it current.
+    ///
+    /// # Errors
+    /// A message if it cannot be opened (for example it is open in another
+    /// harness process, or its provider has no API key).
+    async fn open_session(&self, id: SessionId) -> Result<Attached, String>;
 
     /// Models offered by `/model` (the configured default and priced models).
     fn models(&self) -> Vec<ModelRef>;

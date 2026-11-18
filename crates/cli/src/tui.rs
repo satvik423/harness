@@ -1,6 +1,7 @@
 //! [`CliBackend`]: the TUI's [`Backend`] over the runtime and the SQLite store.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use harness_policy::ApprovalPolicy;
@@ -10,16 +11,24 @@ use harness_ports::{
 use harness_protocol::Op;
 use harness_runtime::{ApprovalMode, SessionConfig, SessionHandle, resume_session, spawn_session};
 use harness_store_sqlite::SessionLock;
-use harness_tui::{Attached, Backend, ChangedFile, SessionView};
-use harness_types::{ModelRef, Seq, SessionId};
+use harness_tui::app::PROMPT_HISTORY;
+use harness_tui::{Attached, Backend, ChangedFile, SessionSummary, SessionView};
+use harness_types::{ContentBlock, ModelRef, Seq, SessionId};
 use tokio::sync::Mutex;
 
 use crate::factory::SessionFactory;
 use crate::secrets::SystemSecrets;
-use crate::wiring::build_provider;
+use crate::sessions::recent_sessions;
+use crate::wiring::{build_provider, session_frame};
 
 /// Maximum model calls per task in the TUI.
 const TUI_MAX_TURNS: u32 = 100;
+/// How long leaving a session waits for its actor to stop.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
+
+/// Builds the provider for a model. It may block (the OS keyring), so the
+/// backend calls it on a blocking thread.
+pub type Providers = dyn Fn(&ModelRef) -> Result<Arc<dyn Provider>, String> + Send + Sync;
 
 /// The session the TUI is attached to, and its lock.
 struct Current {
@@ -31,16 +40,58 @@ struct Current {
 /// Implements the TUI's [`Backend`].
 pub struct CliBackend {
     factory: Arc<SessionFactory>,
+    providers: Arc<Providers>,
     current: Mutex<Option<Current>>,
 }
 
 impl CliBackend {
     /// A backend with no session yet; call [`CliBackend::open`] next.
+    /// Providers are built from the config with keys from the keyring or
+    /// environment.
     #[must_use]
     pub fn new(factory: Arc<SessionFactory>) -> Self {
+        let config = factory.config.clone();
+        Self::with_providers(
+            factory,
+            Arc::new(move |model: &ModelRef| {
+                build_provider(model, &config, &SystemSecrets).map_err(|e| e.to_string())
+            }),
+        )
+    }
+
+    /// Like [`CliBackend::new`], with providers built by `providers` (tests).
+    #[must_use]
+    pub fn with_providers(factory: Arc<SessionFactory>, providers: Arc<Providers>) -> Self {
         Self {
             factory,
+            providers,
             current: Mutex::new(None),
+        }
+    }
+
+    /// The provider for `model`, built off the async workers.
+    async fn provider(&self, model: &ModelRef) -> Result<Arc<dyn Provider>, String> {
+        let providers = Arc::clone(&self.providers);
+        let model = model.clone();
+        tokio::task::spawn_blocking(move || providers(&model))
+            .await
+            .map_err(|e| e.to_string())?
+    }
+
+    /// Stops a session the TUI is leaving. One that nobody typed into is
+    /// deleted, so opening and closing harness leaves no empty sessions behind.
+    async fn retire(&self, previous: Current) {
+        let _ = previous.handle.send(Op::Shutdown).await;
+        // Nothing may be written after the deletion below.
+        let _ = tokio::time::timeout(SHUTDOWN_WAIT, previous.handle.closed()).await;
+        let id = previous.id;
+        drop(previous); // releases the session lock
+        let store = &self.factory.store;
+        if let Ok(Some(record)) = store.session(id).await
+            && record.title.is_none()
+            && let Err(e) = store.delete_session(id).await
+        {
+            tracing::warn!(session = %id, error = %e, "could not delete an empty session");
         }
     }
 
@@ -110,9 +161,11 @@ impl CliBackend {
             _lock: lock,
         });
         if let Some(previous) = previous {
-            let _ = previous.handle.send(Op::Shutdown).await;
+            self.retire(previous).await;
         }
+        let prompts = self.prompts().await;
         Ok(Attached {
+            prompts,
             view: SessionView {
                 id,
                 persona: persona.name,
@@ -128,6 +181,40 @@ impl CliBackend {
         })
     }
 
+    /// The user's earlier prompts in this project, oldest first, without the
+    /// parts harness added (environment, notes, attachment references).
+    async fn prompts(&self) -> Vec<String> {
+        let messages = match self.factory.store.recent_inputs(PROMPT_HISTORY).await {
+            Ok(messages) => messages,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read the prompt history");
+                return Vec::new();
+            }
+        };
+        let mut out: Vec<String> = Vec::with_capacity(messages.len());
+        for message in messages.iter().rev() {
+            let text = message
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Text { text }
+                        if !["<environment>", "<system-note>", "<attachment "]
+                            .iter()
+                            .any(|p| text.starts_with(p)) =>
+                    {
+                        Some(text.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !text.trim().is_empty() && out.last() != Some(&text) {
+                out.push(text);
+            }
+        }
+        out
+    }
+
     async fn current_id(&self) -> Result<SessionId, String> {
         self.current
             .lock()
@@ -137,10 +224,11 @@ impl CliBackend {
             .ok_or_else(|| "no session is open".to_owned())
     }
 
-    /// Shuts the current session down (on quit).
+    /// Shuts the current session down (on quit); deletes it if nobody typed into it.
     pub async fn close(&self) {
-        if let Some(current) = self.current.lock().await.take() {
-            let _ = current.handle.send(Op::Shutdown).await;
+        let current = self.current.lock().await.take();
+        if let Some(current) = current {
+            self.retire(current).await;
         }
     }
 }
@@ -196,16 +284,42 @@ impl Backend for CliBackend {
         model: ModelRef,
         effort: Option<Effort>,
     ) -> Result<Attached, String> {
-        let factory = Arc::clone(&self.factory);
-        let for_provider = model.clone();
-        // The keyring client blocks: build the provider off the async workers.
-        let provider = tokio::task::spawn_blocking(move || {
-            build_provider(&for_provider, &factory.config, &SystemSecrets)
-                .map_err(|e| e.to_string())
-        })
-        .await
-        .map_err(|e| e.to_string())??;
+        let provider = self.provider(&model).await?;
         self.open(None, provider, model, effort).await
+    }
+
+    async fn sessions(&self) -> Result<Vec<SessionSummary>, String> {
+        let store = &self.factory.store;
+        Ok(recent_sessions(store.as_ref())
+            .await
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|r| SessionSummary {
+                id: r.record.id,
+                title: r.record.title,
+                last_active: r.last_active,
+                state: r.last_task.map(|t| t.state),
+            })
+            .collect())
+    }
+
+    async fn open_session(&self, id: SessionId) -> Result<Attached, String> {
+        let store = &self.factory.store;
+        // A session keeps the model and effort its segment was opened with (ADR-032).
+        let frame = session_frame(store.as_ref(), store.as_ref(), id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let (model, effort) = match frame {
+            Some(frame) => (
+                format!("{}/{}", frame.provider, frame.model)
+                    .parse()
+                    .map_err(|e| format!("{e}"))?,
+                frame.effort,
+            ),
+            None => (self.factory.config.default_model.clone(), None),
+        };
+        let provider = self.provider(&model).await?;
+        self.open(Some(id), provider, model, effort).await
     }
 
     fn models(&self) -> Vec<ModelRef> {
@@ -221,6 +335,29 @@ mod tests {
     use harness_store_sqlite::SqliteStore;
     use harness_testkit::FakeProvider;
     use serde_json::json;
+
+    fn factory(dir: &std::path::Path) -> Arc<SessionFactory> {
+        Arc::new(SessionFactory {
+            config: Config::default(),
+            paths: Paths {
+                user_config_dir: dir.join(".c"),
+                user_data_dir: dir.join(".d"),
+            },
+            cwd: dir.to_path_buf(),
+            trusted: false,
+            approval: None,
+            full_access: false,
+            store: Arc::new(SqliteStore::open(dir).unwrap()),
+        })
+    }
+
+    /// A backend whose providers are all `fake` (no API keys in tests).
+    fn backend_with(dir: &std::path::Path, fake: FakeProvider) -> CliBackend {
+        CliBackend::with_providers(
+            factory(dir),
+            Arc::new(move |_: &ModelRef| Ok(Arc::new(fake.clone()) as Arc<dyn Provider>)),
+        )
+    }
 
     fn backend(dir: &std::path::Path) -> CliBackend {
         CliBackend::new(Arc::new(SessionFactory {
@@ -301,11 +438,69 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn switching_sessions_keeps_used_ones_and_drops_empty_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeProvider::new().with_text_turn("hello");
+        let backend = backend_with(dir.path(), fake.clone());
+        let model: ModelRef = "openai/gpt-6-luna".parse().unwrap();
+        let mut used = backend
+            .open(None, Arc::new(fake), model.clone(), Some(Effort::Low))
+            .await
+            .unwrap();
+        let used_id = used.view.id;
+        backend
+            .send(Op::Submit {
+                session: used_id,
+                input: vec![InputItem::Text {
+                    text: "hi there".into(),
+                }],
+            })
+            .await
+            .unwrap();
+        until_done(&mut used.events).await;
+
+        // A new session nobody types into…
+        let empty = backend.new_session(model, None).await.unwrap();
+        let listed = backend.sessions().await.unwrap();
+        assert_eq!(listed.len(), 1, "sessions without a prompt are not listed");
+        assert_eq!(listed[0].id, used_id);
+        assert_eq!(listed[0].title.as_deref(), Some("hi there"));
+        assert_eq!(listed[0].state, Some(TaskState::Completed));
+
+        // …is deleted when the TUI leaves it; the used one comes back as it was.
+        let again = backend.open_session(used_id).await.unwrap();
+        assert_eq!(again.view.id, used_id);
+        assert_eq!(
+            again.prompts,
+            ["hi there"],
+            "the prompt history, harness notes left out"
+        );
+        assert_eq!(
+            again.view.effort,
+            Some(Effort::Low),
+            "effort from the stored frame"
+        );
+        assert!(
+            again
+                .history
+                .iter()
+                .any(|e| matches!(e.event, Event::AssistantMessage { .. }))
+        );
+        let store = &backend.factory.store;
+        assert!(store.session(empty.view.id).await.unwrap().is_none());
+        backend.close().await;
+        assert!(
+            store.session(used_id).await.unwrap().is_some(),
+            "used sessions stay"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reopening_a_stored_session_brings_its_history() {
         let dir = tempfile::tempdir().unwrap();
         let first = backend(dir.path());
         let fake = FakeProvider::new().with_text_turn("hello");
-        let model: ModelRef = "openai/gpt-6-luna".parse().unwrap();
+        let model: ModelRef = "openai/not-a-priced-model".parse().unwrap();
         let mut attached = first
             .open(None, Arc::new(fake), model.clone(), None)
             .await

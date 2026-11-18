@@ -20,6 +20,7 @@ the CLI wires it into the runtime.
 | `SqliteStore::open(project)` | Creates the layout, applies migrations (`PRAGMA user_version`), starts the writer thread. Blocking: call it before the async runtime or on a blocking thread |
 | implements `EventLog`, `BlobStore`, `SessionStore`, `SnapshotStore` | the storage ports |
 | `lock_session(id)`, `is_session_locked(id)`, `SessionLock`, `LockError` | the session lock (ADR-031) |
+| `recent_inputs(limit)` | the user's latest messages across the project's sessions (the TUI's prompt history) |
 | `SCHEMA_VERSION`, `STATE_DB`, `HARNESS_GITIGNORE` | constants |
 
 ## Design notes
@@ -39,4 +40,8 @@ the CLI wires it into the runtime.
   notes and errors. Every query word is quoted, so FTS syntax cannot break a search.
 - **Undo:** restores files first and forgets the turn afterwards, so an interrupted
   undo can be repeated.
+- **Delete** (`SessionStore::delete_session`, ADR-041): takes the session lock, removes
+  every row of the session in one transaction, then frees the blobs nothing references
+  (one pass over all payloads and snapshots), only if no other session is open. Files
+  are removed after their rows are committed.
 - Migration `0002_task_controls.sql` adds the task control mailbox (ADR-031).

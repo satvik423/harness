@@ -56,7 +56,9 @@ pub use registry::{DuplicateTool, ToolRegistry};
 pub use retry::{MAX_BACKOFF, MAX_RETRY_AFTER, backoff_delay};
 pub use runtime::{Clock, EventSink, SystemClock};
 pub use sandbox::{CommandSpec, Sandbox, SandboxError, SandboxMode};
-pub use session_store::{SessionRecord, SessionStatus, SessionStore, TaskControl, TaskRecord};
+pub use session_store::{
+    DeletedSession, SessionRecord, SessionStatus, SessionStore, TaskControl, TaskRecord,
+};
 pub use snapshot::{FileSnapshots, NoSnapshots, Snapshot, SnapshotStore, Undone};
 pub use store::{BlobMeta, BlobStore, EventLog, LoggedEvent, SearchHit, StoreError};
 pub use tool::{

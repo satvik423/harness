@@ -5,18 +5,19 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use harness_ports::{
-    BlobMeta, BlobStore, EventLog, LoggedEvent, SearchHit, SessionRecord, SessionStatus,
-    SessionStore, Snapshot, SnapshotStore, StoreError, TaskControl, TaskRecord, Undone,
+    BlobMeta, BlobStore, DeletedSession, EventLog, LoggedEvent, SearchHit, SessionRecord,
+    SessionStatus, SessionStore, Snapshot, SnapshotStore, StoreError, TaskControl, TaskRecord,
+    Undone,
 };
 use harness_protocol::{Envelope, Event, TaskState};
-use harness_types::{BlobRef, Seq, SessionId, TaskId};
+use harness_types::{BlobRef, Message, Seq, SessionId, TaskId};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::lock::{LockError, SessionLock};
 use crate::schema::{configure, migrate};
 use crate::text::{fts_query, searchable, title_of};
 use crate::writer::Writer;
-use crate::{backend, blobs};
+use crate::{backend, blobs, delete};
 
 /// Name of the database file in `.harness/`.
 pub const STATE_DB: &str = "state.db";
@@ -161,6 +162,34 @@ impl SqliteStore {
     #[must_use]
     pub fn is_session_locked(&self, session: SessionId) -> bool {
         matches!(self.lock_session(session), Err(LockError::Held(_)))
+    }
+
+    /// The user's latest messages across all of this project's sessions,
+    /// newest first (the TUI's prompt history).
+    ///
+    /// # Errors
+    /// A backend error, or [`StoreError::Corrupt`] for a bad payload.
+    pub async fn recent_inputs(&self, limit: usize) -> Result<Vec<Message>, StoreError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.read(move |conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT payload FROM events WHERE kind = 'user_input' ORDER BY id DESC LIMIT ?1",
+                )
+                .map_err(backend)?;
+            let mut rows = stmt.query([limit]).map_err(backend)?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next().map_err(backend)? {
+                let payload: String = row.get(0).map_err(backend)?;
+                match serde_json::from_str(&payload) {
+                    Ok(Event::UserInput { message, .. }) => out.push(message),
+                    Ok(_) => {}
+                    Err(e) => return Err(StoreError::Corrupt(format!("event payload: {e}"))),
+                }
+            }
+            Ok(out)
+        })
+        .await
     }
 
     /// Runs a read on the blocking pool with the read connection.
@@ -621,6 +650,52 @@ impl SessionStore for SqliteStore {
                 Ok(())
             })
             .await
+    }
+
+    async fn delete_session(&self, id: SessionId) -> Result<DeletedSession, StoreError> {
+        // Holding the lock keeps any harness process from opening it meanwhile.
+        let lock = match self.lock_session(id) {
+            Ok(lock) => lock,
+            Err(LockError::Held(_)) => {
+                return Err(StoreError::Conflict(format!(
+                    "session {id} is open in a harness process"
+                )));
+            }
+            Err(e) => return Err(StoreError::Backend(e.to_string())),
+        };
+        let locks = self.harness.join("locks");
+        let events = self
+            .writer
+            .run(move |conn| delete::delete_rows(conn, id))
+            .await?;
+        let others_open = {
+            let locks = locks.clone();
+            tokio::task::spawn_blocking(move || delete::other_sessions_open(&locks, id))
+                .await
+                .map_err(|e| StoreError::Backend(format!("lock check failed: {e}")))?
+        };
+        let dead = if others_open {
+            Vec::new()
+        } else {
+            self.writer.run(delete::unreferenced_blobs).await?
+        };
+        // Files go only after their rows are committed: a row never points at nothing.
+        let dir = self.blobs.clone();
+        let lock_file = lock.path().to_path_buf();
+        let freed = tokio::task::spawn_blocking(move || {
+            let freed = dead.iter().filter(|b| blobs::remove(&dir, b)).count();
+            // The lock file of a deleted session is never needed again.
+            let _ = std::fs::remove_file(lock_file);
+            drop(lock);
+            freed
+        })
+        .await
+        .map_err(|e| StoreError::Backend(format!("blob removal failed: {e}")))?;
+        tracing::info!(session = %id, events, freed, "session deleted");
+        Ok(DeletedSession {
+            events,
+            blobs_freed: u64::try_from(freed).unwrap_or(0),
+        })
     }
 
     async fn take_controls(

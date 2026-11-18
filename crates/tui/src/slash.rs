@@ -21,6 +21,8 @@ pub enum Slash {
     Undo,
     /// Start a new session.
     Clear,
+    /// List this project's sessions and switch to one.
+    Sessions,
     /// Token and cost totals.
     Cost,
     /// Context window usage.
@@ -46,6 +48,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/diff", "files this session changed"),
     ("/undo", "restore the files changed by the last turn"),
     ("/clear", "start a new session (this one stays saved)"),
+    (
+        "/sessions",
+        "this project's sessions; pick one to switch to it",
+    ),
     ("/cost", "tokens and cost per turn, task and session"),
     ("/context", "context window usage"),
     ("/quit", "leave harness (also Ctrl-D)"),
@@ -85,6 +91,7 @@ pub fn parse(input: &str) -> Option<Result<Slash, String>> {
         "diff" => Ok(Slash::Diff),
         "undo" => Ok(Slash::Undo),
         "clear" | "new" => Ok(Slash::Clear),
+        "sessions" | "switch" => Ok(Slash::Sessions),
         "cost" => Ok(Slash::Cost),
         "context" => Ok(Slash::Context),
         "quit" | "exit" => Ok(Slash::Quit),
@@ -119,8 +126,8 @@ mod tests {
     #[test]
     fn help_lists_every_command() {
         for name in [
-            "help", "model", "effort", "pause", "resume", "tasks", "diff", "undo", "clear", "cost",
-            "context", "quit",
+            "help", "model", "effort", "pause", "resume", "tasks", "diff", "undo", "clear",
+            "sessions", "cost", "context", "quit",
         ] {
             assert!(
                 COMMANDS

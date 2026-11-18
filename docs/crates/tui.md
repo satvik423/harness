@@ -9,10 +9,11 @@ The terminal UI (Phase 4, Tech spec 3.16), built purely on the session event str
 | Item | Purpose |
 |---|---|
 | `run(backend, attached, TuiOptions)` | Runs the terminal loop: raw mode, alternate screen, bracketed paste, focus events; restores the terminal on exit and on panic |
-| `Backend` | What the TUI needs: `send(Op)`, `tasks()`, `changes()`, `new_session(model, effort)`, `models()` |
-| `Attached`, `SessionView`, `ChangedFile` | A session to show: its view (persona, model, effort, profile, context limit, priced), live events and stored history |
-| `App` | All state and transitions, free of I/O: `apply(&Envelope) -> Vec<Effect>`, `key(KeyEvent) -> Vec<Action>`, `paste(&str)`, `command(Slash)` |
-| `view` | Drawing, plus overlays (`help`, `cost`, `context`, `tasks`, `diff`, `models`) |
+| `Backend` | What the TUI needs: `send(Op)`, `tasks()`, `changes()`, `new_session(model, effort)`, `sessions()`, `open_session(id)`, `models()` |
+| `Attached`, `SessionView`, `ChangedFile`, `SessionSummary` | A session to show: its view (id, persona, model, effort, profile, context limit, priced), live events, stored history and the project's earlier prompts; a stored session as `/sessions` lists it |
+| `App` | All state and transitions, free of I/O: `apply(&Envelope) -> Vec<Effect>`, `key(KeyEvent) -> Vec<Action>`, `mouse(MouseEvent)`, `paste(&str)`, `command(Slash)`, `hint_last_session` |
+| `Overlay`, `Pick` | A panel over the transcript; pickers (`/sessions`, `/model`) carry one `Action` per pickable line |
+| `view` | Drawing, plus overlays (`help`, `cost`, `context`, `tasks`, `diff`, `models`, `sessions`) |
 | `markdown::render` | Markdown to styled lines (pulldown-cmark; code blocks highlighted with syntect) |
 | `diff::unified`, `diff::patch_lines` | Unified diffs (similar) and coloured patches |
 | `ledger` | Token and cost totals per turn, task and session; `tokens`, `money` formatting |
@@ -23,7 +24,7 @@ The terminal UI (Phase 4, Tech spec 3.16), built purely on the session event str
 ## Layout
 
 ```
- harness  default · openai/gpt-6-luna · high · seg 0 · auto
+ harness  default · openai/gpt-6-luna · high · seg 0 · auto · 01KAB3XY
 you › fix the login test
 ▸ edit_file src/auth.rs ⠋ (+1 −1)
     - x < y
@@ -51,4 +52,12 @@ you › fix the login test
   hide them. The panel is sized by its wrapped height.
 - Scrolling uses ratatui's `line_count` (feature `unstable-rendered-line-info`) for the
   exact wrapped height; the transcript follows the bottom until you scroll back.
+- Finished replies keep their rendered Markdown (`Item::Assistant::rendered`), so only
+  the streaming reply is rendered on each frame.
+- Finished shell cards keep the last five lines of output; other tools keep one.
+- Prompt history: ↑ on the first line of the input recalls older prompts, ↓ on the last
+  line newer ones and then the draft. The backend loads it from the store (the user's
+  own words from `UserInput` events), so it survives restarts with no extra file.
+- The mouse wheel scrolls the open panel or the transcript. Capture is on unless
+  `ui.mouse = false` (`TuiOptions.mouse`); the terminal then needs Shift+drag to select.
 - Screens are tested with `TestBackend` and `insta` snapshots.

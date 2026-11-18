@@ -2,7 +2,7 @@
 source: crates/tui/src/view.rs
 expression: "screen(&sample(), 80, 20)"
 ---
- harness  default · openai/gpt-6-luna · high · seg 0 · auto
+ harness  default · openai/gpt-6-luna · high · seg 0 · auto · 01KAB3XY
 
 you › fix the login test
       📎  spec.md

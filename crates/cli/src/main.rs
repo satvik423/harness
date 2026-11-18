@@ -4,7 +4,7 @@
 //! - `harness run PROMPT` runs one prompt headless, in a new session (or an
 //!   existing one with `--session`), and exits with the codes in Tech spec 3.16
 //!   (0 done, 1 error, 2 budget, 3 refused, 4 approval needed, 130 interrupted).
-//! - `harness session list|show|resume|export|undo` and
+//! - `harness session list|show|resume|export|undo|delete` and
 //!   `harness task list|pause|resume|cancel` manage stored sessions (Phase 3).
 #![forbid(unsafe_code)]
 
@@ -22,8 +22,8 @@ use harness_cli::render::exit;
 use harness_cli::run::{Action, ApprovalArg, Io, Locker, RunOptions, Target, execute};
 use harness_cli::secrets::SystemSecrets;
 use harness_cli::sessions::{
-    event_line, export_jsonl, export_markdown, format_time, resolve_session, resolve_task,
-    session_table, task_table,
+    event_line, export_jsonl, export_markdown, format_time, recent_sessions, resolve_session,
+    resolve_task, session_table, task_table,
 };
 use harness_cli::telemetry::{self, LOG_ENV};
 use harness_cli::tui::CliBackend;
@@ -33,7 +33,7 @@ use harness_policy::ApprovalPolicy;
 use harness_ports::{EventLog, Provider, SessionStore, TaskControl};
 use harness_protocol::TaskState;
 use harness_store_sqlite::SqliteStore;
-use harness_tui::TuiOptions;
+use harness_tui::{Backend as _, TuiOptions};
 use harness_types::{ModelRef, Seq, SessionId};
 use tokio::sync::Notify;
 
@@ -46,8 +46,11 @@ struct Cli {
     /// Open the terminal UI and send this first prompt.
     prompt: Option<String>,
     /// Reopen a stored session in the terminal UI (id or unique prefix).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "continue_last")]
     session: Option<String>,
+    /// Reopen this project's most recently active session in the terminal UI.
+    #[arg(short = 'c', long = "continue", id = "continue_last")]
+    continue_last: bool,
     #[command(flatten)]
     flags: RunFlags,
 }
@@ -56,7 +59,7 @@ struct Cli {
 enum Command {
     /// Run one prompt without the interactive UI, then exit.
     Run(RunArgs),
-    /// List, inspect, resume, export or undo stored sessions.
+    /// List, inspect, resume, export, undo or delete stored sessions.
     #[command(subcommand)]
     Session(SessionCommand),
     /// List, pause, resume or cancel tasks.
@@ -156,6 +159,14 @@ enum SessionCommand {
         /// Session id or unique prefix.
         id: String,
     },
+    /// Delete a session and everything stored for it. Cannot be undone.
+    Delete {
+        /// Session id or unique prefix.
+        id: String,
+        /// Do not ask for confirmation.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -195,6 +206,16 @@ fn main() -> ExitCode {
     }
 }
 
+/// Which session the terminal UI opens.
+enum Start {
+    /// A new one.
+    New,
+    /// The most recently active one (`-c`).
+    Continue,
+    /// This one (`--session ID`).
+    Session(String),
+}
+
 /// What every command needs.
 struct App {
     paths: Paths,
@@ -231,13 +252,21 @@ fn real_main() -> anyhow::Result<ExitCode> {
             loaded,
             store,
         };
-        return app.tui(cli.prompt, cli.session.as_deref(), &cli.flags);
+        let start = match (cli.session, cli.continue_last) {
+            (Some(prefix), _) => Start::Session(prefix),
+            (None, true) => Start::Continue,
+            (None, false) => Start::New,
+        };
+        return app.tui(cli.prompt, start, &cli.flags);
     };
     // Looking around must not create `.harness/` in a folder that has none.
     let read_only = matches!(
         &command,
         Command::Session(
-            SessionCommand::List | SessionCommand::Show { .. } | SessionCommand::Export { .. }
+            SessionCommand::List
+                | SessionCommand::Show { .. }
+                | SessionCommand::Export { .. }
+                | SessionCommand::Delete { .. }
         ) | Command::Task(TaskCommand::List { .. } | TaskCommand::Pause { .. })
             | Command::Debug(_)
     );
@@ -381,7 +410,44 @@ impl App {
                 let id = self.find_session(&id)?;
                 self.drive(&RunFlags::offline(), Some(id), Action::Undo, false)
             }
+            SessionCommand::Delete { id, yes } => self.delete_session(&id, yes),
         }
+    }
+
+    /// `harness session delete ID [--yes]`.
+    fn delete_session(&self, prefix: &str, yes: bool) -> anyhow::Result<ExitCode> {
+        let id = self.find_session(prefix)?;
+        let mut out = std::io::stdout();
+        if !yes {
+            if !std::io::stdin().is_terminal() {
+                bail!("deleting a session cannot be undone; pass --yes to confirm");
+            }
+            let store = Arc::clone(&self.store);
+            let (record, last) =
+                block_on(async move { (store.session(id).await, store.last_seq(id).await) })?;
+            let title = record?
+                .and_then(|r| r.title)
+                .unwrap_or_else(|| "(no prompt yet)".into());
+            let events = last?.map_or(0, |s| s.0);
+            write!(
+                out,
+                "Delete session {id} \"{title}\" ({events} events)? This cannot be undone. [y/N] "
+            )?;
+            out.flush()?;
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer)?;
+            if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                writeln!(out, "kept session {id}")?;
+                return Ok(ExitCode::SUCCESS);
+            }
+        }
+        let deleted = block_on(self.store.delete_session(id))??;
+        writeln!(
+            out,
+            "deleted session {id} ({} events, {} stored files freed)",
+            deleted.events, deleted.blobs_freed
+        )?;
+        Ok(ExitCode::SUCCESS)
     }
 
     fn task(self, cmd: TaskCommand) -> anyhow::Result<ExitCode> {
@@ -465,41 +531,51 @@ impl App {
         }
     }
 
-    /// The terminal UI (`harness [PROMPT]`, `harness --session ID`).
+    /// The terminal UI (`harness [PROMPT]`, `harness -c`, `harness --session ID`).
     fn tui(
         self,
         prompt: Option<String>,
-        session: Option<&str>,
+        start: Start,
         flags: &RunFlags,
     ) -> anyhow::Result<ExitCode> {
-        let session = match session {
-            Some(prefix) => Some(self.find_session(prefix)?),
-            None => None,
+        let mut notice = None;
+        let session = match start {
+            Start::New => None,
+            Start::Session(prefix) => Some(self.find_session(&prefix)?),
+            Start::Continue => {
+                let recent = block_on(recent_sessions(self.store.as_ref()))??;
+                if recent.is_empty() {
+                    notice = Some(
+                        "no earlier session in this project to continue; this is a new one".into(),
+                    );
+                }
+                recent.first().map(|r| r.record.id)
+            }
         };
         let config = &self.loaded.config;
-        let stored_model = match session {
-            Some(id) => block_on(session_model(self.store.as_ref(), self.store.as_ref(), id))??,
-            None => None,
-        };
-        let model = stored_model
-            .or_else(|| flags.model.clone())
+        let model = flags
+            .model
+            .clone()
             .unwrap_or_else(|| config.default_model.clone());
-        // Read the keyring before the main runtime starts: the keyring client blocks.
-        let provider = build_provider(&model, config, &SystemSecrets)?;
         let show_thinking = config.ui.show_thinking;
+        let mouse = config.ui.mouse;
         let factory = Arc::new(self.factory(flags));
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
         let result = runtime.block_on(async move {
             let backend = Arc::new(CliBackend::new(factory));
-            let attached = backend
-                .open(session, provider, model, None)
-                .await
-                .map_err(anyhow::Error::msg)?;
+            // A stored session keeps its own model; --model applies to new ones.
+            let attached = match session {
+                Some(id) => backend.open_session(id).await,
+                None => backend.new_session(model, None).await,
+            }
+            .map_err(anyhow::Error::msg)?;
             let options = TuiOptions {
                 first_prompt: prompt,
                 show_thinking,
+                notice,
+                mouse,
             };
             let ran = harness_tui::run(Arc::clone(&backend) as _, attached, options).await;
             backend.close().await;

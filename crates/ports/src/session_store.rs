@@ -75,6 +75,15 @@ pub enum TaskControl {
     Cancel,
 }
 
+/// What [`SessionStore::delete_session`] removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DeletedSession {
+    /// Events removed from the log.
+    pub events: u64,
+    /// Stored files (blobs) freed because nothing references them any more.
+    pub blobs_freed: u64,
+}
+
 /// The session catalogue and the task-control mailbox.
 #[async_trait]
 pub trait SessionStore: Send + Sync {
@@ -107,6 +116,19 @@ pub trait SessionStore: Send + Sync {
     /// # Errors
     /// [`StoreError::NotFound`] for an unknown task, or a backend error.
     async fn request_control(&self, task: TaskId, control: TaskControl) -> Result<(), StoreError>;
+
+    /// Deletes a session and everything stored for it: events, tasks, usage,
+    /// snapshots and control requests. Blobs that no other session references
+    /// are freed too, when that is safe (the store decides).
+    ///
+    /// This is a user action (`harness session delete`); it is the only way
+    /// events ever leave the log (ADR-041).
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] for an unknown session, [`StoreError::Conflict`]
+    /// if the session is open in a harness process or other sessions were
+    /// forked from it, or a backend error.
+    async fn delete_session(&self, id: SessionId) -> Result<DeletedSession, StoreError>;
 
     /// Removes and returns the pending control requests for a session, oldest first.
     ///
